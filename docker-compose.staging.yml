@@ -51,7 +51,7 @@ services:
         target: /app/external-media
         read_only: true
   proxy:
-    ports: ["127.0.0.1:${HTTP_PORT:-8080}:80"]
+    ports: !override ["127.0.0.1:${HTTP_PORT:-8080}:80"]
   backup:
     image: postgres:16-alpine
     profiles: [tools]
