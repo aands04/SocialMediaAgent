@@ -13,6 +13,16 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+  migrate:
+    build: .
+    command: [/app/scripts/migrate.sh]
+    env_file: .env
+    environment:
+      DATABASE_URL: auto
+    secrets: [db_password]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: "no"
   web:
     build: .
     env_file: .env
@@ -21,6 +31,7 @@ services:
     secrets: [db_password]
     depends_on:
       db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
     volumes:
       - generated:/app/data/generated
       - uploads:/app/data/uploads
@@ -45,6 +56,7 @@ services:
     secrets: [db_password]
     depends_on:
       db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
     volumes:
       - generated:/app/data/generated
       - uploads:/app/data/uploads

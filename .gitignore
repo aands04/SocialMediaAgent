@@ -10,3 +10,11 @@ data/uploads/*
 !data/generated/.gitkeep
 !data/uploads/.gitkeep
 social_media_agent.egg-info/
+.env.staging
+social_media_agent.egg-info/
+data/logs/*
+!data/logs/.gitkeep
+data/backups/*
+!data/backups/.gitkeep
+data/provider-snapshots/*
+!data/provider-snapshots/.gitkeep

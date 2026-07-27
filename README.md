@@ -77,3 +77,6 @@ Der Modus ist standardmäßig aus und verändert weder Spiele noch Beiträge. Nu
 
 ## Erster Proxmox-Test
 Benötigt werden eine Linux-VM mit Docker Engine/Compose v2, DNS oder Tailscale, ein als read-only eingebundenes SMB-Verzeichnis, ausreichend beschreibbare Docker-Volumes, zufällige Session-/DB-Secrets und ein TLS-Terminierungspunkt. Zuerst Backupziel und Restore prüfen, dann `docker compose config`, Images bauen, Migration/Healthchecks abwarten und den obigen Ablauf vollständig mit Dry-Run durchführen. Meta/OpenAI bleiben deaktiviert. Der Web-/Worker-Entrypoint führt `alembic upgrade head` aus; PostgreSQL-Passwort wird ausschließlich aus Docker Secret gelesen.
+
+## Produktionsnahes Proxmox-Staging
+Die abgesicherte Staging-Konfiguration, der einmalige Migrationsprozess, Docker-Secrets, read-only SMB, Systemprüfung, idempotente Dry-Run-Generalprobe, Provider-Diagnose sowie Backup-/Restore-Probe sind in [`docs/STAGING.md`](docs/STAGING.md) beschrieben. Einstieg: `.env.staging.example` kopieren, ausschließlich zufällige Secret-Dateien anlegen, `docker-compose.yml` mit `docker-compose.staging.yml` starten und anschließend `scripts/staging-check.sh` sowie `scripts/staging-smoke-test.sh` ausführen. Das Staging-Override erzwingt Dry-Run und entfernt Meta-Tokens.

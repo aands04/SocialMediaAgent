@@ -27,5 +27,12 @@ def capture(db: Session, team: Team, settings: Settings) -> ProviderSnapshot:
     try:
         parsed=[{"external_id":x.external_id,"home_team":x.home_team,"away_team":x.away_team,"kickoff":x.kickoff.isoformat(),"status":x.status} for x in FussballDeProvider().parse(response.text)]
     except ProviderError as exc: error=f"Strukturänderung vermutet: {exc}"
-    snapshot=ProviderSnapshot(team_id=team.id,source_url=team.fussball_url,status_code=response.status_code,checksum=checksum,relative_path=str(relative),parser_result={"games":parsed},error=error)
+    fixture_ids=[]
+    fixture=Path("tests/fixtures/games.html")
+    if fixture.is_file():
+        try: fixture_ids=[x.external_id for x in FussballDeProvider().parse(fixture.read_text())]
+        except ProviderError: pass
+    live_ids=[x["external_id"] for x in parsed]
+    comparison={"only_live":sorted(set(live_ids)-set(fixture_ids)),"only_fixture":sorted(set(fixture_ids)-set(live_ids)),"same_count":len(live_ids)==len(fixture_ids)}
+    snapshot=ProviderSnapshot(team_id=team.id,source_url=team.fussball_url,status_code=response.status_code,checksum=checksum,relative_path=str(relative),parser_result={"games":parsed,"fixture_comparison":comparison},error=error)
     db.add(snapshot); db.commit(); return snapshot

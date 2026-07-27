@@ -5,7 +5,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -14,6 +14,7 @@ from app.auth.service import authenticate
 from app.config import get_settings
 from app.db import get_db
 from app.models import Game, Post, PublicationJob, Team, User
+from app.monitoring.service import system_status
 from app.web import csrf_token, current_user
 
 settings=get_settings()
@@ -30,10 +31,12 @@ def csrf(request: Request):
     return csrf_token(request)
 @app.get("/health")
 def health(db:Session=Depends(get_db)):
-    checks={"web":"ok","database":"error","smb":"ok" if settings.media_root.is_dir() else "error","openai":"configured" if settings.openai_api_key else "mock","meta":"dry-run" if settings.publisher_mode!="live" else "configured" if settings.meta_access_token else "error","fussball_provider":"configured"}
-    try: db.execute(text("select 1")); checks["database"]="ok"
-    except Exception: pass
-    return {"status":"ok" if checks["database"]=="ok" else "degraded","checks":checks}
+    report=system_status(db,settings)
+    database="ok" if report["checks"]["postgresql"]["ok"] else "error"
+    return {"status":"ok" if report["ok"] else "degraded","checks":{"web":"ok","database":database,"worker":"ok" if report["checks"]["worker"]["ok"] else "error"}}
+@app.get("/system",response_class=HTMLResponse)
+def system_dashboard(request:Request,current:User=Depends(current_user),db:Session=Depends(get_db)):
+    return templates.TemplateResponse(request,"system.html",{"user":current,"report":system_status(db,settings),"csrf":csrf(request),"title":"Systemstatus"})
 @app.get("/login",response_class=HTMLResponse)
 def login_form(request:Request): return templates.TemplateResponse(request,"login.html",{"csrf":csrf(request)})
 @app.post("/login")

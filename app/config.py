@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     max_publish_attempts: int = 5
     fussball_live_test_enabled: bool = False
     provider_snapshot_root: Path = Path("data/provider-snapshots")
+    log_root: Path = Path("data/logs")
+    backup_root: Path = Path("data/backups")
+    text_generator_mode: str = "mock"
 
 @lru_cache
 def get_settings() -> Settings:

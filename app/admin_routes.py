@@ -141,7 +141,9 @@ def scan_media(team_id:str,request:Request,csrf_token_value:str=Form(alias="csrf
     seen=set()
     for path in folder.rglob("*"):
         if not path.is_file() or path.is_symlink() or path.suffix.lower() not in {".jpg",".jpeg",".png",".webp"}: continue
-        relative=str(path.relative_to(settings.media_root)); seen.add(relative); content=path.read_bytes(); stat=path.stat()
+        relative=str(path.relative_to(settings.media_root)); before=path.stat(); content=path.read_bytes(); after=path.stat()
+        if before.st_mtime_ns!=after.st_mtime_ns or before.st_size!=after.st_size: raise HTTPException(409,f"Datei wurde während des Scans verändert: {relative}")
+        seen.add(relative); stat=after
         asset=db.scalar(select(MediaAsset).where(MediaAsset.team_id==team.id,MediaAsset.relative_path==relative))
         values={"filename":path.name,"mime_type":mimetypes.guess_type(path.name)[0] or "application/octet-stream","size":stat.st_size,"checksum":hashlib.sha256(content).hexdigest(),"mtime":datetime.fromtimestamp(stat.st_mtime,timezone.utc),"available":True}
         if asset:
@@ -273,3 +275,52 @@ def generate_game_post(game_id:str,request:Request,csrf_token_value:str=Form(ali
     try: post=create_post(db,game,team,FixtureTextGenerator(),Renderer(settings.generated_root),post_type)
     except ValueError as e: raise HTTPException(422,str(e)) from e
     audit(db,current,"post.generated_manually","post",post.id,game.team_id,{"generator":"fixture"}); db.commit(); return redirect(f"/posts/{post.id}","Beitrag lokal erzeugt")
+
+@router.get("/diagnostics",response_class=HTMLResponse)
+def diagnostics(request:Request,current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.models import ProviderSnapshot
+    require_admin(current); teams=db.scalars(select(Team).where(Team.archived_at.is_(None))).all(); snapshots=db.scalars(select(ProviderSnapshot).order_by(ProviderSnapshot.fetched_at.desc()).limit(100)).all(); return render(request,"diagnostics.html",current,teams=teams,snapshots=snapshots,title="Provider-Diagnose")
+
+@router.post("/diagnostics/fussball/{team_id}")
+def run_diagnostic(team_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),confirmation:str=Form(),current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.games.live_test import LiveTestDisabled, capture
+    check_csrf(request,csrf_token_value); require_admin(current)
+    if confirmation!="NUR LESEN": raise HTTPException(422,"Bestätigung 'NUR LESEN' erforderlich")
+    team=db.get(Team,team_id)
+    if not team: raise HTTPException(404)
+    try: snapshot=capture(db,team,settings)
+    except LiveTestDisabled as exc: raise HTTPException(409,str(exc)) from exc
+    audit(db,current,"provider.snapshot_captured","provider_snapshot",snapshot.id,team.id,{"checksum":snapshot.checksum}); db.commit(); return redirect("/diagnostics","Diagnose-Snapshot gespeichert")
+
+@router.get("/diagnostics/{snapshot_id}/html")
+def download_snapshot(snapshot_id:str,current=Depends(current_user),db:Session=Depends(get_db)):
+    from fastapi.responses import FileResponse
+
+    from app.models import ProviderSnapshot
+    require_admin(current); snapshot=db.get(ProviderSnapshot,snapshot_id)
+    if not snapshot: raise HTTPException(404)
+    root=settings.provider_snapshot_root.resolve(); path=(root/snapshot.relative_path).resolve()
+    if root not in path.parents or not path.is_file(): raise HTTPException(404,"Snapshot-Datei fehlt oder ist unvollständig")
+    return FileResponse(path,media_type="text/html",filename=f"fussball-{snapshot.checksum[:12]}.html")
+
+@router.post("/diagnostics/{snapshot_id}/fixture")
+def snapshot_to_fixture(snapshot_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),name:str=Form(),current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.models import ProviderSnapshot
+    check_csrf(request,csrf_token_value); require_admin(current)
+    if not name.replace("-","").replace("_","").isalnum(): raise HTTPException(422,"Ungültiger Fixture-Name")
+    snapshot=db.get(ProviderSnapshot,snapshot_id); root=settings.provider_snapshot_root.resolve()
+    if not snapshot: raise HTTPException(404)
+    source=(root/snapshot.relative_path).resolve()
+    if root not in source.parents or not source.is_file(): raise HTTPException(404,"Snapshot-Datei fehlt")
+    target=Path("data/uploads/provider-fixtures")/f"{name}.html"; target.parent.mkdir(parents=True,exist_ok=True)
+    if target.exists(): raise HTTPException(409,"Fixture existiert bereits")
+    target.write_bytes(source.read_bytes()); audit(db,current,"provider.fixture_created","provider_snapshot",snapshot.id,snapshot.team_id,{"fixture":str(target)}); db.commit(); return redirect("/diagnostics","Fixture durch Administrator übernommen")
+
+@router.get("/posts/{post_id}/media/{job_id}")
+def post_media(post_id:str,job_id:str,current=Depends(current_user),db:Session=Depends(get_db)):
+    from fastapi.responses import FileResponse
+    item=db.get(Post,post_id); job=db.get(PublicationJob,job_id)
+    if not item or not job or job.post_id!=item.id: raise HTTPException(404)
+    require(current,db,"view",item.team_id); path=Path(job.media_path).resolve(); root=settings.generated_root.resolve()
+    if root not in path.parents or not path.is_file(): raise HTTPException(404,"Grafik fehlt")
+    return FileResponse(path,media_type="image/png")
