@@ -1,1 +1,61 @@
 # SocialMediaAgent
+
+Sicherheitsorientiertes, selbst gehostetes MVP für automatisch erzeugte, **immer manuell freizugebende** Fußball-Instagram-Beiträge. UI und Betriebsdokumentation sind deutsch; externe FUSSBALL.DE-, OpenAI-, SMB- und Meta-Zugriffe bleiben standardmäßig Fixture/Mock/Dry-Run.
+
+## Enthalten
+- FastAPI/Jinja2/HTMX-Dashboard, Session-Login, Argon2, CSRF, RBAC und Mannschafts-Scope
+- SQLAlchemy-2-Modell, Alembic, PostgreSQL/SQLite, Optimistic Locking und Auditmodell
+- austauschbarer FUSSBALL.DE-HTML-Provider ohne erfundene API
+- sicherer lokaler bzw. host-gemounteter SMB-Speicher und einmalige Bildreservierung
+- automatische Feed-/Multi-Story-Erzeugung (1080×1350/1080×1920), Fakten-only Textgenerator
+- versionierte Freigaben, einzelne Publishing-Aufträge, Not-Aus, Idempotenz und unklare Plattformzustände
+- offizieller Graph-API-Publisher plus Mock/Dry-Run; Live-Modus ist mehrfach opt-in
+- Docker Compose mit Web, Worker, PostgreSQL, Nginx, Healthchecks, Volumes, Backup/Restore
+
+## Lokal starten
+Python 3.12 vorausgesetzt:
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -e '.[dev]'
+cp .env.example .env                 # lokal DATABASE_URL auf sqlite:///./data/app.db setzen
+alembic upgrade head
+python scripts/seed.py
+uvicorn app.main:app --reload
+```
+Dann `http://localhost:8000`, initial `admin@example.invalid` / `ChangeMe-Immediately!`; sofort ändern. Tests: `pytest`; Lint: `ruff check .`.
+
+Docker:
+```bash
+mkdir -p secrets && openssl rand -base64 32 > secrets/db_password.txt
+cp .env.example .env                 # DB-Passwort in DATABASE_URL passend setzen
+PUBLISHER_MODE=dry-run GLOBAL_PUBLISH_ENABLED=false docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+## Administration
+1. **Instagram-Seite:** internen Namen, Username und offizielle Konto-ID anlegen; Token ausschließlich als Docker Secret/Environment. Nach offizieller Verbindungsprüfung aktivieren. Mehrere Teams dürfen dieselbe Seite nutzen; der Beitrag snapshotet sein Ziel.
+2. **Mannschaft:** Namen/Slug, plausible `https://www.fussball.de/...`-URL, aktive Seite, relativen Medienunterordner, vorhandene Vorlagen/Fonts, Farben und Zeitzone anlegen. Löschen ist Soft-Delete/Archivierung.
+3. **Rechte:** Rolle und Mannschaftszuordnung sind getrennt. `all_teams=false` verlangt explizite `UserTeam`-Zeilen; direkte URLs und Services prüfen serverseitig.
+4. **Zeitregeln:** Feed als Minuten vor Anpfiff; Story-Regeln referenzieren Anpfiff, geplantes Ende, Ergebniserkennung, Freigabe oder Folgetag, mit Offset/fester Uhrzeit. Jede Regel erzeugt einen Job; Kollisionen werden nicht unbemerkt dupliziert.
+5. **Medien:** SMB-Share auf dem Host mounten (siehe unten), Team-Unterordner scannen. Ein Bild wird atomar einem Spiel reserviert und darf in dessen Feed/Storys wiederverwendet werden. Ohne Bild entsteht eine neutrale Grafik mit Prüfhinweis.
+6. **Workflow:** Worker synchronisiert Spiele, erzeugt Beiträge automatisch, rendert alle Dateien und Text. Freigeber prüft Version, Ziel und abgelaufene Zeiten. Jede relevante Änderung setzt offene Jobs auf erneute Freigabe.
+7. **Fehler:** Transiente Fehler werden begrenzt wiederholt. Token-/Rechtefehler stoppen. Timeout/unklare Antwort wird `uncertain`; Status muss bei Meta geprüft werden, bevor jemand erneut startet.
+
+## SMB
+Auf Linux z. B. `/etc/fstab` mit einer nur für root lesbaren Credentials-Datei verwenden:
+```text
+//server/share /mnt/social-media-assets cifs credentials=/root/.smb-social,ro,nosuid,nodev,noexec,uid=10001,gid=10001,file_mode=0440,dir_mode=0550 0 0
+```
+`MEDIA_HOST_ROOT=/mnt/social-media-assets`, Containerziel `/app/external-media`. Die Anwendung speichert weder SMB-Benutzer noch Passwort. Test: `findmnt /mnt/social-media-assets` und `/health`.
+
+## Meta-Verbindung
+Nur offizielle Meta-/Instagram-Schnittstellen verwenden. Konto-ID, passende professionelle Kontoart, App Review/Berechtigungen, öffentlich abrufbare Medien-URL und gültige Tokens gemäß **aktuell offizieller** Dokumentation konfigurieren. Niemals Instagram-Passwörter speichern. Erst nach Staging-Test `PUBLISHER_MODE=live` und separat `GLOBAL_PUBLISH_ENABLED=true`; zusätzlich müssen Seite, Team, Beitrag und Job aktiv/freigegeben sein. Der Containerstatus wird vor `media_publish` geprüft; Plattformbestätigung ist zwingend.
+
+## Produktion, Betrieb und Umzug
+Proxmox: private VM, Compose Production Override und Zugriff vorzugsweise Tailscale/VPN; Proxy nur an Loopback. Cloud: Firewall nur 80/443, Nginx hinter Caddy/Traefik mit automatischem TLS oder diesen Proxy um TLS ergänzen. Niemals Uvicorn-Reload öffentlich exponieren. Updates: Backup, Image bauen, `alembic upgrade head`, Compose rolling restart, Healthcheck prüfen.
+
+Backup: `scripts/backup.sh`; Restore in Wartungsmodus: `scripts/restore.sh BACKUP`. Enthalten sind DB, Uploads, Vorschauen/Generiertes, Vorlagen und Compose-Konfiguration – keine `.env`/Secrets. SMB-Originale separat am Fileserver sichern. Bei Umzug: Backup übertragen, SMB neu mounten, Secrets neu setzen, Restore, Domain/TLS umstellen und alle Verbindungen im Dry-Run testen.
+
+Not-Aus: `system_settings.key='emergency_stop'`, `value={"enabled":true}` stoppt noch nicht begonnene Jobs. Laufende/unklare Vorgänge zuerst bei Meta abgleichen. Weitere Schalter existieren global, je Seite, Team, Beitrag und Job.
+
+## Grenzen des MVP
+Der FUSSBALL.DE-Parser ist fixture-getestet, muss aber bei HTML-Änderungen angepasst werden. Der lokale Renderer ist reproduzierbar und maßhaltig, verwendet im MVP Pillow; die Port-Grenze erlaubt einen Playwright-Renderer. Die UI deckt Übersichten ab; komplexe Administration ist über die abgesicherten Service-Schichten weiter auszubauen. Reale OpenAI-/Meta-/FUSSBALL.DE-Aufrufe wurden nicht durchgeführt. Details und Zustände: [ARCHITECTURE.md](ARCHITECTURE.md).

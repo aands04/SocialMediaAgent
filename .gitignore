@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.env
+secrets/
+data/*.db
+data/generated/*
+data/uploads/*
+!data/generated/.gitkeep
+!data/uploads/.gitkeep
+social_media_agent.egg-info/
