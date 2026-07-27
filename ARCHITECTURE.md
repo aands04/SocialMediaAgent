@@ -35,3 +35,8 @@ Neue Spielprovider, Mount-/Objektspeicher, Browser-Renderer, Benachrichtigungska
 
 ## Externe Schnittstellenprüfung
 Ein Abruf der offiziellen Meta-Dokumentation war am 27.07.2026 aus der isolierten Tool-Umgebung wegen HTTP 401 nicht möglich. Vor Live-Aktivierung müssen Betreiber die aktuelle offizielle Meta-Dokumentation zu Content Publishing, Stories, erforderlichen Berechtigungen, App Review, Kontoart, Tokenlaufzeiten und der verwendeten Graph-Version erneut prüfen. Die App behauptet daher keine fest verdrahtete, dauerhaft gültige Berechtigungsliste und bleibt standardmäßig im Dry-Run.
+
+## Bedienbare Testversion
+`admin_routes` stellt CSRF-geschützte, serverseitig autorisierte Workflows für Mannschaften, Seiten, Benutzer/Teamzuordnungen, SMB-Scan, Medienstatus, Fonts, versionierte Designs, Ankündigungs-/Ergebnisregeln, Multi-Story-Regeln, Beitragsprüfung/Freigabe/Ablehnung und Auftragsabbruch bereit. Versionsfelder verhindern unbemerkte parallele Statusänderungen. Verstrichene Jobs werden sichtbar markiert und gemäß Teamregel sofort, manuell, übersprungen oder am nächsten Story-Termin behandelt.
+
+Der kontrollierte Live-Diagnosemodus speichert öffentlich abgerufenes FUSSBALL.DE-HTML unverändert mit Prüfsumme und Parserdiagnose. Er ist standardmäßig deaktiviert und besitzt keinerlei Schreibpfad zu Spielen, Beiträgen oder Veröffentlichungen.

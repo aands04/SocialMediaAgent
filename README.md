@@ -59,3 +59,21 @@ Not-Aus: `system_settings.key='emergency_stop'`, `value={"enabled":true}` stoppt
 
 ## Grenzen des MVP
 Der FUSSBALL.DE-Parser ist fixture-getestet, muss aber bei HTML-Änderungen angepasst werden. Der lokale Renderer ist reproduzierbar und maßhaltig, verwendet im MVP Pillow; die Port-Grenze erlaubt einen Playwright-Renderer. Die UI deckt Übersichten ab; komplexe Administration ist über die abgesicherten Service-Schichten weiter auszubauen. Reale OpenAI-/Meta-/FUSSBALL.DE-Aufrufe wurden nicht durchgeführt. Details und Zustände: [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Lokaler End-to-End-Test (ohne externe Dienste)
+1. `.env.example` nach `.env` kopieren, `PUBLISHER_MODE=dry-run`, `GLOBAL_PUBLISH_ENABLED=false`, `FUSSBALL_LIVE_TEST_ENABLED=false` beibehalten und ein zufälliges Session-Secret setzen.
+2. Einen lokalen Medienbaum `data/external-media/erste/` mit freigegebenen JPG/PNG-Dateien anlegen.
+3. Migrationen und Seed ausführen, Anwendung starten und anmelden.
+4. Im Dashboard eine Instagram-Seite anlegen und über **Mock-Verbindung prüfen** verbinden. Publishing bleibt dabei deaktiviert.
+5. Mannschaft mit dem relativen Ordner `erste` anlegen, Medien neu einlesen, Ankündigungs-/Ergebnisregeln sowie mindestens zwei Story-Zeitpunkte konfigurieren.
+6. Ein Fixture-Spiel und einen automatischen Beitrag über die vorhandenen Services/Worker erzeugen. Im Dashboard Feed, Text, Story-Aufträge und abgelaufene Zeitpunkte prüfen.
+7. Beitrag ausdrücklich freigeben. Für die Verarbeitung `GLOBAL_PUBLISH_ENABLED=true` nur in dieser lokalen Dry-Run-Sitzung setzen. `DryRunPublisher` erzeugt ausschließlich `dry-run:*`-IDs und sendet nichts an Meta.
+8. Not-Aus aktivieren und verifizieren, dass ein weiterer Auftrag ohne Versuch blockiert wird. Danach Testdatenbank und erzeugte Medien löschen.
+
+Automatisierter Browser-/Integrationslauf: `pytest tests/test_dashboard.py`. Er deckt Anmeldung, CSRF, Instagram-Seite, Mock-Verbindung, Mannschaft, Story-Regel, Benutzeranlage, Teamrechte und verweigerte Administratorseiten ab.
+
+## Kontrollierter FUSSBALL.DE-Live-Strukturtest
+Der Modus ist standardmäßig aus und verändert weder Spiele noch Beiträge. Nur nach bewusster Aktivierung mit `FUSSBALL_LIVE_TEST_ENABLED=true` kann `python scripts/fussball_live_test.py TEAM_ID` öffentliches HTML lesen. Jeder Abruf wird unverändert und mit SHA-256 unter `data/provider-snapshots/` gespeichert; Parsergebnis oder ein klarer Strukturänderungsfehler landet zusätzlich in `provider_snapshots`. Der Modus plant und veröffentlicht nichts. Abrufintervall und rechtliche/robots-bezogene Vorgaben sind vor Einsatz zu prüfen.
+
+## Erster Proxmox-Test
+Benötigt werden eine Linux-VM mit Docker Engine/Compose v2, DNS oder Tailscale, ein als read-only eingebundenes SMB-Verzeichnis, ausreichend beschreibbare Docker-Volumes, zufällige Session-/DB-Secrets und ein TLS-Terminierungspunkt. Zuerst Backupziel und Restore prüfen, dann `docker compose config`, Images bauen, Migration/Healthchecks abwarten und den obigen Ablauf vollständig mit Dry-Run durchführen. Meta/OpenAI bleiben deaktiviert. Der Web-/Worker-Entrypoint führt `alembic upgrade head` aus; PostgreSQL-Passwort wird ausschließlich aus Docker Secret gelesen.

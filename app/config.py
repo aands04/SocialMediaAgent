@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Berlin"
     session_max_age: int = 3600
     max_publish_attempts: int = 5
+    fussball_live_test_enabled: bool = False
+    provider_snapshot_root: Path = Path("data/provider-snapshots")
 
 @lru_cache
 def get_settings() -> Settings:

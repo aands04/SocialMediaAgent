@@ -51,3 +51,45 @@ class SystemSetting(Base):
     __tablename__="system_settings"; key:Mapped[str]=mapped_column(String(100),primary_key=True); value:Mapped[dict]=mapped_column(JSON,default=dict); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now)
 class Notification(Base):
     __tablename__="notifications"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); team_id:Mapped[str|None]=mapped_column(ForeignKey("teams.id")); kind:Mapped[str]=mapped_column(String(80)); message:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); read:Mapped[bool]=mapped_column(Boolean,default=False)
+
+class FontAsset(Base, Timestamped):
+    __tablename__ = "font_assets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(160), unique=True)
+    family: Mapped[str] = mapped_column(String(160))
+    relative_path: Mapped[str] = mapped_column(String(800), unique=True)
+    mime_type: Mapped[str] = mapped_column(String(80))
+    size: Mapped[int] = mapped_column(Integer)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DesignTemplate(Base, Timestamped):
+    __tablename__ = "design_templates"
+    __table_args__ = (UniqueConstraint("name", "version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(160))
+    post_type: Mapped[str] = mapped_column(String(30))
+    media_kind: Mapped[str] = mapped_column(String(10))
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    html_template: Mapped[str] = mapped_column(Text)
+    css: Mapped[str] = mapped_column(Text)
+    defaults: Mapped[dict] = mapped_column(JSON, default=dict)
+    required_assets: Mapped[list] = mapped_column(JSON, default=list)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProviderSnapshot(Base):
+    __tablename__ = "provider_snapshots"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id"))
+    source_url: Mapped[str] = mapped_column(String(1000))
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    status_code: Mapped[int] = mapped_column(Integer)
+    checksum: Mapped[str] = mapped_column(String(64))
+    relative_path: Mapped[str] = mapped_column(String(800), unique=True)
+    parser_result: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
