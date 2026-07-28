@@ -34,6 +34,8 @@ def story_time(rule:StoryRule,game:Game,approved_at:datetime|None=None)->datetim
         h,m=map(int,rule.fixed_time.split(":")); result=result.replace(hour=h,minute=m,second=0,microsecond=0)
     return result
 def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:Renderer,post_type="announcement")->Post:
+    if game.status=="provisional" or game.overrides.get("automation_blocked"):
+        raise ValueError("Vorläufige Spiele sind für die Beitragserstellung gesperrt")
     existing=db.scalar(select(Post).where(Post.game_id==game.id,Post.post_type==post_type,Post.active_key=="active"))
     if existing:return existing
     page=db.get(InstagramPage,team.instagram_page_id); warnings=[]

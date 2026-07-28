@@ -324,3 +324,33 @@ def post_media(post_id:str,job_id:str,current=Depends(current_user),db:Session=D
     require(current,db,"view",item.team_id); path=Path(job.media_path).resolve(); root=settings.generated_root.resolve()
     if root not in path.parents or not path.is_file(): raise HTTPException(404,"Grafik fehlt")
     return FileResponse(path,media_type="image/png")
+
+@router.get("/diagnostics/{snapshot_id}/import",response_class=HTMLResponse)
+def snapshot_import_preview(snapshot_id:str,request:Request,current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.games.importer import preview_snapshot
+    from app.models import ProviderSnapshot
+    require_admin(current); snapshot=db.get(ProviderSnapshot,snapshot_id)
+    if not snapshot: raise HTTPException(404)
+    team=db.get(Team,snapshot.team_id)
+    return render(request,"diagnostic_import.html",current,snapshot=snapshot,team=team,games=preview_snapshot(snapshot),title="Spielübernahme prüfen")
+
+@router.post("/diagnostics/{snapshot_id}/import")
+def snapshot_import_confirm(snapshot_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),confirmation:str=Form(),current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.games.importer import SnapshotImportError, import_snapshot
+    from app.models import ProviderSnapshot
+    check_csrf(request,csrf_token_value); require_admin(current)
+    if confirmation!="SPIELE ÜBERNEHMEN": raise HTTPException(422,"Explizite Bestätigung 'SPIELE ÜBERNEHMEN' erforderlich")
+    snapshot=db.get(ProviderSnapshot,snapshot_id)
+    if not snapshot: raise HTTPException(404)
+    try: result=import_snapshot(db,snapshot,current)
+    except SnapshotImportError as exc: raise HTTPException(422,str(exc)) from exc
+    return redirect("/diagnostics",f"Übernahme abgeschlossen: {result['created']} neu, {result['updated']} aktualisiert, {result['unchanged']} unverändert")
+
+@router.post("/games/{game_id}/confirm-provisional")
+def confirm_provisional_game(game_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),confirmation:str=Form(),current=Depends(current_user),db:Session=Depends(get_db)):
+    check_csrf(request,csrf_token_value); require_admin(current); game=db.get(Game,game_id)
+    if not game: raise HTTPException(404)
+    if game.status!="provisional": raise HTTPException(409,"Spiel ist nicht als vorläufig markiert")
+    if confirmation!="VORLÄUFIGES SPIEL BESTÄTIGEN": raise HTTPException(422,"Explizite Bestätigung erforderlich")
+    game.status="scheduled"; game.overrides={**game.overrides,"automation_blocked":False,"provisional_confirmed_by":current.id,"provisional_confirmed_at":datetime.now(timezone.utc).isoformat()}; game.version+=1
+    audit(db,current,"game.provisional_confirmed","game",game.id,game.team_id,{"external_id":game.external_id}); db.commit(); return redirect("/games","Vorläufiges Spiel manuell bestätigt")

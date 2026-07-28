@@ -7,8 +7,10 @@ from sqlalchemy.orm import sessionmaker
 
 from app.auth.service import hash_password
 from app.db import Base, get_db
+from app.games.live_test import serialize
+from app.games.provider import FussballDeProvider
 from app.main import app
-from app.models import InstagramPage, Role, Team, User
+from app.models import Game, InstagramPage, ProviderSnapshot, Role, Team, User
 
 
 @pytest.fixture
@@ -51,6 +53,14 @@ def test_dashboard_admin_flow(browser):
     with factory() as db: game=db.query(__import__("app.models",fromlist=["Game"]).Game).one()
     result=client.post(f"/games/{game.id}/generate",data={"csrf_token":token,"post_type":"announcement"},follow_redirects=False)
     assert result.status_code==303 and result.headers["location"].startswith("/posts/")
+    records=FussballDeProvider().parse(open("tests/fixtures/fussball_sv_ehlen_2627.html",encoding="utf-8").read())
+    with factory() as db:
+        snapshot=ProviderSnapshot(team_id=team.id,source_url=team.fussball_url,status_code=200,checksum="b"*64,relative_path="dashboard/test.html",parser_result={"team_name":team.display_name,"games":[serialize(x) for x in records]}); db.add(snapshot); db.commit(); snapshot_id=snapshot.id
+    overview=client.get("/diagnostics"); assert overview.status_code==200 and "SV Ehlen" in overview.text and "provisional" in overview.text
+    preview=client.get(f"/diagnostics/{snapshot_id}/import"); assert preview.status_code==200 and "0318JUMQIS" in preview.text
+    result=client.post(f"/diagnostics/{snapshot_id}/import",data={"csrf_token":token,"confirmation":"SPIELE ÜBERNEHMEN"},follow_redirects=False); assert result.status_code==303
+    result=client.post(f"/diagnostics/{snapshot_id}/import",data={"csrf_token":token,"confirmation":"SPIELE ÜBERNEHMEN"},follow_redirects=False); assert result.status_code==303
+    with factory() as db: assert db.query(Game).filter_by(provider="fussball.de").count()==3
     result=client.post("/users",data={"csrf_token":token,"email":"editor@test.invalid","password":"Another-Secure-Test","role":"editor"},follow_redirects=False)
     assert result.status_code==303
     assert "editor@test.invalid" in client.get("/users").text
