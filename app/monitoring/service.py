@@ -1,0 +1,40 @@
+import json
+import shutil
+from datetime import datetime, timezone
+
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
+
+from app.config import Settings
+from app.models import JobStatus, Post, PostStatus, ProviderSnapshot, PublicationJob, SystemSetting
+
+
+def system_status(db:Session,settings:Settings)->dict:
+    checks={}; critical=[]
+    try: db.execute(text("select 1")); checks["postgresql"]={"ok":True,"detail":db.bind.dialect.name}
+    except Exception as exc: checks["postgresql"]={"ok":False,"detail":str(exc)}; critical.append("PostgreSQL")
+    heartbeat=settings.log_root/"worker-heartbeat.json"
+    try:
+        data=json.loads(heartbeat.read_text()); age=(datetime.now(timezone.utc)-datetime.fromisoformat(data["at"])).total_seconds(); worker_ok=age<90
+        checks["worker"]={"ok":worker_ok,"detail":f"Heartbeat vor {int(age)}s, Läufe {data.get('loops',0)}"}; checks["scheduler"]={"ok":worker_ok and data.get("scheduler",False),"detail":"aktiv" if data.get("scheduler") else "inaktiv"}
+    except Exception as exc: checks["worker"]={"ok":False,"detail":f"Heartbeat fehlt: {exc}"}; checks["scheduler"]={"ok":False,"detail":"kein Worker-Heartbeat"}
+    if not checks["worker"]["ok"]: critical.append("Worker")
+    media_ok=settings.media_root.is_dir() and settings.media_root.exists(); checks["smb"]={"ok":media_ok,"detail":str(settings.media_root)}
+    if not media_ok: critical.append("SMB")
+    usage=shutil.disk_usage(settings.generated_root); checks["disk"]={"ok":usage.free>512*1024*1024,"detail":f"{usage.free//(1024*1024)} MiB frei"}
+    try:
+        latest=db.scalar(select(ProviderSnapshot).order_by(ProviderSnapshot.fetched_at.desc()))
+        checks["provider"]={"ok":not latest or not latest.error,"detail":latest.error if latest and latest.error else "kein kritischer Parserfehler"}
+    except Exception as exc:
+        db.rollback(); checks["provider"]={"ok":False,"detail":f"Providerstatus nicht lesbar: {exc}"}
+    checks["openai"]={"ok":settings.text_generator_mode=="mock" or bool(settings.openai_api_key),"detail":settings.text_generator_mode}
+    dry=settings.publisher_mode=="dry-run" and not settings.global_publish_enabled and not settings.meta_access_token; checks["publishing"]={"ok":dry,"detail":"DryRun aktiv; Live deaktiviert" if dry else "UNSICHERE KONFIGURATION"}
+    if not dry: critical.append("Publishing")
+    marker=settings.backup_root/"last-success.json"; checks["backup"]={"ok":marker.is_file(),"detail":marker.read_text()[:200] if marker.is_file() else "noch kein erfolgreicher Backup-Lauf"}
+    try:
+        counts={"wartende_beitraege":db.scalar(select(func.count()).select_from(Post).where(Post.status==PostStatus.PENDING)),"wartende_freigaben":db.scalar(select(func.count()).select_from(PublicationJob).where(PublicationJob.status==JobStatus.UNAPPROVED)),"fehlgeschlagene_jobs":db.scalar(select(func.count()).select_from(PublicationJob).where(PublicationJob.status==JobStatus.FAILED))}
+        checks["counts"]={"ok":True,"detail":counts}
+        stop=db.get(SystemSetting,"emergency_stop"); checks["emergency_stop"]={"ok":True,"detail":"aktiv" if stop and stop.value.get("enabled") else "aus"}
+    except Exception as exc:
+        db.rollback(); checks["counts"]={"ok":False,"detail":f"Schema nicht bereit: {exc}"}; checks["emergency_stop"]={"ok":False,"detail":"Schema nicht bereit"}
+    return {"ok":not critical,"critical":critical,"checks":checks}
