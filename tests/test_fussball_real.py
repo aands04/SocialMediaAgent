@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy import func, select
 
 from app.config import Settings
-from app.games.importer import import_snapshot
+from app.games.importer import import_snapshot, utc
 from app.games.live_test import capture, serialize
 from app.games.provider import FussballDeProvider, ProviderError
 from app.models import AuditLog, Game, InstagramPage, Post, ProviderSnapshot, Role, Team, User
@@ -76,3 +76,53 @@ def test_controlled_update_same_external_id(db):
     assert result["updated"]==1 and game.original_kickoff is not None and game.kickoff.hour==12
     changed["games"][0]["status"]="scheduled"; item.parser_result=changed; db.commit(); import_snapshot(db,item,user); db.refresh(game)
     assert game.status=="scheduled" and not game.overrides["automation_blocked"]
+
+
+def imported_game_with_approved_post(db,tmp_path):
+    from app.models import JobStatus, PostStatus, PublicationJob
+    team,user=entities(db); item=snapshot(db,team); data=dict(item.parser_result["games"][0]); data["status"]="scheduled"; item.parser_result={**item.parser_result,"games":[data]}; db.commit(); import_snapshot(db,item,user)
+    game=db.scalar(select(Game).where(Game.external_id==data["external_id"])); media=tmp_path/"approved.png"; media.write_bytes(b"png")
+    post=Post(game_id=game.id,team_id=team.id,instagram_page_id=team.instagram_page_id,post_type="announcement",status=PostStatus.APPROVED,text="Freigegeben",feed_path=str(media),approved_version=1,approved_by=user.id,approved_at=datetime.now(timezone.utc)); db.add(post); db.flush()
+    relative=PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=team.instagram_page_id,kind="feed",media_path=str(media),scheduled_at=game.kickoff-timedelta(hours=1),approval_status="approved",status=JobStatus.SCHEDULED,idempotency_key=f"{post.id}:relative",approved_post_version=post.version)
+    absolute=PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=team.instagram_page_id,kind="story",media_path=str(media),scheduled_at=game.kickoff-timedelta(hours=2),absolute_time=True,approval_status="approved",status=JobStatus.SCHEDULED,idempotency_key=f"{post.id}:absolute",approved_post_version=post.version); db.add_all([relative,absolute]); db.commit(); return team,user,item,game,post,relative,absolute
+
+
+def test_kickoff_change_after_approval_withdraws_jobs_and_reschedules(db,tmp_path):
+    from app.models import JobStatus, PostStatus
+    _,user,item,game,post,relative,absolute=imported_game_with_approved_post(db,tmp_path); old_relative=relative.scheduled_at; old_absolute=absolute.scheduled_at
+    changed=dict(item.parser_result["games"][0]); changed["kickoff"]=(game.kickoff.replace(tzinfo=timezone.utc)+timedelta(hours=2)).isoformat(); item.parser_result={**item.parser_result,"games":[changed]}; db.commit(); import_snapshot(db,item,user)
+    assert post.status==PostStatus.REAPPROVAL and relative.status==absolute.status==JobStatus.UNAPPROVED
+    assert relative.approval_status==absolute.approval_status=="reapproval_required"
+    assert utc(relative.scheduled_at)==utc(old_relative)+timedelta(hours=2)
+    assert utc(absolute.scheduled_at)==utc(old_absolute) and absolute.stale_time
+
+
+def test_cancellation_after_approval_blocks_all_open_publications(db,tmp_path):
+    from app.models import JobStatus, PostStatus
+    _,user,item,game,post,relative,absolute=imported_game_with_approved_post(db,tmp_path); changed=dict(item.parser_result["games"][0]); changed["status"]="cancelled"; item.parser_result={**item.parser_result,"games":[changed]}; db.commit(); import_snapshot(db,item,user)
+    assert game.status=="cancelled" and game.overrides["automation_blocked"]
+    assert post.status==PostStatus.REAPPROVAL
+    assert all(job.status==JobStatus.UNAPPROVED for job in (relative,absolute))
+
+
+def test_result_confirmation_only_resets_when_score_changes(db,tmp_path):
+    team,user,item,game,*_=imported_game_with_approved_post(db,tmp_path); game.home_score=2; game.away_score=1; game.result_confirmed=True; data=dict(item.parser_result["games"][0]); data.update(home_score=2,away_score=1); item.parser_result={**item.parser_result,"games":[data]}; db.commit(); import_snapshot(db,item,user); assert game.result_confirmed
+    data=dict(data); data["away_score"]=2; item.parser_result={**item.parser_result,"games":[data]}; db.commit(); import_snapshot(db,item,user); assert not game.result_confirmed and (game.home_score,game.away_score)==(2,2)
+
+
+def test_manual_overrides_and_provisional_confirmation_survive_reimport(db):
+    team,user=entities(db); item=snapshot(db,team); import_snapshot(db,item,user); game=db.scalar(select(Game).where(Game.team_id==team.id)); game.status="scheduled"; game.overrides={**game.overrides,"manual_feed_at":"2026-08-01T10:00:00Z","disabled_story_rules":["24h"],"provisional_confirmed_by":user.id,"provisional_confirmed_at":"2026-07-28T10:00:00Z","automation_blocked":False}; db.commit()
+    import_snapshot(db,item,user); db.refresh(game)
+    assert game.status=="scheduled" and not game.overrides["automation_blocked"]
+    assert game.overrides["manual_feed_at"]=="2026-08-01T10:00:00Z" and game.overrides["disabled_story_rules"]==["24h"]
+    assert game.overrides["provisional_confirmed_by"]==user.id
+
+
+def test_publishing_worker_refuses_stale_or_blocked_job(db,tmp_path):
+    from app.publishing.service import DryRunPublisher, PublishError
+    from app.publishing.worker import process_job
+    team,_,_,game,post,relative,_=imported_game_with_approved_post(db,tmp_path); page=db.get(InstagramPage,team.instagram_page_id); page.publishing_enabled=True; page.account_id="dry"; relative.scheduled_at=datetime.now(timezone.utc)-timedelta(seconds=1); relative.stale_time=True; db.commit()
+    with pytest.raises(PublishError,match="veraltet"): process_job(db,relative.id,DryRunPublisher(),Settings(global_publish_enabled=True))
+    relative.stale_time=False; game.status="postponed"; db.commit()
+    with pytest.raises(PublishError,match="Spielstatus"): process_job(db,relative.id,DryRunPublisher(),Settings(global_publish_enabled=True))
+    assert post.status.value=="approved" and relative.attempts==0

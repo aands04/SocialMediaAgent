@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import (
+    Game,
     InstagramPage,
     JobStatus,
     Post,
@@ -20,8 +21,8 @@ from app.publishing.service import PublishError, SocialMediaPublisher
 def process_job(db:Session,job_id:str,publisher:SocialMediaPublisher,settings:Settings):
     job=db.scalar(select(PublicationJob).where(PublicationJob.id==job_id).with_for_update())
     if not job or job.status in {JobStatus.PUBLISHED,JobStatus.PUBLISHING}:return job
-    post=db.get(Post,job.post_id); team=db.get(Team,job.team_id); page=db.get(InstagramPage,job.instagram_page_id); stop=db.get(SystemSetting,"emergency_stop")
-    checks=[(settings.global_publish_enabled,"Globales Publishing ist nicht aktiviert"),(not(stop and stop.value.get("enabled")),"Not-Aus aktiv"),(post.status in {PostStatus.APPROVED,PostStatus.SCHEDULED,PostStatus.PARTIAL},"Beitrag nicht freigegeben"),(post.version==job.approved_post_version,"Freigegebene Version verändert"),(post.publishing_enabled and team.publishing_enabled and page.publishing_enabled,"Publishing deaktiviert"),(page.active and page.connection_status=="connected","Instagram-Seite gestört"),(Path(job.media_path).is_file(),"Mediendatei fehlt"),((job.scheduled_at.replace(tzinfo=timezone.utc) if job.scheduled_at.tzinfo is None else job.scheduled_at)<=datetime.now(timezone.utc),"Zeitpunkt nicht erreicht")]
+    post=db.get(Post,job.post_id); game=db.get(Game,job.game_id); team=db.get(Team,job.team_id); page=db.get(InstagramPage,job.instagram_page_id); stop=db.get(SystemSetting,"emergency_stop")
+    checks=[(game.status not in {"cancelled","postponed","provisional"},"Spielstatus blockiert Veröffentlichung"),(not job.stale_time,"Veröffentlichungszeitpunkt ist möglicherweise veraltet"),(settings.global_publish_enabled,"Globales Publishing ist nicht aktiviert"),(not(stop and stop.value.get("enabled")),"Not-Aus aktiv"),(post.status in {PostStatus.APPROVED,PostStatus.SCHEDULED,PostStatus.PARTIAL},"Beitrag nicht freigegeben"),(post.version==job.approved_post_version,"Freigegebene Version verändert"),(post.publishing_enabled and team.publishing_enabled and page.publishing_enabled,"Publishing deaktiviert"),(page.active and page.connection_status=="connected","Instagram-Seite gestört"),(Path(job.media_path).is_file(),"Mediendatei fehlt"),((job.scheduled_at.replace(tzinfo=timezone.utc) if job.scheduled_at.tzinfo is None else job.scheduled_at)<=datetime.now(timezone.utc),"Zeitpunkt nicht erreicht")]
     for ok,message in checks:
         if not ok:
             if "Version" in message: post.status=PostStatus.REAPPROVAL; job.status=JobStatus.UNAPPROVED
