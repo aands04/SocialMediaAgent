@@ -18,6 +18,7 @@ from app.models import (
     StoryRule,
     Team,
 )
+from app.prompts.service import resolve_prompt
 from app.rendering.service import Renderer, builtin_template
 from app.textgen.service import TextGenerator
 
@@ -29,7 +30,7 @@ class RerenderConflict(ValueError):
 def reserve_image(db:Session,team_id:str,game_id:str)->MediaAsset|None:
     existing=db.scalar(select(MediaAsset).where(MediaAsset.reserved_game_id==game_id))
     if existing:return existing
-    asset=db.scalar(select(MediaAsset).where(MediaAsset.team_id==team_id,MediaAsset.active.is_(True),MediaAsset.available.is_(True),MediaAsset.reserved_game_id.is_(None)).with_for_update(skip_locked=True))
+    asset=db.scalar(select(MediaAsset).where(MediaAsset.team_id==team_id,MediaAsset.active.is_(True),MediaAsset.available.is_(True),MediaAsset.reserved_game_id.is_(None)).order_by(MediaAsset.size.desc(),MediaAsset.filename).with_for_update(skip_locked=True))
     if asset: asset.reserved_game_id=game_id; asset.uses+=1; db.flush()
     return asset
 def story_time(rule:StoryRule,game:Game,approved_at:datetime|None=None)->datetime:
@@ -90,7 +91,7 @@ def _media_path(relative: str | None) -> str | None:
 def _facts(db: Session, game: Game, team: Team, asset: MediaAsset | None, post_type: str) -> dict:
     primary_font=_font(db,team.primary_font); secondary_font=_font(db,team.secondary_font)
     kickoff=game.kickoff.replace(tzinfo=timezone.utc) if game.kickoff.tzinfo is None else game.kickoff
-    facts={"home_team":game.home_team,"away_team":game.away_team,"kickoff":kickoff.isoformat(),"venue":game.venue,"competition":game.competition,"post_type":post_type,"hashtags":team.hashtags,"primary_color":team.colors.get("primary"),"secondary_color":team.colors.get("secondary"),"team_short":team.short_name,"side_label":"Heimspiel" if game.home_team in {team.display_name,team.club} else "Auswärtsspiel","player_image":_media_path(asset.relative_path) if asset else None,"team_logo":_media_path(team.logo_path),"opponent_logo":_media_path(game.overrides.get("opponent_logo_path")),"primary_font_asset":primary_font,"secondary_font_asset":secondary_font}
+    facts={"home_team":game.home_team,"away_team":game.away_team,"own_team":team.display_name,"kickoff":kickoff.isoformat(),"venue":game.venue,"pitch":game.pitch,"competition":game.competition,"post_type":post_type,"hashtags":team.hashtags,"primary_color":team.colors.get("primary"),"secondary_color":team.colors.get("secondary"),"style_direction":team.rules.get("style_direction"),"team_short":team.short_name,"side_label":"Heimspiel" if game.home_team in {team.display_name,team.club} else "Auswärtsspiel","player_image":_media_path(asset.relative_path) if asset else None,"team_logo":_media_path(team.logo_path),"opponent_logo":_media_path(game.overrides.get("opponent_logo_path")),"primary_font_asset":primary_font,"secondary_font_asset":secondary_font}
     if post_type=="result" and game.result_confirmed:facts["score"]=f"{game.home_score}:{game.away_score}"
     if post_type=="result" and not game.result_confirmed: raise ValueError("Ergebnis ist nicht bestätigt")
     return facts
@@ -104,12 +105,23 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
     page=db.get(InstagramPage,team.instagram_page_id); warnings=[]
     asset=reserve_image(db,team.id,game.id)
     if not asset:warnings.append("Kein unverbrauchtes Spielerbild; neutrale Vorlage verwendet")
+    if getattr(renderer,"is_ai",False) and not asset:
+        raise ValueError("Für eine KI-Grafik ist ein unverbrauchtes Spielerbild erforderlich")
     feed_design=_design(db,team.feed_template,post_type,"feed")
     facts=_facts(db,game,team,asset,post_type)
+    feed_prompt=None; text_prompt=None
+    if getattr(renderer,"is_ai",False):
+        feed_prompt_name=team.rules.get(f"image_prompt_feed_{post_type}",team.rules.get("image_prompt_feed","default-image-feed"))
+        feed_prompt=resolve_prompt(db,feed_prompt_name,"image",post_type,"feed",facts)
+    if getattr(generator,"is_ai",False):
+        text_prompt_name=team.rules.get(f"text_prompt_{post_type}",team.rules.get("text_prompt",f"default-text-{post_type}"))
+        text_prompt=resolve_prompt(db,text_prompt_name,"text",post_type,"none",facts)
+        facts={**facts,"text_prompt":text_prompt}
     primary_font=facts["primary_font_asset"]; secondary_font=facts["secondary_font_asset"]
-    post=Post(game_id=game.id,team_id=team.id,instagram_page_id=page.id,post_type=post_type,status=PostStatus.CREATING,media_asset_id=asset.id if asset else None,critical_warnings=warnings,design_snapshot={"feed":feed_design,"stories":[],"fonts":{"primary":primary_font or {"family":team.primary_font,"fallback":True},"secondary":secondary_font or {"family":team.secondary_font,"fallback":True}},"colors":team.colors})
-    db.add(post); db.flush(); post.text=generator.generate(facts).text
-    post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v1.png",{**facts,"template":feed_design}))
+    post=Post(game_id=game.id,team_id=team.id,instagram_page_id=page.id,post_type=post_type,status=PostStatus.CREATING,media_asset_id=asset.id if asset else None,critical_warnings=warnings,design_snapshot={"mode":{"image":"openai" if feed_prompt else "playwright","text":"openai" if text_prompt else "fixture","manual_approval_required":True},"feed":feed_design,"prompts":{"feed":feed_prompt.snapshot() if feed_prompt else None,"text":text_prompt.snapshot() if text_prompt else None},"stories":[],"fonts":{"primary":primary_font or {"family":team.primary_font,"fallback":True},"secondary":secondary_font or {"family":team.secondary_font,"fallback":True}},"colors":team.colors})
+    db.add(post); db.flush(); generated_text=generator.generate(facts); post.text=generated_text.text
+    post.design_snapshot={**post.design_snapshot,"text_generation":{"model":generated_text.model,"prompt_version":generated_text.prompt_version,"tokens":generated_text.tokens}}
+    post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v1.png",{**facts,"template":feed_design,"image_prompt":feed_prompt}))
     feed_at=game.kickoff-timedelta(minutes=int(team.rules.get("feed_before_minutes",1440)))
     db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=page.id,kind="feed",media_path=post.feed_path,text_snapshot=post.text,scheduled_at=feed_at,idempotency_key=f"{post.id}:feed:v1"))
     rules=db.scalars(select(StoryRule).where(StoryRule.team_id==team.id,StoryRule.post_type==post_type,StoryRule.active.is_(True)).order_by(StoryRule.sort_order)).all(); seen=set()
@@ -119,8 +131,16 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
         collision=(at,rule.template)
         if collision in seen: warnings.append(f"Story-Regel {rule.name} kollidiert und wurde nicht doppelt geplant"); continue
         story_design=_design(db,rule.template,post_type,"story")
-        story_snapshots.append({"rule_id":rule.id,"template":story_design,"media_version":1})
-        seen.add(collision); path=str(renderer.render("story",f"{post.id}/story-{rule.id}-v1.png",{**facts,"template":story_design}))
+        story_prompt_name=rule.prompt_template
+        if not story_prompt_name or story_prompt_name=="default-image-story":
+            story_prompt_name=team.rules.get(f"image_prompt_story_{post_type}",team.rules.get("image_prompt_story","default-image-story"))
+        story_prompt=resolve_prompt(db,story_prompt_name,"image",post_type,"story",facts) if getattr(renderer,"is_ai",False) else None
+        story_snapshots.append({"rule_id":rule.id,"template":story_design,"prompt":story_prompt.snapshot() if story_prompt else None,"media_version":1})
+        seen.add(collision)
+        if story_prompt:
+            path=str(renderer.render("story",f"{post.id}/story-{rule.id}-v1.png",{**facts,"template":story_design,"image_prompt":story_prompt}))
+        else:
+            path=str(renderer.render("story",f"{post.id}/story-{rule.id}-v1.png",{**facts,"template":story_design}))
         db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=rule.instagram_page_id or page.id,story_rule_id=rule.id,kind="story",media_path=path,text_snapshot=post.text if rule.text_variant else None,scheduled_at=at,idempotency_key=f"{post.id}:story:{rule.id}:v1"))
     post.design_snapshot={**post.design_snapshot,"stories":story_snapshots}
     post.critical_warnings=warnings; post.status=PostStatus.INCOMPLETE if warnings else PostStatus.PENDING; db.commit(); return post
@@ -138,16 +158,23 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
         raise RerenderConflict("Eine ausgewählte Story wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
     facts=_facts(db,game,team,asset,post.post_type); old_snapshot=dict(post.design_snapshot or {}); snapshots={entry.get("rule_id"):entry for entry in old_snapshot.get("stories",[])}
     feed_design=_design(db,team.feed_template,post.post_type,"feed"); post.feed_version+=1
-    post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v{post.feed_version}.png",{**facts,"template":feed_design}))
+    feed_prompt_name=team.rules.get(f"image_prompt_feed_{post.post_type}",team.rules.get("image_prompt_feed","default-image-feed"))
+    feed_prompt=resolve_prompt(db,feed_prompt_name,"image",post.post_type,"feed",facts) if getattr(renderer,"is_ai",False) else None
+    post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v{post.feed_version}.png",{**facts,"template":feed_design,"image_prompt":feed_prompt}))
     for job in jobs:
         if job.kind=="feed":
             job.media_path=post.feed_path; job.version+=1; job.idempotency_key=f"{post.id}:feed:v{post.feed_version}"
         elif job.id in selected:
             rule=db.get(StoryRule,job.story_rule_id) if job.story_rule_id else None
             design=_design(db,rule.template if rule else "default-story",post.post_type,"story"); media_version=int(snapshots.get(job.story_rule_id,{}).get("media_version",1))+1
-            job.media_path=str(renderer.render("story",f"{post.id}/story-{job.story_rule_id}-v{media_version}.png",{**facts,"template":design})); job.version+=1; job.idempotency_key=f"{post.id}:story:{job.story_rule_id}:v{media_version}"
-            snapshots[job.story_rule_id]={"rule_id":job.story_rule_id,"template":design,"media_version":media_version}
-    post.design_snapshot={**old_snapshot,"feed":feed_design,"stories":list(snapshots.values()),"fonts":{"primary":facts["primary_font_asset"] or {"family":team.primary_font,"fallback":True},"secondary":facts["secondary_font_asset"] or {"family":team.secondary_font,"fallback":True}},"colors":team.colors}
+            story_prompt_name=rule.prompt_template if rule else None
+            if not story_prompt_name or story_prompt_name=="default-image-story":
+                story_prompt_name=team.rules.get(f"image_prompt_story_{post.post_type}",team.rules.get("image_prompt_story","default-image-story"))
+            story_prompt=resolve_prompt(db,story_prompt_name,"image",post.post_type,"story",facts) if getattr(renderer,"is_ai",False) else None
+            job.media_path=str(renderer.render("story",f"{post.id}/story-{job.story_rule_id}-v{media_version}.png",{**facts,"template":design,"image_prompt":story_prompt})); job.version+=1; job.idempotency_key=f"{post.id}:story:{job.story_rule_id}:v{media_version}"
+            snapshots[job.story_rule_id]={"rule_id":job.story_rule_id,"template":design,"prompt":story_prompt.snapshot() if story_prompt else None,"media_version":media_version}
+    prompt_snapshot=dict(old_snapshot.get("prompts") or {}); prompt_snapshot["feed"]=feed_prompt.snapshot() if feed_prompt else None
+    post.design_snapshot={**old_snapshot,"feed":feed_design,"prompts":prompt_snapshot,"stories":list(snapshots.values()),"fonts":{"primary":facts["primary_font_asset"] or {"family":team.primary_font,"fallback":True},"secondary":facts["secondary_font_asset"] or {"family":team.secondary_font,"fallback":True}},"colors":team.colors}
     was_approved=post.status in {PostStatus.APPROVED,PostStatus.SCHEDULED,PostStatus.PARTIAL}
     post.version+=1
     if was_approved:
