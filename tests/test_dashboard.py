@@ -65,6 +65,10 @@ def test_dashboard_admin_flow(browser):
     assert result.status_code==303 and result.headers["location"].startswith("/posts/")
     with factory() as db:
         post=db.query(Post).one(); story_ids=[job.id for job in db.query(PublicationJob).filter_by(post_id=post.id,kind="story")]; post_version=post.version
+        feed=db.query(PublicationJob).filter_by(post_id=post.id,kind="feed").one(); feed.status=__import__('app.models',fromlist=['JobStatus']).JobStatus.PUBLISHED; feed.platform_id="published-feed"; db.commit()
+    conflict=client.post(f"/posts/{post.id}/rerender",data={"csrf_token":token,"version":post_version,"story_job_ids":story_ids}); assert conflict.status_code==409 and "Feed wurde bereits veröffentlicht" in conflict.text
+    with factory() as db:
+        feed=db.query(PublicationJob).filter_by(post_id=post.id,kind="feed").one(); feed.status=__import__('app.models',fromlist=['JobStatus']).JobStatus.UNAPPROVED; feed.platform_id=None; db.commit()
     assert client.post(f"/posts/{post.id}/rerender",data={"csrf_token":"wrong","version":post_version}).status_code==403
     result=client.post(f"/posts/{post.id}/rerender",data={"csrf_token":token,"version":post_version,"story_job_ids":story_ids},follow_redirects=False); assert result.status_code==303
     with factory() as db: assert db.query(AuditLog).filter_by(action="post.graphics_rerendered").count()==1

@@ -22,7 +22,14 @@ from app.models import (
  User,
  UserTeam,
 )
-from app.posts.service import create_post, rerender_post, reschedule_game, reserve_image, story_time
+from app.posts.service import (
+ RerenderConflict,
+ create_post,
+ rerender_post,
+ reschedule_game,
+ reserve_image,
+ story_time,
+)
 from app.publishing.service import DryRunPublisher, PublishError
 from app.publishing.worker import process_job
 from app.rendering.service import Renderer
@@ -106,3 +113,36 @@ def test_controlled_rerender_versions_files_and_revokes_approval(db,tmp_path):
  rerender_post(db,post,Renderer(tmp_path/"out"),[story.id]); db.commit()
  assert old_feed.is_file() and old_story.is_file() and Path(post.feed_path)!=old_feed and Path(story.media_path)!=old_story
  assert post.status==PostStatus.REAPPROVAL and all(job.status==JobStatus.UNAPPROVED for job in jobs)
+
+def immutable_job_values(job):
+ return (job.media_path,job.version,job.idempotency_key,job.status,job.approval_status,job.approved_post_version,job.error,job.platform_id,job.published_at)
+
+def test_rerender_rejects_published_feed_without_files_or_changes(db,tmp_path):
+ _,team,game=graph(db,tmp_path); rule=StoryRule(team_id=team.id,name="S",post_type="announcement",reference="kickoff",direction="before",offset_minutes=60,template="default-story"); db.add(rule); db.commit()
+ post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"out")); jobs=db.query(PublicationJob).filter_by(post_id=post.id).all(); feed=next(job for job in jobs if job.kind=="feed")
+ feed.status=JobStatus.PUBLISHED; feed.approval_status="approved"; feed.platform_id="feed-platform"; feed.published_at=datetime.now(timezone.utc); db.commit()
+ before=immutable_job_values(feed); files=set((tmp_path/"out").rglob("*.png")); post_version=post.version; feed_version=post.feed_version
+ with pytest.raises(RerenderConflict,match="Feed wurde bereits veröffentlicht"): rerender_post(db,post,Renderer(tmp_path/"out"),[next(job.id for job in jobs if job.kind=="story")])
+ assert set((tmp_path/"out").rglob("*.png"))==files and immutable_job_values(feed)==before
+ assert post.version==post_version and post.feed_version==feed_version
+
+def test_rerender_rejects_selected_published_story_before_feed_write(db,tmp_path):
+ _,team,game=graph(db,tmp_path); rule=StoryRule(team_id=team.id,name="S",post_type="announcement",reference="kickoff",direction="before",offset_minutes=60,template="default-story"); db.add(rule); db.commit()
+ post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"out")); story=db.query(PublicationJob).filter_by(post_id=post.id,kind="story").one()
+ story.status=JobStatus.PUBLISHED; story.approval_status="approved"; story.platform_id="story-platform"; story.published_at=datetime.now(timezone.utc); db.commit()
+ before=immutable_job_values(story); files=set((tmp_path/"out").rglob("*.png")); post_values=(post.version,post.feed_version,post.feed_path)
+ with pytest.raises(RerenderConflict,match="ausgewählte Story wurde bereits veröffentlicht"): rerender_post(db,post,Renderer(tmp_path/"out"),[story.id])
+ assert set((tmp_path/"out").rglob("*.png"))==files and immutable_job_values(story)==before
+ assert (post.version,post.feed_version,post.feed_path)==post_values
+
+def test_partial_post_rerenders_only_open_outputs_and_preserves_published_story(db,tmp_path):
+ _,team,game=graph(db,tmp_path); rules=[StoryRule(team_id=team.id,name=name,post_type="announcement",reference="kickoff",direction="before",offset_minutes=offset,template="default-story") for name,offset in (("A",120),("B",60))]; db.add_all(rules); db.commit()
+ post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"out")); jobs=db.query(PublicationJob).filter_by(post_id=post.id).all(); feed=next(job for job in jobs if job.kind=="feed"); stories=[job for job in jobs if job.kind=="story"]
+ published,selected=stories; post.status=PostStatus.PARTIAL; post.approved_version=post.version
+ for job in jobs: job.status=JobStatus.SCHEDULED; job.approval_status="approved"; job.approved_post_version=post.version
+ published.status=JobStatus.PUBLISHED; published.platform_id="immutable-story"; published.published_at=datetime.now(timezone.utc); db.commit()
+ published_before=immutable_job_values(published); old_feed=feed.media_path; old_selected=selected.media_path
+ rerender_post(db,post,Renderer(tmp_path/"out"),[selected.id]); db.commit()
+ assert immutable_job_values(published)==published_before
+ assert feed.media_path!=old_feed and selected.media_path!=old_selected
+ assert post.status==PostStatus.REAPPROVAL and feed.status==selected.status==JobStatus.UNAPPROVED
