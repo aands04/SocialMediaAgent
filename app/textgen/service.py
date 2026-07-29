@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from openai import OpenAI
 
@@ -9,8 +11,14 @@ class TextGenerator:
     def generate(self,data:dict)->GeneratedText: raise NotImplementedError
 class FixtureTextGenerator(TextGenerator):
     def generate(self,data:dict)->GeneratedText:
-        result=f"{data['home_team']} gegen {data['away_team']} – {data['kickoff']}."
-        if data.get("score") is not None: result+=f" Endstand: {data['score']}."
+        kickoff=datetime.fromisoformat(data["kickoff"]) if isinstance(data["kickoff"],str) else data["kickoff"]
+        local=kickoff.astimezone(ZoneInfo("Europe/Berlin"))
+        when=f"am {local:%d.%m.%Y} um {local:%H:%M} Uhr"
+        if data.get("score") is not None:
+            result=f"Endstand: {data['home_team']} {data['score']} {data['away_team']}."
+        else:
+            result=f"{data['home_team']} trifft {when} auf {data['away_team']}."
+        if data.get("venue"): result+=f" Spielort: {data['venue']}."
         return GeneratedText(result+" "+" ".join(data.get("hashtags",[])),"fixture")
 class OpenAITextGenerator(TextGenerator):
     def __init__(self,key:str,model:str): self.client=OpenAI(api_key=key); self.model=model

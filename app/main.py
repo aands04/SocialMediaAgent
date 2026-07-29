@@ -15,7 +15,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.models import Game, Post, PublicationJob, Team, User
 from app.monitoring.service import system_status
-from app.web import csrf_token, current_user
+from app.web import berlin_datetime, csrf_token, current_user
 
 settings=get_settings()
 @asynccontextmanager
@@ -27,6 +27,7 @@ app=FastAPI(title="Vereins Social Media Agent",docs_url="/api/docs" if settings.
 app.add_middleware(SessionMiddleware,secret_key=settings.session_secret,max_age=settings.session_max_age,https_only=settings.environment=="production",same_site="lax")
 app.mount("/static",StaticFiles(directory="app/static"),name="static")
 templates=Jinja2Templates(directory="app/templates")
+templates.env.filters["berlin"] = berlin_datetime
 def csrf(request: Request):
     return csrf_token(request)
 @app.get("/health")

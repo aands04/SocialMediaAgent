@@ -30,10 +30,11 @@ from app.models import (
     User,
     UserTeam,
 )
-from app.web import check_csrf, csrf_token, current_user, require, require_admin
+from app.web import berlin_datetime, check_csrf, csrf_token, current_user, require, require_admin
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+templates.env.filters["berlin"] = berlin_datetime
 settings = get_settings()
 
 def render(request, name, current, **context):
@@ -207,7 +208,14 @@ def posts(request:Request,current=Depends(current_user),db:Session=Depends(get_d
 def post_detail(post_id:str,request:Request,current=Depends(current_user),db:Session=Depends(get_db)):
     item=db.get(Post,post_id)
     if not item: raise HTTPException(404)
-    require(current,db,"view",item.team_id); jobs=db.scalars(select(PublicationJob).where(PublicationJob.post_id==item.id).order_by(PublicationJob.scheduled_at)).all(); pages=db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all(); return render(request,"post_detail.html",current,item=item,jobs=jobs,pages=pages,now=datetime.now(timezone.utc),title="Beitrag prüfen")
+    require(current,db,"view",item.team_id); jobs=db.scalars(select(PublicationJob).where(PublicationJob.post_id==item.id).order_by(PublicationJob.scheduled_at)).all(); pages=db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
+    from app.rendering.service import Renderer
+    checks={}; renderer=Renderer(settings.generated_root,settings.media_root,Path("data/uploads"))
+    for job in jobs:
+        try:
+            report=renderer.validate(Path(job.media_path),job.kind); checks[job.id]=f"PNG geprüft – {report['width']} × {report['height']}"
+        except ValueError as exc: checks[job.id]=f"Prüfung fehlgeschlagen – {exc}"
+    return render(request,"post_detail.html",current,item=item,jobs=jobs,pages=pages,checks=checks,now=datetime.now(timezone.utc),title="Beitrag prüfen")
 
 @router.post("/posts/{post_id}/text")
 def post_text(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),text_value:str=Form(alias="text"),version:int=Form(),current=Depends(current_user),db:Session=Depends(get_db)):
@@ -217,6 +225,21 @@ def post_text(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_
     try: edit_text(db,item,current,text_value,version)
     except ApprovalError as e: raise HTTPException(409,str(e)) from e
     audit(db,current,"post.text_edited","post",item.id,item.team_id); db.commit(); return redirect(f"/posts/{item.id}")
+
+@router.post("/posts/{post_id}/rerender")
+def rerender_post_media(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),version:int=Form(),story_job_ids:list[str]=Form(default=[]),current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.posts.service import RerenderConflict, rerender_post
+    from app.rendering.service import Renderer
+    check_csrf(request,csrf_token_value); item=db.get(Post,post_id)
+    if not item: raise HTTPException(404)
+    require(current,db,"generate",item.team_id)
+    if item.version!=version: raise HTTPException(409,"Beitrag wurde zwischenzeitlich geändert")
+    allowed_story_ids=set(db.scalars(select(PublicationJob.id).where(PublicationJob.post_id==item.id,PublicationJob.kind=="story")))
+    if not set(story_job_ids).issubset(allowed_story_ids): raise HTTPException(422,"Ungültige Story-Auswahl")
+    try: rerender_post(db,item,Renderer(settings.generated_root,settings.media_root,Path("data/uploads")),story_job_ids)
+    except RerenderConflict as exc:
+        db.rollback(); raise HTTPException(409,str(exc)) from exc
+    audit(db,current,"post.graphics_rerendered","post",item.id,item.team_id,{"post_version":item.version,"story_jobs":story_job_ids}); db.commit(); return redirect(f"/posts/{item.id}","Grafiken versioniert neu erzeugt")
 
 @router.post("/posts/{post_id}/approve")
 def approve_post(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),job_ids:list[str]=Form(default=[]),current=Depends(current_user),db:Session=Depends(get_db)):
@@ -257,7 +280,8 @@ def games(request:Request,current=Depends(current_user),db:Session=Depends(get_d
 @router.post("/games/mock")
 def create_mock_game(request:Request,csrf_token_value:str=Form(alias="csrf_token"),team_id:str=Form(),home_team:str=Form(),away_team:str=Form(),kickoff:str=Form(),venue:str=Form(default=""),current=Depends(current_user),db:Session=Depends(get_db)):
     check_csrf(request,csrf_token_value); require(current,db,"edit_game",team_id)
-    try: kickoff_at=datetime.fromisoformat(kickoff).replace(tzinfo=timezone.utc)
+    from zoneinfo import ZoneInfo
+    try: kickoff_at=datetime.fromisoformat(kickoff).replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(timezone.utc)
     except ValueError as e: raise HTTPException(422,"Ungültiger Spieltermin") from e
     item=Game(team_id=team_id,provider="mock",external_id=f"mock-{hashlib.sha256(f'{team_id}:{kickoff}:{home_team}:{away_team}'.encode()).hexdigest()[:20]}",home_team=home_team,away_team=away_team,kickoff=kickoff_at,venue=venue or None,source_url="fixture://dashboard",checked_at=datetime.now(timezone.utc)); db.add(item)
     try: db.flush()
@@ -272,7 +296,7 @@ def generate_game_post(game_id:str,request:Request,csrf_token_value:str=Form(ali
     check_csrf(request,csrf_token_value); game=db.get(Game,game_id)
     if not game: raise HTTPException(404)
     require(current,db,"generate",game.team_id); team=db.get(Team,game.team_id)
-    try: post=create_post(db,game,team,FixtureTextGenerator(),Renderer(settings.generated_root),post_type)
+    try: post=create_post(db,game,team,FixtureTextGenerator(),Renderer(settings.generated_root,settings.media_root,Path("data/uploads")),post_type)
     except ValueError as e: raise HTTPException(422,str(e)) from e
     audit(db,current,"post.generated_manually","post",post.id,game.team_id,{"generator":"fixture"}); db.commit(); return redirect(f"/posts/{post.id}","Beitrag lokal erzeugt")
 
