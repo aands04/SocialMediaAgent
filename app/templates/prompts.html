@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>KI-Promptvorlagen</h1>
+<div class="warning">Prompt-Vorschauen rufen keine KI auf. KI-Grafiken und KI-Texte werden erst bei der Beitragserstellung erzeugt und müssen vor jeder Veröffentlichung manuell geprüft und freigegeben werden.</div>
+
+<section>
+  <h2>Neue versionierte Promptvorlage</h2>
+  <form method="post" action="/prompts" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <label>Name<input name="name" placeholder="z. B. sve-emotional-feed" required></label>
+    <label>Art<select name="prompt_kind"><option value="image">Bild</option><option value="text">Begleittext</option></select></label>
+    <label>Beitragstyp<select name="post_type"><option value="announcement">Ankündigung</option><option value="reminder">Erinnerung</option><option value="result">Ergebnis</option></select></label>
+    <label>Format<select name="media_kind"><option value="feed">Feed</option><option value="story">Story</option><option value="none">Kein Bildformat (Text)</option></select></label>
+    <label>Modell<input name="model" value="gpt-image-2" required></label>
+    <label>Qualität<select name="quality"><option value="medium">medium</option><option value="high">high</option><option value="low">low</option><option value="auto">auto</option><option value="default">default (Text)</option></select></label>
+    <label>Stilrichtung<textarea name="style_direction" rows="3" placeholder="Optional; überschreibt für diesen Prompt den Mannschaftsstil"></textarea></label>
+    <label style="grid-column:1/-1">Prompt
+      <textarea name="prompt_body" rows="24" required>{{default_image}}</textarea>
+    </label>
+    <button>Als neue Version speichern</button>
+  </form>
+</section>
+
+<section>
+  <h2>Prompt mit Beispieldaten prüfen</h2>
+  <form method="post" action="/prompts/preview" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <label>Art<select name="prompt_kind"><option value="image" {% if form and form.prompt_kind=='image' %}selected{% endif %}>Bild</option><option value="text" {% if form and form.prompt_kind=='text' %}selected{% endif %}>Begleittext</option></select></label>
+    <label>Beitragstyp<select name="post_type"><option value="announcement">Ankündigung</option><option value="reminder">Erinnerung</option><option value="result">Ergebnis</option></select></label>
+    <label>Format<select name="media_kind"><option value="feed">Feed</option><option value="story" {% if form and form.media_kind=='story' %}selected{% endif %}>Story</option><option value="none" {% if form and form.media_kind=='none' %}selected{% endif %}>Text</option></select></label>
+    <label>Stilrichtung<input name="style_direction" value="{{form.style_direction if form else ''}}"></label>
+    <label style="grid-column:1/-1">Prompt<textarea name="prompt_body" rows="18" required>{{form.prompt_body if form else default_image}}</textarea></label>
+    <button>Nur Platzhaltervorschau erzeugen</button>
+  </form>
+  {% if preview %}
+  <h3>Vollständig gerenderter Prompt</h3>
+  <pre style="white-space:pre-wrap">{{preview}}</pre>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Verfügbare Platzhalter</h2>
+  <p>{% for name in placeholders %}<code>{% raw %}{{{% endraw %}{{name}}{% raw %}}}{% endraw %}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  <details><summary>Eingebaute Textvorlage anzeigen</summary><pre style="white-space:pre-wrap">{{default_text}}</pre></details>
+</section>
+
+<section>
+  <h2>Gespeicherte Versionen</h2>
+  <table>
+    <tr><th>Name</th><th>Art</th><th>Typ</th><th>Format</th><th>Version</th><th>Modell</th><th>Qualität</th></tr>
+    {% for item in items %}
+    <tr><td>{{item.name}}</td><td>{{item.prompt_kind}}</td><td>{{item.post_type}}</td><td>{{item.media_kind}}</td><td>{{item.version}}</td><td>{{item.model}}</td><td>{{item.quality}}</td></tr>
+    {% else %}<tr><td colspan="7">Noch keine eigenen Promptversionen gespeichert. Die eingebauten Standardvorlagen sind sofort verfügbar.</td></tr>{% endfor %}
+  </table>
+</section>
+{% endblock %}

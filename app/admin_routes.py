@@ -23,6 +23,7 @@ from app.models import (
     InstagramPage,
     MediaAsset,
     Post,
+    PromptTemplate,
     PublicationJob,
     Role,
     StoryRule,
@@ -183,22 +184,82 @@ def create_design(request:Request,csrf_token_value:str=Form(alias="csrf_token"),
     item=DesignTemplate(name=name,post_type=post_type,media_kind=media_kind,width=1080,height=1350 if media_kind=="feed" else 1920,html_template=html_template,css=css,version=version)
     db.add(item); db.flush(); audit(db,current,"design.created","design",item.id,details={"version":version}); db.commit(); return redirect("/assets")
 
+
+@router.get("/prompts",response_class=HTMLResponse)
+def prompts(request:Request,current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.prompts.service import (
+        ALLOWED_PLACEHOLDERS,
+        DEFAULT_IMAGE_PROMPT,
+        DEFAULT_TEXT_PROMPT,
+    )
+    require_admin(current)
+    items=db.scalars(select(PromptTemplate).where(PromptTemplate.archived_at.is_(None)).order_by(PromptTemplate.name,PromptTemplate.version.desc())).all()
+    return render(request,"prompts.html",current,items=items,placeholders=sorted(ALLOWED_PLACEHOLDERS),default_image=DEFAULT_IMAGE_PROMPT,default_text=DEFAULT_TEXT_PROMPT,preview=None,title="KI-Promptvorlagen")
+
+
+@router.post("/prompts/preview",response_class=HTMLResponse)
+def preview_prompt(request:Request,csrf_token_value:str=Form(alias="csrf_token"),prompt_body:str=Form(),prompt_kind:str=Form(),post_type:str=Form(),media_kind:str=Form(default="none"),style_direction:str=Form(default=""),current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.prompts.service import (
+        ALLOWED_PLACEHOLDERS,
+        DEFAULT_IMAGE_PROMPT,
+        DEFAULT_TEXT_PROMPT,
+        IMAGE_SAFETY_PREFIX,
+        TEXT_SAFETY_PREFIX,
+        PromptValidationError,
+        prompt_context,
+        render_body,
+        sample_facts,
+    )
+    check_csrf(request,csrf_token_value); require_admin(current)
+    if prompt_kind not in {"image","text"} or post_type not in {"announcement","reminder","result"} or media_kind not in {"none","feed","story"}: raise HTTPException(422,"Ungültiger Prompt-Typ")
+    if prompt_kind=="image" and media_kind not in {"feed","story"}: raise HTTPException(422,"Bildprompt benötigt Feed oder Story")
+    if prompt_kind=="text": media_kind="none"
+    try:
+        preview=render_body(prompt_body,prompt_context(sample_facts(),media_kind,style_direction or None))
+    except PromptValidationError as exc: raise HTTPException(422,str(exc)) from exc
+    if prompt_kind=="image": preview=IMAGE_SAFETY_PREFIX+"\n"+preview
+    else: preview=TEXT_SAFETY_PREFIX+"\n"+preview
+    items=db.scalars(select(PromptTemplate).where(PromptTemplate.archived_at.is_(None)).order_by(PromptTemplate.name,PromptTemplate.version.desc())).all()
+    return render(request,"prompts.html",current,items=items,placeholders=sorted(ALLOWED_PLACEHOLDERS),default_image=DEFAULT_IMAGE_PROMPT,default_text=DEFAULT_TEXT_PROMPT,preview=preview,form={"prompt_body":prompt_body,"prompt_kind":prompt_kind,"post_type":post_type,"media_kind":media_kind,"style_direction":style_direction},title="KI-Promptvorlagen")
+
+
+@router.post("/prompts")
+def create_prompt(request:Request,csrf_token_value:str=Form(alias="csrf_token"),name:str=Form(),prompt_kind:str=Form(),post_type:str=Form(),media_kind:str=Form(default="none"),prompt_body:str=Form(),style_direction:str=Form(default=""),model:str=Form(),quality:str=Form(default="medium"),current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.prompts.service import PromptValidationError, validate_template
+    check_csrf(request,csrf_token_value); require_admin(current)
+    name=name.strip()
+    if not name or prompt_kind not in {"image","text"} or post_type not in {"announcement","reminder","result"}: raise HTTPException(422,"Prompt-Metadaten sind ungültig")
+    if prompt_kind=="image" and media_kind not in {"feed","story"}: raise HTTPException(422,"Bildprompt benötigt Feed oder Story")
+    if prompt_kind=="text": media_kind="none"
+    if quality not in {"low","medium","high","auto","default"}: raise HTTPException(422,"Unbekannte Qualitätsstufe")
+    if prompt_kind=="image" and (not model.startswith("gpt-image-") or quality=="default"): raise HTTPException(422,"Bildprompts benötigen ein GPT-Image-Modell und eine Bildqualitätsstufe")
+    try: validate_template(prompt_body)
+    except PromptValidationError as exc: raise HTTPException(422,str(exc)) from exc
+    previous=db.scalar(select(PromptTemplate).where(PromptTemplate.name==name,PromptTemplate.prompt_kind==prompt_kind,PromptTemplate.post_type==post_type,PromptTemplate.media_kind==media_kind).order_by(PromptTemplate.version.desc()))
+    version=(previous.version+1) if previous else 1
+    item=PromptTemplate(name=name,prompt_kind=prompt_kind,post_type=post_type,media_kind=media_kind,prompt_body=prompt_body,style_direction=style_direction.strip() or None,model=model.strip(),quality=quality,version=version)
+    db.add(item); db.flush(); audit(db,current,"prompt.created","prompt_template",item.id,details={"name":name,"version":version,"kind":prompt_kind,"media_kind":media_kind}); db.commit(); return redirect("/prompts",f"Prompt {name} Version {version} gespeichert")
+
+
 @router.get("/rules",response_class=HTMLResponse)
 def rules(request:Request,team_id:str|None=None,current=Depends(current_user),db:Session=Depends(get_db)):
-    teams=[t for t in db.scalars(select(Team).where(Team.archived_at.is_(None))) if require_visible(db,current,t.id)]; selected=next((t for t in teams if t.id==team_id),teams[0] if teams else None); stories=db.scalars(select(StoryRule).where(StoryRule.team_id==selected.id).order_by(StoryRule.sort_order)).all() if selected else []; pages=db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all(); return render(request,"rules.html",current,teams=teams,selected=selected,stories=stories,pages=pages,title="Veröffentlichungsregeln")
+    teams=[t for t in db.scalars(select(Team).where(Team.archived_at.is_(None))) if require_visible(db,current,t.id)]; selected=next((t for t in teams if t.id==team_id),teams[0] if teams else None); stories=db.scalars(select(StoryRule).where(StoryRule.team_id==selected.id).order_by(StoryRule.sort_order)).all() if selected else []; pages=db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
+    prompt_items=db.scalars(select(PromptTemplate).where(PromptTemplate.active.is_(True),PromptTemplate.archived_at.is_(None)).order_by(PromptTemplate.version.desc())).all(); latest={}
+    for prompt in prompt_items: latest.setdefault((prompt.name,prompt.prompt_kind,prompt.post_type,prompt.media_kind),prompt)
+    return render(request,"rules.html",current,teams=teams,selected=selected,stories=stories,pages=pages,prompts=list(latest.values()),title="Veröffentlichungsregeln")
 
 @router.post("/rules/{team_id}/defaults")
-def save_rules(team_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),announcement_enabled:bool=Form(default=False),feed_before_minutes:int=Form(),late_approval:str=Form(),result_enabled:bool=Form(default=False),result_wait_minutes:int=Form(),current=Depends(current_user),db:Session=Depends(get_db)):
+def save_rules(team_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),announcement_enabled:bool=Form(default=False),feed_before_minutes:int=Form(),late_approval:str=Form(),result_enabled:bool=Form(default=False),result_wait_minutes:int=Form(),image_prompt_feed:str=Form(default="default-image-feed"),image_prompt_story:str=Form(default="default-image-story"),text_prompt:str=Form(default="default-text-announcement"),result_image_prompt_feed:str=Form(default="default-image-feed"),result_image_prompt_story:str=Form(default="default-image-story"),result_text_prompt:str=Form(default="default-text-result"),style_direction:str=Form(default=""),current=Depends(current_user),db:Session=Depends(get_db)):
     check_csrf(request,csrf_token_value); require_admin(current); team=db.get(Team,team_id)
     if not team: raise HTTPException(404)
     if late_approval not in {"publish_now","manual","skip","next_story"}: raise HTTPException(422)
-    team.rules={**team.rules,"announcement_enabled":announcement_enabled,"feed_before_minutes":feed_before_minutes,"late_approval":late_approval,"result_enabled":result_enabled,"result_wait_minutes":result_wait_minutes}; team.version+=1; audit(db,current,"rules.updated","team",team.id,team.id,team.rules); db.commit(); return redirect(f"/rules?team_id={team.id}")
+    team.rules={**team.rules,"announcement_enabled":announcement_enabled,"feed_before_minutes":feed_before_minutes,"late_approval":late_approval,"result_enabled":result_enabled,"result_wait_minutes":result_wait_minutes,"image_prompt_feed":image_prompt_feed,"image_prompt_story":image_prompt_story,"text_prompt":text_prompt,"image_prompt_feed_result":result_image_prompt_feed,"image_prompt_story_result":result_image_prompt_story,"text_prompt_result":result_text_prompt,"style_direction":style_direction.strip()}; team.version+=1; audit(db,current,"rules.updated","team",team.id,team.id,team.rules); db.commit(); return redirect(f"/rules?team_id={team.id}")
 
 @router.post("/rules/{team_id}/stories")
-def create_story_rule(team_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),name:str=Form(),post_type:str=Form(),reference:str=Form(),direction:str=Form(),offset_minutes:int=Form(),fixed_time:str=Form(default=""),next_day:bool=Form(default=False),template:str=Form(),instagram_page_id:str=Form(default=""),reuse_media:bool=Form(default=False),sort_order:int=Form(default=0),current=Depends(current_user),db:Session=Depends(get_db)):
+def create_story_rule(team_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),name:str=Form(),post_type:str=Form(),reference:str=Form(),direction:str=Form(),offset_minutes:int=Form(),fixed_time:str=Form(default=""),next_day:bool=Form(default=False),template:str=Form(),prompt_template:str=Form(default="default-image-story"),instagram_page_id:str=Form(default=""),reuse_media:bool=Form(default=False),sort_order:int=Form(default=0),current=Depends(current_user),db:Session=Depends(get_db)):
     check_csrf(request,csrf_token_value); require_admin(current)
     if reference not in {"kickoff","planned_end","result_detected","approval","next_day"} or direction not in {"before","after"}: raise HTTPException(422,"Ungültiger Bezugspunkt")
-    item=StoryRule(team_id=team_id,name=name,post_type=post_type,reference=reference,direction=direction,offset_minutes=offset_minutes,fixed_time=fixed_time or None,next_day=next_day,template=template,instagram_page_id=instagram_page_id or None,reuse_media=reuse_media,sort_order=sort_order); db.add(item); db.flush(); audit(db,current,"story_rule.created","story_rule",item.id,team_id); db.commit(); return redirect(f"/rules?team_id={team_id}")
+    item=StoryRule(team_id=team_id,name=name,post_type=post_type,reference=reference,direction=direction,offset_minutes=offset_minutes,fixed_time=fixed_time or None,next_day=next_day,template=template,prompt_template=prompt_template,instagram_page_id=instagram_page_id or None,reuse_media=reuse_media,sort_order=sort_order); db.add(item); db.flush(); audit(db,current,"story_rule.created","story_rule",item.id,team_id); db.commit(); return redirect(f"/rules?team_id={team_id}")
 
 @router.get("/posts",response_class=HTMLResponse)
 def posts(request:Request,current=Depends(current_user),db:Session=Depends(get_db)):
@@ -228,17 +289,19 @@ def post_text(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_
 
 @router.post("/posts/{post_id}/rerender")
 def rerender_post_media(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),version:int=Form(),story_job_ids:list[str]=Form(default=[]),current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.generation import build_renderer
     from app.posts.service import RerenderConflict, rerender_post
-    from app.rendering.service import Renderer
     check_csrf(request,csrf_token_value); item=db.get(Post,post_id)
     if not item: raise HTTPException(404)
     require(current,db,"generate",item.team_id)
     if item.version!=version: raise HTTPException(409,"Beitrag wurde zwischenzeitlich geändert")
     allowed_story_ids=set(db.scalars(select(PublicationJob.id).where(PublicationJob.post_id==item.id,PublicationJob.kind=="story")))
     if not set(story_job_ids).issubset(allowed_story_ids): raise HTTPException(422,"Ungültige Story-Auswahl")
-    try: rerender_post(db,item,Renderer(settings.generated_root,settings.media_root,Path("data/uploads")),story_job_ids)
+    try: rerender_post(db,item,build_renderer(settings),story_job_ids)
     except RerenderConflict as exc:
         db.rollback(); raise HTTPException(409,str(exc)) from exc
+    except ValueError as exc:
+        db.rollback(); raise HTTPException(422,str(exc)) from exc
     audit(db,current,"post.graphics_rerendered","post",item.id,item.team_id,{"post_version":item.version,"story_jobs":story_job_ids}); db.commit(); return redirect(f"/posts/{item.id}","Grafiken versioniert neu erzeugt")
 
 @router.post("/posts/{post_id}/approve")
@@ -278,27 +341,46 @@ def games(request:Request,current=Depends(current_user),db:Session=Depends(get_d
     teams=[t for t in db.scalars(select(Team).where(Team.archived_at.is_(None))) if require_visible(db,current,t.id)]; items=[g for g in db.scalars(select(Game).order_by(Game.kickoff.desc())) if require_visible(db,current,g.team_id)]; return render(request,"games.html",current,teams=teams,items=items,title="Spiele und Testdaten")
 
 @router.post("/games/mock")
-def create_mock_game(request:Request,csrf_token_value:str=Form(alias="csrf_token"),team_id:str=Form(),home_team:str=Form(),away_team:str=Form(),kickoff:str=Form(),venue:str=Form(default=""),current=Depends(current_user),db:Session=Depends(get_db)):
+def create_mock_game(request:Request,csrf_token_value:str=Form(alias="csrf_token"),team_id:str=Form(),home_team:str=Form(),away_team:str=Form(),kickoff:str=Form(),competition:str=Form(default=""),venue:str=Form(default=""),pitch:str=Form(default=""),current=Depends(current_user),db:Session=Depends(get_db)):
     check_csrf(request,csrf_token_value); require(current,db,"edit_game",team_id)
     from zoneinfo import ZoneInfo
     try: kickoff_at=datetime.fromisoformat(kickoff).replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(timezone.utc)
     except ValueError as e: raise HTTPException(422,"Ungültiger Spieltermin") from e
-    item=Game(team_id=team_id,provider="mock",external_id=f"mock-{hashlib.sha256(f'{team_id}:{kickoff}:{home_team}:{away_team}'.encode()).hexdigest()[:20]}",home_team=home_team,away_team=away_team,kickoff=kickoff_at,venue=venue or None,source_url="fixture://dashboard",checked_at=datetime.now(timezone.utc)); db.add(item)
+    item=Game(team_id=team_id,provider="mock",external_id=f"mock-{hashlib.sha256(f'{team_id}:{kickoff}:{home_team}:{away_team}'.encode()).hexdigest()[:20]}",home_team=home_team,away_team=away_team,kickoff=kickoff_at,competition=competition or None,venue=venue or None,pitch=pitch or None,source_url="fixture://dashboard",checked_at=datetime.now(timezone.utc)); db.add(item)
     try: db.flush()
     except IntegrityError as e: db.rollback(); raise HTTPException(409,"Dieses Testspiel existiert bereits") from e
     audit(db,current,"game.mock_created","game",item.id,team_id); db.commit(); return redirect("/games","Lokales Testspiel angelegt")
 
+
+@router.post("/games/{game_id}/details")
+def update_game_details(game_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),competition:str=Form(),venue:str=Form(),pitch:str=Form(),current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.models import JobStatus, PostStatus
+    check_csrf(request,csrf_token_value); game=db.get(Game,game_id)
+    if not game: raise HTTPException(404)
+    require(current,db,"edit_game",game.team_id)
+    if pitch not in {"","Rasenplatz","Kunstrasenplatz"}: raise HTTPException(422,"Platzart muss Rasenplatz oder Kunstrasenplatz sein")
+    before={"competition":game.competition,"venue":game.venue,"pitch":game.pitch}
+    after={"competition":competition.strip() or None,"venue":venue.strip() or None,"pitch":pitch or None}
+    if before==after: return redirect("/games","Keine Spieldaten geändert")
+    game.competition=after["competition"]; game.venue=after["venue"]; game.pitch=after["pitch"]; game.overrides={**(game.overrides or {}),"manual_venue_details":True}; game.version+=1
+    posts=db.scalars(select(Post).where(Post.game_id==game.id,Post.status.not_in([PostStatus.PUBLISHED,PostStatus.CANCELLED]))).all()
+    for post in posts:
+        post.status=PostStatus.REAPPROVAL; post.version+=1; post.approved_version=None
+        for job in db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id,PublicationJob.status!=JobStatus.PUBLISHED)):
+            job.status=JobStatus.UNAPPROVED; job.approval_status="reapproval_required"; job.approved_post_version=None; job.error="Manuelle Spieldetails wurden geändert; Grafiken prüfen und neu erzeugen"
+    audit(db,current,"game.details_updated","game",game.id,game.team_id,{"before":before,"after":after,"affected_posts":[post.id for post in posts]}); db.commit(); return redirect("/games","Spielort, Platzart und Wettbewerb gespeichert")
+
+
 @router.post("/games/{game_id}/generate")
 def generate_game_post(game_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),post_type:str=Form(),current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.generation import build_renderer, build_text_generator
     from app.posts.service import create_post
-    from app.rendering.service import Renderer
-    from app.textgen.service import FixtureTextGenerator
     check_csrf(request,csrf_token_value); game=db.get(Game,game_id)
     if not game: raise HTTPException(404)
     require(current,db,"generate",game.team_id); team=db.get(Team,game.team_id)
-    try: post=create_post(db,game,team,FixtureTextGenerator(),Renderer(settings.generated_root,settings.media_root,Path("data/uploads")),post_type)
+    try: post=create_post(db,game,team,build_text_generator(settings),build_renderer(settings),post_type)
     except ValueError as e: raise HTTPException(422,str(e)) from e
-    audit(db,current,"post.generated_manually","post",post.id,game.team_id,{"generator":"fixture"}); db.commit(); return redirect(f"/posts/{post.id}","Beitrag lokal erzeugt")
+    audit(db,current,"post.generated_manually","post",post.id,game.team_id,{"text_generator":settings.text_generator_mode,"image_generator":settings.image_generator_mode}); db.commit(); return redirect(f"/posts/{post.id}","Beitrag erzeugt")
 
 @router.get("/diagnostics",response_class=HTMLResponse)
 def diagnostics(request:Request,current=Depends(current_user),db:Session=Depends(get_db)):

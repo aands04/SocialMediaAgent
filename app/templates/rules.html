@@ -1,1 +1,105 @@
-{% extends 'base.html' %}{% block content %}<h1>Veröffentlichungsregeln und Story-Zeitpunkte</h1><form method="get"><select name="team_id" onchange="this.form.submit()">{% for t in teams %}<option value="{{t.id}}" {% if selected and t.id==selected.id %}selected{% endif %}>{{t.display_name}}</option>{% endfor %}</select></form>{% if selected %}<section><h2>Ankündigungs- und Ergebnisregeln</h2><form method="post" action="/rules/{{selected.id}}/defaults" class="gridform"><input type="hidden" name="csrf_token" value="{{csrf}}"><label><input type="checkbox" name="announcement_enabled" value="true" {% if selected.rules.get('announcement_enabled') %}checked{% endif %}> Ankündigung aktiv</label><label>Feed Minuten vor Anpfiff<input type="number" name="feed_before_minutes" min="0" value="{{selected.rules.get('feed_before_minutes',1440)}}"></label><label>Verspätete Freigabe<select name="late_approval">{% for v,n in [('publish_now','Sofort'),('manual','Manuelle Entscheidung'),('skip','Überspringen'),('next_story','Nächste Story')] %}<option value="{{v}}" {% if selected.rules.get('late_approval')==v %}selected{% endif %}>{{n}}</option>{% endfor %}</select></label><label><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Ergebnismeldung aktiv</label><label>Wartezeit nach Ergebnis<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',15)}}"></label><button>Regeln speichern</button></form></section><section><h2>Story-Zeitpunkt hinzufügen</h2><form method="post" action="/rules/{{selected.id}}/stories" class="gridform"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Name<input name="name" required></label><label>Beitragstyp<select name="post_type"><option value="announcement">Ankündigung</option><option value="reminder">Erinnerung</option><option value="result">Ergebnis</option></select></label><label>Bezug<select name="reference"><option value="kickoff">Anpfiff</option><option value="planned_end">Geplantes Ende</option><option value="result_detected">Ergebniserkennung</option><option value="approval">Freigabe</option><option value="next_day">Folgetag</option></select></label><label>Richtung<select name="direction"><option value="before">vorher</option><option value="after">nachher</option></select></label><label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" value="0"></label><label>Feste Uhrzeit<input name="fixed_time" type="time"></label><label><input type="checkbox" name="next_day" value="true"> Folgetag</label><label>Vorlage<input name="template" required></label><label>Zielseite<select name="instagram_page_id"><option value="">Mannschaftsstandard</option>{% for p in pages %}<option value="{{p.id}}">{{p.display_name}}</option>{% endfor %}</select></label><label><input type="checkbox" name="reuse_media" value="true"> Datei wiederverwenden</label><label>Sortierung<input type="number" name="sort_order" value="0"></label><button>Zeitpunkt hinzufügen</button></form><table><tr><th>Name</th><th>Typ</th><th>Bezug</th><th>Offset</th><th>Vorlage</th></tr>{% for x in stories %}<tr><td>{{x.name}}</td><td>{{x.post_type}}</td><td>{{x.reference}} / {{x.direction}}</td><td>{{x.offset_minutes}} min{% if x.fixed_time %}, {{x.fixed_time}}{% endif %}</td><td>{{x.template}}</td></tr>{% endfor %}</table></section>{% endif %}{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>Veröffentlichungsregeln und Story-Zeitpunkte</h1>
+<form method="get">
+  <select name="team_id" onchange="this.form.submit()">
+    {% for t in teams %}<option value="{{t.id}}" {% if selected and t.id==selected.id %}selected{% endif %}>{{t.display_name}}</option>{% endfor %}
+  </select>
+</form>
+{% if selected %}
+<section>
+  <h2>Ankündigungs-, Ergebnis- und KI-Regeln</h2>
+  <form method="post" action="/rules/{{selected.id}}/defaults" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <label><input type="checkbox" name="announcement_enabled" value="true" {% if selected.rules.get('announcement_enabled') %}checked{% endif %}> Ankündigung aktiv</label>
+    <label>Feed Minuten vor Anpfiff<input type="number" name="feed_before_minutes" min="0" value="{{selected.rules.get('feed_before_minutes',1440)}}"></label>
+    <label>Verspätete Freigabe<select name="late_approval">{% for v,n in [('publish_now','Sofort'),('manual','Manuelle Entscheidung'),('skip','Überspringen'),('next_story','Nächste Story')] %}<option value="{{v}}" {% if selected.rules.get('late_approval')==v %}selected{% endif %}>{{n}}</option>{% endfor %}</select></label>
+    <label><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Ergebnismeldung aktiv</label>
+    <label>Wartezeit nach Ergebnis<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',15)}}"></label>
+    <label>KI-Bildprompt Feed
+      <select name="image_prompt_feed">
+        <option value="default-image-feed">Standard-KI-Prompt Feed</option>
+        {% for p in prompts if p.prompt_kind=='image' and p.media_kind=='feed' %}
+        <option value="{{p.name}}" {% if selected.rules.get('image_prompt_feed')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}} · {{p.post_type}}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>KI-Bildprompt Story
+      <select name="image_prompt_story">
+        <option value="default-image-story">Standard-KI-Prompt Story</option>
+        {% for p in prompts if p.prompt_kind=='image' and p.media_kind=='story' %}
+        <option value="{{p.name}}" {% if selected.rules.get('image_prompt_story')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}} · {{p.post_type}}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>KI-Textprompt
+      <select name="text_prompt">
+        <option value="default-text-announcement">Standard-KI-Textprompt</option>
+        {% for p in prompts if p.prompt_kind=='text' %}
+        <option value="{{p.name}}" {% if selected.rules.get('text_prompt')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}} · {{p.post_type}}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Ergebnis-KI-Bildprompt Feed
+      <select name="result_image_prompt_feed">
+        <option value="default-image-feed">Standard-KI-Prompt Feed</option>
+        {% for p in prompts if p.prompt_kind=='image' and p.media_kind=='feed' and p.post_type=='result' %}
+        <option value="{{p.name}}" {% if selected.rules.get('image_prompt_feed_result')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Ergebnis-KI-Bildprompt Story
+      <select name="result_image_prompt_story">
+        <option value="default-image-story">Standard-KI-Prompt Story</option>
+        {% for p in prompts if p.prompt_kind=='image' and p.media_kind=='story' and p.post_type=='result' %}
+        <option value="{{p.name}}" {% if selected.rules.get('image_prompt_story_result')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Ergebnis-KI-Textprompt
+      <select name="result_text_prompt">
+        <option value="default-text-result">Standard-KI-Ergebnistext</option>
+        {% for p in prompts if p.prompt_kind=='text' and p.post_type=='result' %}
+        <option value="{{p.name}}" {% if selected.rules.get('text_prompt_result')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Stilrichtung für diese Mannschaft
+      <textarea name="style_direction" rows="4" placeholder="z. B. emotional, modern, tiefe Schatten, dynamische Flutlichtexposition">{{selected.rules.get('style_direction','')}}</textarea>
+    </label>
+    <button>Regeln speichern</button>
+  </form>
+  <p>Promptvorlagen werden unter <a href="/prompts">KI-Promptvorlagen</a> versioniert verwaltet. HTML/CSS bleibt nur als Offline-Fallback aktiv.</p>
+</section>
+<section>
+  <h2>Story-Zeitpunkt hinzufügen</h2>
+  <form method="post" action="/rules/{{selected.id}}/stories" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <label>Name<input name="name" required></label>
+    <label>Beitragstyp<select name="post_type"><option value="announcement">Ankündigung</option><option value="reminder">Erinnerung</option><option value="result">Ergebnis</option></select></label>
+    <label>Bezug<select name="reference"><option value="kickoff">Anpfiff</option><option value="planned_end">Geplantes Ende</option><option value="result_detected">Ergebniserkennung</option><option value="approval">Freigabe</option><option value="next_day">Folgetag</option></select></label>
+    <label>Richtung<select name="direction"><option value="before">vorher</option><option value="after">nachher</option></select></label>
+    <label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" value="0"></label>
+    <label>Feste Uhrzeit<input name="fixed_time" type="time"></label>
+    <label><input type="checkbox" name="next_day" value="true"> Folgetag</label>
+    <label>HTML/CSS-Fallbackvorlage<input name="template" value="default-story" required></label>
+    <label>KI-Bildprompt
+      <select name="prompt_template">
+        <option value="default-image-story">Mannschaftsstandard / Standard-KI-Prompt</option>
+        {% for p in prompts if p.prompt_kind=='image' and p.media_kind=='story' %}
+        <option value="{{p.name}}">{{p.name}} · v{{p.version}} · {{p.post_type}}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Zielseite<select name="instagram_page_id"><option value="">Mannschaftsstandard</option>{% for p in pages %}<option value="{{p.id}}">{{p.display_name}}</option>{% endfor %}</select></label>
+    <label><input type="checkbox" name="reuse_media" value="true"> Datei wiederverwenden</label>
+    <label>Sortierung<input type="number" name="sort_order" value="0"></label>
+    <button>Zeitpunkt hinzufügen</button>
+  </form>
+  <table>
+    <tr><th>Name</th><th>Typ</th><th>Bezug</th><th>Offset</th><th>KI-Prompt</th><th>Fallback</th></tr>
+    {% for x in stories %}<tr><td>{{x.name}}</td><td>{{x.post_type}}</td><td>{{x.reference}} / {{x.direction}}</td><td>{{x.offset_minutes}} min{% if x.fixed_time %}, {{x.fixed_time}}{% endif %}</td><td>{{x.prompt_template}}</td><td>{{x.template}}</td></tr>{% endfor %}
+  </table>
+</section>
+{% endif %}
+{% endblock %}

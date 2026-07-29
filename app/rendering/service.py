@@ -1,6 +1,7 @@
 import base64
 import html
 import mimetypes
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -65,6 +66,18 @@ class Renderer:
         self.media_root = Path(media_root).resolve() if media_root else None
         self.upload_root = Path(upload_root).resolve() if upload_root else None
         self.environment = SandboxedEnvironment(autoescape=True, undefined=StrictUndefined)
+
+    @staticmethod
+    def _browser_executable() -> str | None:
+        candidates = [
+            shutil.which("chromium"),
+            shutil.which("chromium-browser"),
+            os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE"),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ]
+        return next((str(path) for path in candidates if path and Path(path).is_file()), None)
 
     @staticmethod
     def _safe_file(path_value, roots: tuple[Path | None, ...], types: set[str], limit: int) -> Path | None:
@@ -163,7 +176,7 @@ class Renderer:
         width, height = self.sizes[kind]
         try:
             with sync_playwright() as playwright:
-                executable = shutil.which("chromium") or shutil.which("chromium-browser")
+                executable = self._browser_executable()
                 browser = playwright.chromium.launch(headless=True, executable_path=executable)
                 page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=1)
                 page.route("**/*", lambda route: route.abort())

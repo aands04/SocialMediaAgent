@@ -57,8 +57,26 @@ Backup: `scripts/backup.sh`; Restore in Wartungsmodus: `scripts/restore.sh BACKU
 
 Not-Aus: `system_settings.key='emergency_stop'`, `value={"enabled":true}` stoppt noch nicht begonnene Jobs. Laufende/unklare Vorgänge zuerst bei Meta abgleichen. Weitere Schalter existieren global, je Seite, Team, Beitrag und Job.
 
-## Design-Renderer und Grenzen des MVP
-Feed (1080 × 1350) und Story (1080 × 1920) werden reproduzierbar aus HTML/CSS mit Playwright/Chromium gerendert. Die eingebauten Vorlagen `default-feed` und `default-story` unterstützen Ankündigung und Ergebnis; aktive Datenbankvorlagen werden in ihrer neuesten Version gewählt und vollständig im Beitragssnapshot eingefroren. Reservierte Originalbilder, Logos und lokal hochgeladene Fonts werden als Data-URLs eingebettet, sodass beim Rendern kein externer Abruf erfolgt. Fehlende Logos, Orte oder Fonts verwenden sichtbare, definierte Fallbacks. Für lokale Entwicklung muss ein von Playwright nutzbares Chromium installiert sein; das Docker-Image installiert es automatisch.
+## KI-Prompts, Bildgenerierung und Offline-Fallback
+Unter **KI-Promptvorlagen** werden Bild- und Textprompts mit geprüften Jinja-Platzhaltern versioniert verwaltet. Mannschaftsregeln ordnen getrennte Feed-, Story- und Textprompts zu; einzelne Story-Regeln dürfen einen eigenen Story-Prompt wählen. Die Vorschau ersetzt Platzhalter mit Beispieldaten, ruft aber keine externe API auf. Am erzeugten Beitrag werden Name, Version, Modell, Qualität, Prompttext und vollständig gerenderter Prompt eingefroren. Damit bleibt jede Ausgabe nachvollziehbar und spätere Promptänderungen verändern bestehende Beiträge nicht.
+
+Mit `IMAGE_GENERATOR_MODE=openai` und `TEXT_GENERATOR_MODE=openai` werden Grafiken beziehungsweise Begleittexte über die OpenAI API erzeugt. Standardmodell für Bilder ist `gpt-image-2`. Spielerbild und vorhandene Original-Logos werden als Referenzbilder mit hoher Eingangstreue übergeben. Die zunächst API-kompatibel erzeugte Ausgabe wird lokal verlustarm auf exakt 1080 × 1350 (Feed) beziehungsweise 1080 × 1920 (Story) zugeschnitten und technisch als PNG validiert. Das Modell kann trotz strenger Prompts Text, Logos, Gesichter oder Trikots fehlerhaft wiedergeben; deshalb bleibt die vorhandene manuelle visuelle Freigabe zwingend.
+
+Vor Modellwechseln oder Produktivtests die aktuelle offizielle [OpenAI-Anleitung zur Bildgenerierung](https://developers.openai.com/api/docs/guides/image-generation) und die [Modellseite von GPT Image 2](https://developers.openai.com/api/docs/models/gpt-image-2) erneut prüfen.
+
+`IMAGE_GENERATOR_MODE=playwright` bleibt der standardmäßige, reproduzierbare Offline-Fallback. Dabei werden Feed und Story aus HTML/CSS mit Playwright/Chromium gerendert. Die eingebauten Vorlagen `default-feed` und `default-story` unterstützen Ankündigung und Ergebnis; aktive Datenbankvorlagen werden in ihrer neuesten Version gewählt und vollständig im Beitragssnapshot eingefroren. Für lokale Entwicklung muss ein von Playwright nutzbares Chromium installiert sein; das Docker-Image installiert es automatisch.
+
+Der API-Key wird ausschließlich über das Docker-Secret `openai_api_key` bereitgestellt. Für einen kontrollierten KI-Test in Staging:
+
+```text
+TEXT_GENERATOR_MODE=openai
+IMAGE_GENERATOR_MODE=openai
+OPENAI_MODEL=gpt-5-mini
+OPENAI_IMAGE_MODEL=gpt-image-2
+OPENAI_IMAGE_QUALITY=medium
+```
+
+Nach Änderung der `.env.staging` Web und Worker neu erstellen. Meta/Instagram bleibt davon unabhängig im Dry-Run.
 
 Der FUSSBALL.DE-Parser ist fixture-getestet, muss aber bei HTML-Änderungen angepasst werden. Reale OpenAI-/Meta-Aufrufe wurden nicht durchgeführt. Details und Zustände: [ARCHITECTURE.md](ARCHITECTURE.md).
 

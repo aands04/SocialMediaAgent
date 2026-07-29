@@ -1,0 +1,280 @@
+from datetime import datetime, timedelta, timezone
+from io import BytesIO
+
+import pytest
+from PIL import Image
+
+from app.config import Settings
+from app.imagegen.service import AIImageRenderer, ImageProvider
+from app.models import (
+    Game,
+    InstagramPage,
+    MediaAsset,
+    PromptTemplate,
+    StoryRule,
+    Team,
+)
+from app.posts.service import create_post
+from app.prompts.service import (
+    PromptValidationError,
+    builtin_prompt,
+    prompt_context,
+    resolve_prompt,
+    validate_template,
+    venue_display,
+)
+from app.textgen.service import FixtureTextGenerator, OpenAITextGenerator
+
+
+def facts(**updates):
+    data = {
+        "home_team": "SV Ehlen",
+        "away_team": "SG Beispiel",
+        "own_team": "SV Ehlen",
+        "kickoff": "2026-08-09T13:00:00+00:00",
+        "competition": "Kreisliga A",
+        "venue": "Sportplatz Ehlen",
+        "pitch": "Rasenplatz",
+        "primary_color": "#172554",
+        "secondary_color": "#ffffff",
+        "hashtags": ["#SVEhlen"],
+    }
+    return data | updates
+
+
+def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
+    context = prompt_context(facts(), "feed")
+    assert context["venue_display"] == "Habichtswaldstadion Ehlen"
+    assert context["weekday"] == "Sonntag"
+    assert context["date_de"] == "09.08.2026"
+    assert context["output_width"] == 1080
+    prompt = builtin_prompt("image", "announcement", "feed", facts())
+    assert "SV Ehlen gegen SG Beispiel" in prompt.rendered
+    assert "Habichtswaldstadion Ehlen" in prompt.rendered
+    assert "{{" not in prompt.rendered
+
+
+def test_away_venue_requires_pitch_and_formats_only_place():
+    away = facts(
+        home_team="TSV Immenhausen",
+        away_team="SV Ehlen",
+        venue="Sportplatz Immenhausen",
+    )
+    assert venue_display(away) == "RP Immenhausen"
+    assert venue_display(away | {"pitch": "Kunstrasenplatz"}) == "KR Immenhausen"
+    assert venue_display(away | {"venue": "Jahnstraße 10, 34376 Immenhausen"}) == "RP Immenhausen"
+    with pytest.raises(PromptValidationError, match="Platzart"):
+        venue_display(away | {"pitch": None})
+
+
+def test_prompt_rejects_unknown_placeholders_and_resolves_latest_version(db):
+    with pytest.raises(PromptValidationError, match="Unbekannte Platzhalter"):
+        validate_template("Spiel {{ invented_fact }}")
+    db.add_all(
+        [
+            PromptTemplate(
+                name="sve-feed",
+                prompt_kind="image",
+                post_type="announcement",
+                media_kind="feed",
+                prompt_body="Version eins: {{ home_team }} gegen {{ away_team }}",
+                model="gpt-image-2",
+                quality="medium",
+                version=1,
+            ),
+            PromptTemplate(
+                name="sve-feed",
+                prompt_kind="image",
+                post_type="announcement",
+                media_kind="feed",
+                prompt_body="Version zwei: {{ venue_display }}",
+                model="gpt-image-2",
+                quality="high",
+                version=2,
+            ),
+        ]
+    )
+    db.commit()
+    resolved = resolve_prompt(
+        db, "sve-feed", "image", "announcement", "feed", facts()
+    )
+    assert resolved.version == 2
+    assert resolved.quality == "high"
+    assert "Version zwei: Habichtswaldstadion Ehlen" in resolved.rendered
+
+
+class FakeImageProvider(ImageProvider):
+    def __init__(self):
+        self.calls = []
+
+    def generate(self, prompt, references, size, model, quality):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "references": references,
+                "size": size,
+                "model": model,
+                "quality": quality,
+            }
+        )
+        width, height = map(int, size.split("x"))
+        image = Image.effect_noise((width, height), 90).convert("RGB")
+        data = BytesIO()
+        image.save(data, "PNG")
+        return data.getvalue()
+
+
+def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    media.mkdir()
+    uploads.mkdir()
+    player = media / "player.jpg"
+    logo = media / "logo.png"
+    Image.new("RGB", (600, 900), "blue").save(player)
+    Image.new("RGBA", (200, 200), (255, 255, 255, 255)).save(logo)
+    provider = FakeImageProvider()
+    renderer = AIImageRenderer(tmp_path / "out", media, uploads, provider)
+    prompt = builtin_prompt("image", "announcement", "feed", facts())
+    output = renderer.render(
+        "feed",
+        "post/feed.png",
+        {
+            "player_image": str(player),
+            "team_logo": str(logo),
+            "opponent_logo": None,
+            "image_prompt": prompt,
+        },
+    )
+    assert Image.open(output).size == (1080, 1350)
+    assert provider.calls[0]["size"] == "1088x1360"
+    assert provider.calls[0]["model"] == "gpt-image-2"
+    assert provider.calls[0]["references"] == [player.resolve(), logo.resolve()]
+
+
+def test_ai_renderer_refuses_missing_player(tmp_path):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    media.mkdir()
+    uploads.mkdir()
+    renderer = AIImageRenderer(
+        tmp_path / "out", media, uploads, FakeImageProvider()
+    )
+    with pytest.raises(ValueError, match="Spielerbild"):
+        renderer.render(
+            "story",
+            "post/story.png",
+            {
+                "player_image": None,
+                "image_prompt": builtin_prompt(
+                    "image", "announcement", "story", facts()
+                ),
+            },
+        )
+
+
+def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    media.mkdir()
+    uploads.mkdir()
+    player = media / "player.jpg"
+    Image.new("RGB", (600, 900), "blue").save(player)
+    monkeypatch.setattr(
+        "app.posts.service.get_settings", lambda: Settings(media_root=media)
+    )
+    page = InstagramPage(
+        internal_name="main",
+        display_name="Hauptseite",
+        username="sve",
+        club="SV Ehlen",
+        active=True,
+        connection_status="connected",
+    )
+    db.add(page)
+    db.flush()
+    team = Team(
+        internal_name="erste",
+        display_name="SV Ehlen",
+        short_name="SVE",
+        slug="sve",
+        club="SV Ehlen",
+        fussball_url="https://www.fussball.de/team",
+        instagram_page_id=page.id,
+        media_subdir="erste",
+        rules={"feed_before_minutes": 1440},
+    )
+    db.add(team)
+    db.flush()
+    game = Game(
+        team_id=team.id,
+        external_id="ai-1",
+        home_team="SV Ehlen",
+        away_team="SG Beispiel",
+        kickoff=datetime.now(timezone.utc) + timedelta(days=3),
+        competition="Kreisliga A",
+        venue="Ehlen",
+        pitch="Rasenplatz",
+        source_url=team.fussball_url,
+    )
+    db.add(game)
+    db.flush()
+    db.add_all(
+        [
+            MediaAsset(
+                team_id=team.id,
+                relative_path="player.jpg",
+                filename="player.jpg",
+                mime_type="image/jpeg",
+                size=player.stat().st_size,
+                checksum="x" * 64,
+                mtime=datetime.now(timezone.utc),
+            ),
+            StoryRule(
+                team_id=team.id,
+                name="24h",
+                post_type="announcement",
+                reference="kickoff",
+                direction="before",
+                offset_minutes=360,
+                template="default-story",
+            ),
+        ]
+    )
+    db.commit()
+    post = create_post(
+        db,
+        game,
+        team,
+        FixtureTextGenerator(),
+        AIImageRenderer(tmp_path / "out", media, uploads, FakeImageProvider()),
+    )
+    assert post.design_snapshot["mode"]["image"] == "openai"
+    assert post.design_snapshot["prompts"]["feed"]["name"] == "default-image-feed"
+    assert "SV Ehlen gegen SG Beispiel" in post.design_snapshot["prompts"]["feed"]["rendered"]
+    assert post.design_snapshot["stories"][0]["prompt"]["name"] == "default-image-story"
+    assert Image.open(post.feed_path).size == (1080, 1350)
+
+
+def test_openai_text_generator_uses_resolved_prompt_without_live_request():
+    prompt = builtin_prompt("text", "announcement", "none", facts())
+    generator = OpenAITextGenerator("test-key", "unused")
+
+    class Responses:
+        def create(self, model, input):
+            assert model == prompt.model
+            assert input == prompt.rendered
+            return type(
+                "Response",
+                (),
+                {
+                    "output_text": "Kopierbarer Testtext",
+                    "usage": type("Usage", (), {"total_tokens": 42})(),
+                },
+            )()
+
+    generator.client = type("Client", (), {"responses": Responses()})()
+    result = generator.generate({"text_prompt": prompt})
+    assert result.text == "Kopierbarer Testtext"
+    assert result.prompt_version == "default-text-announcement:v1"
+    assert result.tokens == 42
