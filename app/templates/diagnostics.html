@@ -1,0 +1,11 @@
+{% extends 'base.html' %}{% block content %}
+<h1>FUSSBALL.DE-Provider-Diagnose</h1>
+<div class="warning">Ausschließlich lesender, manuell aktivierter Diagnosemodus. Er verändert keine Spiele oder Beiträge und löst keine Veröffentlichung aus.</div>
+<form method="post" action="/diagnostics/fussball/{{teams[0].id if teams else ''}}" class="gridform" onsubmit="this.action='/diagnostics/fussball/'+this.team_id.value">
+<input type="hidden" name="csrf_token" value="{{csrf}}"><label>Mannschaft<select name="team_id">{% for t in teams %}<option value="{{t.id}}">{{t.display_name}}</option>{% endfor %}</select></label><label>Bestätigung<input name="confirmation" placeholder="NUR LESEN" required></label><button>Live-Diagnose bewusst starten</button></form>
+{% for x in snapshots %}<section><h2>{{x.parser_result.get('team_name','Unbekannte Mannschaft')}}</h2><p>{{x.source_url}} · {{x.fetched_at}} · HTTP {{x.status_code}} · SHA-256 <code>{{x.checksum}}</code></p>
+{% if x.error %}<div class="alert">{{x.error}}</div>{% endif %}{% if x.parser_result.get('parser_warnings') %}<div class="warning">{{x.parser_result.get('parser_warnings')|join('; ')}}</div>{% endif %}
+<table><tr><th>Spiel-ID</th><th>Begegnung</th><th>Anpfiff Berlin</th><th>Wettbewerb</th><th>Status/Warnungen</th></tr>{% for game in x.parser_result.get('games',[]) %}<tr><td><code>{{game.external_id}}</code></td><td>{{game.home_team}} – {{game.away_team}}</td><td>{{game.kickoff_berlin}}</td><td>{{game.competition or '—'}}<small>Nr. {{game.game_number or '—'}}</small></td><td><span class="badge">{{game.status}}</span><small>{{game.warnings|join('; ')}}</small></td></tr>{% endfor %}</table>
+<p>Erkannte Spiele: {{x.parser_result.get('games',[])|length}} · Fixture-Vergleich: <code>{{x.parser_result.get('fixture_comparison',{})}}</code></p><div><a class="button" href="/diagnostics/{{x.id}}/html">HTML laden</a> <a class="button" href="/diagnostics/{{x.id}}/import">Spielübernahme prüfen</a></div>
+<form method="post" action="/diagnostics/{{x.id}}/fixture"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Fixture-Name<input name="name" required></label><button>Als Fixture übernehmen</button></form></section>{% else %}<p>Noch keine Diagnose-Snapshots.</p>{% endfor %}
+{% endblock %}

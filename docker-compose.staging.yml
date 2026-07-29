@@ -1,0 +1,67 @@
+name: social-media-agent-staging
+services:
+  db:
+    volumes:
+      - ${STAGING_DATA_ROOT:?STAGING_DATA_ROOT fehlt}/postgres:/var/lib/postgresql/data
+  migrate:
+    env_file: !override [.env.staging]
+    environment:
+      ENVIRONMENT: staging
+      PUBLISHER_MODE: dry-run
+      GLOBAL_PUBLISH_ENABLED: "false"
+    secrets: [db_password, session_secret]
+  web:
+    env_file: !override [.env.staging]
+    environment:
+      ENVIRONMENT: staging
+      PUBLISHER_MODE: dry-run
+      GLOBAL_PUBLISH_ENABLED: "false"
+      META_ACCESS_TOKEN: ""
+      REQUIRE_MEDIA_MOUNT: "true"
+      LOG_ROOT: /app/data/logs
+    secrets: [db_password, session_secret, openai_api_key, smoke_admin_password]
+    volumes:
+      - ${STAGING_DATA_ROOT}/generated:/app/data/generated
+      - ${STAGING_DATA_ROOT}/uploads:/app/data/uploads
+      - ${STAGING_DATA_ROOT}/provider-snapshots:/app/data/provider-snapshots
+      - ${STAGING_DATA_ROOT}/logs:/app/data/logs
+      - ${STAGING_BACKUP_ROOT}:/app/data/backups
+      - type: bind
+        source: ${MEDIA_HOST_ROOT:?MEDIA_HOST_ROOT fehlt}
+        target: /app/external-media
+        read_only: true
+  worker:
+    env_file: !override [.env.staging]
+    environment:
+      ENVIRONMENT: staging
+      PUBLISHER_MODE: dry-run
+      GLOBAL_PUBLISH_ENABLED: "false"
+      META_ACCESS_TOKEN: ""
+      REQUIRE_MEDIA_MOUNT: "true"
+      LOG_ROOT: /app/data/logs
+    secrets: [db_password, session_secret, openai_api_key, smoke_admin_password]
+    volumes:
+      - ${STAGING_DATA_ROOT}/generated:/app/data/generated
+      - ${STAGING_DATA_ROOT}/uploads:/app/data/uploads
+      - ${STAGING_DATA_ROOT}/provider-snapshots:/app/data/provider-snapshots
+      - ${STAGING_DATA_ROOT}/logs:/app/data/logs
+      - ${STAGING_BACKUP_ROOT}:/app/data/backups
+      - type: bind
+        source: ${MEDIA_HOST_ROOT}
+        target: /app/external-media
+        read_only: true
+  proxy:
+    ports: !override ["127.0.0.1:${HTTP_PORT:-8080}:80"]
+  backup:
+    image: postgres:16-alpine
+    profiles: [tools]
+    entrypoint: [sh, -c]
+    command: ["echo Backup-Container ist nur für scripts/staging-backup.sh vorgesehen"]
+    volumes:
+      - ${STAGING_BACKUP_ROOT:?STAGING_BACKUP_ROOT fehlt}:/backups
+    restart: "no"
+secrets:
+  db_password: {file: "${SECRETS_ROOT:?SECRETS_ROOT fehlt}/db_password"}
+  session_secret: {file: "${SECRETS_ROOT}/session_secret"}
+  openai_api_key: {file: "${SECRETS_ROOT}/openai_api_key"}
+  smoke_admin_password: {file: "${SECRETS_ROOT}/smoke_admin_password"}
