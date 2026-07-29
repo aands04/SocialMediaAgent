@@ -1,1 +1,55 @@
-{% extends 'base.html' %}{% block content %}<h1>Spiele und lokale Testdaten</h1><p class="warning">Dieses Formular erzeugt ausschließlich lokale Mock-Spiele und ruft keinen externen Dienst auf.</p><form method="post" action="/games/mock" class="gridform"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Mannschaft<select name="team_id">{% for t in teams %}<option value="{{t.id}}">{{t.display_name}}</option>{% endfor %}</select></label><label>Heimteam<input name="home_team" required></label><label>Gastteam<input name="away_team" required></label><label>Anpfiff (Europe/Berlin)<input type="datetime-local" name="kickoff" required></label><label>Spielort<input name="venue"></label><button>Mock-Spiel anlegen</button></form><table><tr><th>Spiel</th><th>Anpfiff</th><th>Quelle</th><th>Status</th><th>Beitrag erzeugen</th></tr>{% for x in items %}<tr><td>{{x.home_team}} – {{x.away_team}}</td><td>{{x.kickoff|berlin}}</td><td>{{x.provider}} / {{x.source_url}}</td><td>{{x.status}}</td><td><form method="post" action="/games/{{x.id}}/generate"><input type="hidden" name="csrf_token" value="{{csrf}}"><button name="post_type" value="announcement">Ankündigung</button><button name="post_type" value="reminder">Erinnerung</button><button name="post_type" value="result">Ergebnis</button></form>{% if x.status=='provisional' %}<form method="post" action="/games/{{x.id}}/confirm-provisional"><input type="hidden" name="csrf_token" value="{{csrf}}"><input name="confirmation" placeholder="VORLÄUFIGES SPIEL BESTÄTIGEN" required><button class="warning">Manuell bestätigen</button></form>{% endif %}</td></tr>{% endfor %}</table>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>Spiele und lokale Testdaten</h1>
+<p class="warning">Dieses Formular erzeugt ausschließlich lokale Mock-Spiele und ruft keinen externen Dienst auf.</p>
+<form method="post" action="/games/mock" class="gridform">
+  <input type="hidden" name="csrf_token" value="{{csrf}}">
+  <label>Mannschaft<select name="team_id">{% for t in teams %}<option value="{{t.id}}">{{t.display_name}}</option>{% endfor %}</select></label>
+  <label>Heimteam<input name="home_team" required></label>
+  <label>Gastteam<input name="away_team" required></label>
+  <label>Anpfiff (Europe/Berlin)<input type="datetime-local" name="kickoff" required></label>
+  <label>Wettbewerb<input name="competition"></label>
+  <label>Spielort<input name="venue"></label>
+  <label>Platzart<select name="pitch"><option value="">Unbekannt</option><option value="Rasenplatz">Rasenplatz</option><option value="Kunstrasenplatz">Kunstrasenplatz</option></select></label>
+  <button>Mock-Spiel anlegen</button>
+</form>
+<p>Für KI-Auswärtsgrafiken müssen Wettbewerb, Ort und Platzart vor der Erzeugung vollständig sein. Die Ausgabe lautet automatisch <strong>RP Ort</strong> oder <strong>KR Ort</strong>; Heimspiele verwenden <strong>Habichtswaldstadion Ehlen</strong>.</p>
+<table>
+  <tr><th>Spiel</th><th>Anpfiff</th><th>Quelle</th><th>Status</th><th>Spieldetails</th><th>Beitrag erzeugen</th></tr>
+  {% for x in items %}
+  <tr>
+    <td>{{x.home_team}} – {{x.away_team}}</td>
+    <td>{{x.kickoff|berlin}}</td>
+    <td>{{x.provider}} / {{x.source_url}}</td>
+    <td>{{x.status}}</td>
+    <td>
+      <details>
+        <summary>{{x.competition or 'Wettbewerb fehlt'}} · {{x.venue or 'Ort fehlt'}} · {{x.pitch or 'Platzart fehlt'}}</summary>
+        <form method="post" action="/games/{{x.id}}/details">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <label>Wettbewerb<input name="competition" value="{{x.competition or ''}}" required></label>
+          <label>Ort ohne vollständige Anschrift<input name="venue" value="{{x.venue or ''}}" required></label>
+          <label>Platzart<select name="pitch" required><option value="">Bitte wählen</option><option value="Rasenplatz" {% if x.pitch=='Rasenplatz' %}selected{% endif %}>Rasenplatz</option><option value="Kunstrasenplatz" {% if x.pitch=='Kunstrasenplatz' %}selected{% endif %}>Kunstrasenplatz</option></select></label>
+          <button>Spieldetails speichern</button>
+        </form>
+      </details>
+    </td>
+    <td>
+      <form method="post" action="/games/{{x.id}}/generate">
+        <input type="hidden" name="csrf_token" value="{{csrf}}">
+        <button name="post_type" value="announcement">Ankündigung</button>
+        <button name="post_type" value="reminder">Erinnerung</button>
+        <button name="post_type" value="result">Ergebnis</button>
+      </form>
+      {% if x.status=='provisional' %}
+      <form method="post" action="/games/{{x.id}}/confirm-provisional">
+        <input type="hidden" name="csrf_token" value="{{csrf}}">
+        <input name="confirmation" placeholder="VORLÄUFIGES SPIEL BESTÄTIGEN" required>
+        <button class="warning">Manuell bestätigen</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
