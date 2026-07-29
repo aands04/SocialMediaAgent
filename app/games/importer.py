@@ -58,6 +58,19 @@ def _different(current, value) -> bool:
 
 
 def _invalidate_publications(db: Session, game: Game, kickoff_delta) -> None:
+    open_jobs = db.scalars(
+        select(PublicationJob).where(
+            PublicationJob.game_id == game.id,
+            PublicationJob.status.in_(OPEN_JOB_STATUSES),
+        )
+    ).all()
+    if kickoff_delta:
+        for job in open_jobs:
+            if job.absolute_time:
+                job.stale_time = True
+            else:
+                job.scheduled_at = _utc(job.scheduled_at) + kickoff_delta
+
     posts = db.scalars(
         select(Post).where(Post.game_id == game.id, Post.status.in_(REAPPROVAL_POST_STATUSES))
     ).all()
@@ -70,17 +83,7 @@ def _invalidate_publications(db: Session, game: Game, kickoff_delta) -> None:
 
     if not post_ids:
         return
-    jobs = db.scalars(
-        select(PublicationJob).where(
-            PublicationJob.post_id.in_(post_ids), PublicationJob.status.in_(OPEN_JOB_STATUSES)
-        )
-    ).all()
-    for job in jobs:
-        if kickoff_delta:
-            if job.absolute_time:
-                job.stale_time = True
-            else:
-                job.scheduled_at = _utc(job.scheduled_at) + kickoff_delta
+    for job in (job for job in open_jobs if job.post_id in post_ids):
         job.status = JobStatus.UNAPPROVED
         job.approval_status = "reapproval_required"
         job.approved_post_version = None

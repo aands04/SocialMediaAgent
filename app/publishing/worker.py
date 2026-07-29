@@ -28,9 +28,15 @@ def process_job(db:Session,job_id:str,publisher:SocialMediaPublisher,settings:Se
             if "Version" in message: post.status=PostStatus.REAPPROVAL; job.status=JobStatus.UNAPPROVED
             db.commit(); raise PublishError(message)
     job.status=JobStatus.PUBLISHING; job.attempts+=1; job.last_attempt_at=datetime.now(timezone.utc); db.commit()
-    db.expire_all(); stop=db.get(SystemSetting,"emergency_stop")
-    if stop and stop.value.get("enabled"):
-        job=db.get(PublicationJob,job_id); job.status=JobStatus.SCHEDULED; job.error="Not-Aus wurde vor Übergabe aktiviert"; db.commit(); raise PublishError("Not-Aus aktiv")
+    db.expire_all()
+    job=db.get(PublicationJob,job_id); post=db.get(Post,job.post_id); game=db.get(Game,job.game_id); stop=db.get(SystemSetting,"emergency_stop")
+    final_checks=[(not(stop and stop.value.get("enabled")),"Not-Aus aktiv"),(post.status in {PostStatus.APPROVED,PostStatus.SCHEDULED,PostStatus.PARTIAL},"Beitrag nicht mehr freigegeben"),(post.version==job.approved_post_version,"Freigegebene Version verändert"),(game.status not in {"cancelled","postponed","provisional"},"Spielstatus sperrt Veröffentlichung"),(not game.overrides.get("automation_blocked"),"Spiel ist für Automatisierung gesperrt"),(not job.stale_time,"Veröffentlichungszeit ist möglicherweise veraltet")]
+    for ok,message in final_checks:
+        if not ok:
+            if message=="Not-Aus aktiv": job.status=JobStatus.SCHEDULED
+            else:
+                job.status=JobStatus.UNAPPROVED; job.approval_status="reapproval_required"
+            job.error=f"Prüfung unmittelbar vor Veröffentlichung: {message}"; db.commit(); raise PublishError(message)
     try: result=publisher.publish(account_id=page.account_id,kind=job.kind,media_url=job.media_path,caption=job.text_snapshot,idempotency_key=job.idempotency_key)
     except PublishError as e:
         job.error=str(e); job.status=JobStatus.RETRY if e.retryable and job.attempts<settings.max_publish_attempts else (JobStatus.UNCERTAIN if "unklar" in str(e) else JobStatus.FAILED); db.commit(); raise

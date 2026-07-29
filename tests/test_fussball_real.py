@@ -171,6 +171,33 @@ def test_kickoff_change_requires_reapproval_and_reschedules_relative_only(db, tm
     assert all(job.approval_status == "reapproval_required" for job in (relative, absolute))
 
 
+def test_pending_post_jobs_are_rescheduled_without_invalidating_post(db, tmp_path):
+    team, user = entities(db)
+    item = snapshot(db, team)
+    import_snapshot(db, item, user)
+    game = db.scalar(select(Game).where(Game.external_id == item.parser_result["games"][0]["external_id"]))
+    post, relative, absolute = approved_publications(db, game, team, user, tmp_path)
+    post.status = PostStatus.PENDING
+    post.approved_version = None
+    original_version = post.version
+    for job in (relative, absolute):
+        job.status = JobStatus.UNAPPROVED
+        job.approval_status = "unapproved"
+        job.approved_post_version = None
+    old_relative, old_absolute = relative.scheduled_at, absolute.scheduled_at
+    db.commit()
+
+    update_snapshot_game(db, item, kickoff="2026-08-02T13:15:00+00:00")
+    import_snapshot(db, item, user)
+    db.refresh(post); db.refresh(relative); db.refresh(absolute)
+
+    assert post.status == PostStatus.PENDING and post.version == original_version
+    assert relative.scheduled_at == old_relative + timedelta(hours=2)
+    assert relative.status == JobStatus.UNAPPROVED and not relative.stale_time
+    assert absolute.scheduled_at == old_absolute and absolute.stale_time
+    assert absolute.status == JobStatus.UNAPPROVED
+
+
 def test_cancellation_blocks_approved_publications(db, tmp_path):
     team, user = entities(db); item = snapshot(db, team); import_snapshot(db, item, user)
     game = db.scalar(select(Game).where(Game.external_id == item.parser_result["games"][0]["external_id"]))
