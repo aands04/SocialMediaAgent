@@ -210,7 +210,7 @@ def post_detail(post_id:str,request:Request,current=Depends(current_user),db:Ses
     if not item: raise HTTPException(404)
     require(current,db,"view",item.team_id); jobs=db.scalars(select(PublicationJob).where(PublicationJob.post_id==item.id).order_by(PublicationJob.scheduled_at)).all(); pages=db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
     from app.rendering.service import Renderer
-    checks={}; renderer=Renderer(settings.generated_root)
+    checks={}; renderer=Renderer(settings.generated_root,settings.media_root,Path("data/uploads"))
     for job in jobs:
         try:
             report=renderer.validate(Path(job.media_path),job.kind); checks[job.id]=f"PNG geprüft – {report['width']} × {report['height']}"
@@ -225,6 +225,19 @@ def post_text(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_
     try: edit_text(db,item,current,text_value,version)
     except ApprovalError as e: raise HTTPException(409,str(e)) from e
     audit(db,current,"post.text_edited","post",item.id,item.team_id); db.commit(); return redirect(f"/posts/{item.id}")
+
+@router.post("/posts/{post_id}/rerender")
+def rerender_post_media(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),version:int=Form(),story_job_ids:list[str]=Form(default=[]),current=Depends(current_user),db:Session=Depends(get_db)):
+    from app.posts.service import rerender_post
+    from app.rendering.service import Renderer
+    check_csrf(request,csrf_token_value); item=db.get(Post,post_id)
+    if not item: raise HTTPException(404)
+    require(current,db,"generate",item.team_id)
+    if item.version!=version: raise HTTPException(409,"Beitrag wurde zwischenzeitlich geändert")
+    allowed_story_ids=set(db.scalars(select(PublicationJob.id).where(PublicationJob.post_id==item.id,PublicationJob.kind=="story")))
+    if not set(story_job_ids).issubset(allowed_story_ids): raise HTTPException(422,"Ungültige Story-Auswahl")
+    rerender_post(db,item,Renderer(settings.generated_root,settings.media_root,Path("data/uploads")),story_job_ids)
+    audit(db,current,"post.graphics_rerendered","post",item.id,item.team_id,{"post_version":item.version,"story_jobs":story_job_ids}); db.commit(); return redirect(f"/posts/{item.id}","Grafiken versioniert neu erzeugt")
 
 @router.post("/posts/{post_id}/approve")
 def approve_post(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),job_ids:list[str]=Form(default=[]),current=Depends(current_user),db:Session=Depends(get_db)):
@@ -281,7 +294,7 @@ def generate_game_post(game_id:str,request:Request,csrf_token_value:str=Form(ali
     check_csrf(request,csrf_token_value); game=db.get(Game,game_id)
     if not game: raise HTTPException(404)
     require(current,db,"generate",game.team_id); team=db.get(Team,game.team_id)
-    try: post=create_post(db,game,team,FixtureTextGenerator(),Renderer(settings.generated_root),post_type)
+    try: post=create_post(db,game,team,FixtureTextGenerator(),Renderer(settings.generated_root,settings.media_root,Path("data/uploads")),post_type)
     except ValueError as e: raise HTTPException(422,str(e)) from e
     audit(db,current,"post.generated_manually","post",post.id,game.team_id,{"generator":"fixture"}); db.commit(); return redirect(f"/posts/{post.id}","Beitrag lokal erzeugt")
 

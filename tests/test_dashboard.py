@@ -10,7 +10,17 @@ from app.db import Base, get_db
 from app.games.live_test import serialize
 from app.games.provider import FussballDeProvider
 from app.main import app
-from app.models import Game, InstagramPage, ProviderSnapshot, Role, Team, User
+from app.models import (
+    AuditLog,
+    Game,
+    InstagramPage,
+    Post,
+    ProviderSnapshot,
+    PublicationJob,
+    Role,
+    Team,
+    User,
+)
 
 
 @pytest.fixture
@@ -53,6 +63,11 @@ def test_dashboard_admin_flow(browser):
     with factory() as db: game=db.query(__import__("app.models",fromlist=["Game"]).Game).one()
     result=client.post(f"/games/{game.id}/generate",data={"csrf_token":token,"post_type":"announcement"},follow_redirects=False)
     assert result.status_code==303 and result.headers["location"].startswith("/posts/")
+    with factory() as db:
+        post=db.query(Post).one(); story_ids=[job.id for job in db.query(PublicationJob).filter_by(post_id=post.id,kind="story")]; post_version=post.version
+    assert client.post(f"/posts/{post.id}/rerender",data={"csrf_token":"wrong","version":post_version}).status_code==403
+    result=client.post(f"/posts/{post.id}/rerender",data={"csrf_token":token,"version":post_version,"story_job_ids":story_ids},follow_redirects=False); assert result.status_code==303
+    with factory() as db: assert db.query(AuditLog).filter_by(action="post.graphics_rerendered").count()==1
     records=FussballDeProvider().parse(open("tests/fixtures/fussball_sv_ehlen_2627.html",encoding="utf-8").read())
     with factory() as db:
         snapshot=ProviderSnapshot(team_id=team.id,source_url=team.fussball_url,status_code=200,checksum="b"*64,relative_path="dashboard/test.html",parser_result={"team_name":team.display_name,"games":[serialize(x) for x in records]}); db.add(snapshot); db.commit(); snapshot_id=snapshot.id
