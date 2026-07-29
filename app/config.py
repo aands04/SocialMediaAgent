@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     media_root: Path = Path("data/external-media")
     generated_root: Path = Path("data/generated")
     openai_model: str = "gpt-5-mini"
+    openai_image_model: str = "gpt-image-2"
+    openai_image_quality: str = "medium"
     openai_api_key: str | None = None
     meta_graph_version: str = "v23.0"
     meta_access_token: str | None = None
@@ -26,6 +28,7 @@ class Settings(BaseSettings):
     log_root: Path = Path("data/logs")
     backup_root: Path = Path("data/backups")
     text_generator_mode: str = "mock"
+    image_generator_mode: str = "playwright"
 
 @lru_cache
 def get_settings() -> Settings:
