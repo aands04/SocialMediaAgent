@@ -15,6 +15,7 @@ from app.models import (
     Game,
     InstagramPage,
     Post,
+    PromptTemplate,
     ProviderSnapshot,
     PublicationJob,
     Role,
@@ -61,6 +62,10 @@ def test_dashboard_admin_flow(browser):
     result=client.post("/games/mock",data={"csrf_token":token,"team_id":team.id,"home_team":"SV Test","away_team":"FC Fixture","kickoff":"2026-08-10T18:00","venue":"Testplatz"},follow_redirects=False)
     assert result.status_code==303
     with factory() as db: game=db.query(__import__("app.models",fromlist=["Game"]).Game).one()
+    details=client.post(f"/games/{game.id}/details",data={"csrf_token":token,"competition":"Kreisliga A","venue":"Habichtswaldstadion Ehlen","pitch":"Rasenplatz"},follow_redirects=False)
+    assert details.status_code==303
+    with factory() as db:
+        updated=db.get(Game,game.id); assert updated.competition=="Kreisliga A" and updated.pitch=="Rasenplatz"
     result=client.post(f"/games/{game.id}/generate",data={"csrf_token":token,"post_type":"announcement"},follow_redirects=False)
     assert result.status_code==303 and result.headers["location"].startswith("/posts/")
     with factory() as db:
@@ -93,3 +98,23 @@ def test_csrf_and_non_admin_are_rejected(browser):
     page=client.get("/login"); token=re.search(r'name="csrf_token" value="([^"]+)',page.text).group(1)
     client.post("/login",data={"email":"limited@test.invalid","password":"Very-Secure-Test-Password","csrf_token":token})
     assert client.get("/users").status_code==403
+
+
+def test_prompt_dashboard_previews_without_api_and_versions_templates(browser):
+    client,factory=browser
+    token=session_csrf(client)
+    page=client.get("/prompts")
+    assert page.status_code==200 and "KI-Promptvorlagen" in page.text
+    body="Dynamische Grafik: {{ home_team }} gegen {{ away_team }} in {{ venue_display }}"
+    preview=client.post("/prompts/preview",data={"csrf_token":token,"prompt_kind":"image","post_type":"announcement","media_kind":"feed","style_direction":"dramatisch","prompt_body":body})
+    assert preview.status_code==200
+    assert "SV Ehlen gegen SG Beispiel" in preview.text
+    for _version in (1,2):
+        response=client.post("/prompts",data={"csrf_token":token,"name":"sve-feed","prompt_kind":"image","post_type":"announcement","media_kind":"feed","prompt_body":body,"style_direction":"dramatisch","model":"gpt-image-2","quality":"medium"},follow_redirects=False)
+        assert response.status_code==303
+    with factory() as db:
+        items=db.query(PromptTemplate).filter_by(name="sve-feed").order_by(PromptTemplate.version).all()
+        assert [item.version for item in items]==[1,2]
+        assert db.query(AuditLog).filter_by(action="prompt.created").count()==2
+    rejected=client.post("/prompts",data={"csrf_token":token,"name":"bad","prompt_kind":"image","post_type":"announcement","media_kind":"feed","prompt_body":"{{ invented }}","model":"gpt-image-2","quality":"medium"})
+    assert rejected.status_code==422
