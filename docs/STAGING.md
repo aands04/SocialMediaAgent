@@ -24,7 +24,7 @@ sudo sh -c 'umask 077; : > /etc/social-media-agent/secrets/openai_api_key' # lee
 sudo chmod 600 /etc/social-media-agent/secrets/*
 ```
 
-OpenAI ist standardmäßig Mock. Für einen gesonderten Test `TEXT_GENERATOR_MODE=openai` setzen und ausschließlich den API-Key in `openai_api_key` hinterlegen. Niemals Meta-Tokens anlegen.
+OpenAI ist standardmäßig vollständig offline: `TEXT_GENERATOR_MODE=mock` und `IMAGE_GENERATOR_MODE=playwright`. Für einen gesonderten, kostenpflichtigen KI-Test `TEXT_GENERATOR_MODE=openai` und/oder `IMAGE_GENERATOR_MODE=openai` setzen und ausschließlich den API-Key in `openai_api_key` hinterlegen. Das Bildmodell wird mit `OPENAI_IMAGE_MODEL=gpt-image-2`, die Qualität mit `OPENAI_IMAGE_QUALITY=medium` festgelegt. Anschließend Web und Worker neu erstellen, die Prompt-Vorschau und genau einen Beitrag testen und alle Schreibweisen, Spieler, Trikots und Logos vor der Freigabe visuell prüfen. Niemals Meta-Tokens anlegen.
 
 ## 2. SMB sicher read-only mounten
 
