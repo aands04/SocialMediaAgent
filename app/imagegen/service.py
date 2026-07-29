@@ -41,16 +41,17 @@ class OpenAIImageProvider(ImageProvider):
             if references:
                 with ExitStack() as stack:
                     files = [stack.enter_context(path.open("rb")) for path in references]
-                    response = self.client.images.edit(
-                        model=model,
-                        image=files,
-                        prompt=prompt,
-                        size=size,
-                        quality=quality,
-                        input_fidelity="high",
-                        output_format="png",
-                        response_format="b64_json",
-                    )
+                    edit_options = {
+                        "model": model,
+                        "image": files,
+                        "prompt": prompt,
+                        "size": size,
+                        "quality": quality,
+                        "output_format": "png",
+                    }
+                    if not model.startswith("gpt-image-2"):
+                        edit_options["input_fidelity"] = "high"
+                    response = self.client.images.edit(**edit_options)
             else:
                 response = self.client.images.generate(
                     model=model,
@@ -58,7 +59,6 @@ class OpenAIImageProvider(ImageProvider):
                     size=size,
                     quality=quality,
                     output_format="png",
-                    response_format="b64_json",
                 )
             encoded = response.data[0].b64_json
             if not encoded:
