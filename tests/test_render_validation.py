@@ -56,9 +56,14 @@ def test_assets_are_confined_to_allowed_roots_and_symlink_escapes_are_rejected(t
     renderer=Renderer(tmp_path/"out",media,uploads)
     with pytest.raises(RenderValidationError,match="außerhalb"):
         renderer.render("feed","absolute.png",facts()|{"player_image":str(secret)})
-    link=media/"escape.png"; link.symlink_to(secret)
-    with pytest.raises(RenderValidationError,match="außerhalb"):
-        renderer.render("feed","symlink.png",facts()|{"player_image":str(link)})
+    link=media/"escape.png"
+    try:
+        link.symlink_to(secret)
+    except OSError:
+        link=None  # Windows ohne Entwickler-/Symlink-Recht; Linux-CI prüft diesen Pfad.
+    if link:
+        with pytest.raises(RenderValidationError,match="außerhalb"):
+            renderer.render("feed","symlink.png",facts()|{"player_image":str(link)})
     invalid=media/"asset.svg"; invalid.write_text("<svg/>")
     with pytest.raises(RenderValidationError,match="Dateityp"):
         renderer.render("feed","type.png",facts()|{"team_logo":str(invalid)})
