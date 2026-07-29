@@ -27,7 +27,8 @@ def system_status(db:Session,settings:Settings)->dict:
         checks["provider"]={"ok":not latest or not latest.error,"detail":latest.error if latest and latest.error else "kein kritischer Parserfehler"}
     except Exception as exc:
         db.rollback(); checks["provider"]={"ok":False,"detail":f"Providerstatus nicht lesbar: {exc}"}
-    checks["openai"]={"ok":settings.text_generator_mode=="mock" or bool(settings.openai_api_key),"detail":settings.text_generator_mode}
+    openai_needed=settings.text_generator_mode=="openai" or settings.image_generator_mode=="openai"
+    checks["openai"]={"ok":not openai_needed or bool(settings.openai_api_key),"detail":f"Text: {settings.text_generator_mode}; Bild: {settings.image_generator_mode}; Bildmodell: {settings.openai_image_model}"}
     dry=settings.publisher_mode=="dry-run" and not settings.global_publish_enabled and not settings.meta_access_token; checks["publishing"]={"ok":dry,"detail":"DryRun aktiv; Live deaktiviert" if dry else "UNSICHERE KONFIGURATION"}
     if not dry: critical.append("Publishing")
     marker=settings.backup_root/"last-success.json"; checks["backup"]={"ok":marker.is_file(),"detail":marker.read_text()[:200] if marker.is_file() else "noch kein erfolgreicher Backup-Lauf"}
