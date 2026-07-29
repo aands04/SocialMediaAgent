@@ -57,8 +57,26 @@ Backup: `scripts/backup.sh`; Restore in Wartungsmodus: `scripts/restore.sh BACKU
 
 Not-Aus: `system_settings.key='emergency_stop'`, `value={"enabled":true}` stoppt noch nicht begonnene Jobs. Laufende/unklare Vorgänge zuerst bei Meta abgleichen. Weitere Schalter existieren global, je Seite, Team, Beitrag und Job.
 
-## Design-Renderer und Grenzen des MVP
-Feed (1080 × 1350) und Story (1080 × 1920) werden reproduzierbar aus HTML/CSS mit Playwright/Chromium gerendert. Die eingebauten Vorlagen `default-feed` und `default-story` unterstützen Ankündigung und Ergebnis; aktive Datenbankvorlagen werden in ihrer neuesten Version gewählt und vollständig im Beitragssnapshot eingefroren. Reservierte Originalbilder, Logos und lokal hochgeladene Fonts werden als Data-URLs eingebettet, sodass beim Rendern kein externer Abruf erfolgt. Fehlende Logos, Orte oder Fonts verwenden sichtbare, definierte Fallbacks. Für lokale Entwicklung muss ein von Playwright nutzbares Chromium installiert sein; das Docker-Image installiert es automatisch.
+## KI-Prompts, Bildgenerierung und Offline-Fallback
+Unter **KI-Promptvorlagen** werden Bild- und Textprompts mit geprüften Jinja-Platzhaltern versioniert verwaltet. Mannschaftsregeln ordnen getrennte Feed-, Story- und Textprompts zu; einzelne Story-Regeln dürfen einen eigenen Story-Prompt wählen. Die Vorschau ersetzt Platzhalter mit Beispieldaten, ruft aber keine externe API auf. Am erzeugten Beitrag werden Name, Version, Modell, Qualität, Prompttext und vollständig gerenderter Prompt eingefroren. Damit bleibt jede Ausgabe nachvollziehbar und spätere Promptänderungen verändern bestehende Beiträge nicht.
+
+Mit `IMAGE_GENERATOR_MODE=openai` und `TEXT_GENERATOR_MODE=openai` werden Grafiken beziehungsweise Begleittexte über die OpenAI API erzeugt. Standardmodell für Bilder ist `gpt-image-2`. Spielerbild und vorhandene Original-Logos werden als Referenzbilder mit hoher Eingangstreue übergeben. Die zunächst API-kompatibel erzeugte Ausgabe wird lokal verlustarm auf exakt 1080 × 1350 (Feed) beziehungsweise 1080 × 1920 (Story) zugeschnitten und technisch als PNG validiert. Das Modell kann trotz strenger Prompts Text, Logos, Gesichter oder Trikots fehlerhaft wiedergeben; deshalb bleibt die vorhandene manuelle visuelle Freigabe zwingend.
+
+Vor Modellwechseln oder Produktivtests die aktuelle offizielle [OpenAI-Anleitung zur Bildgenerierung](https://developers.openai.com/api/docs/guides/image-generation) und die [Modellseite von GPT Image 2](https://developers.openai.com/api/docs/models/gpt-image-2) erneut prüfen.
+
+`IMAGE_GENERATOR_MODE=playwright` bleibt der standardmäßige, reproduzierbare Offline-Fallback. Dabei werden Feed und Story aus HTML/CSS mit Playwright/Chromium gerendert. Die eingebauten Vorlagen `default-feed` und `default-story` unterstützen Ankündigung und Ergebnis; aktive Datenbankvorlagen werden in ihrer neuesten Version gewählt und vollständig im Beitragssnapshot eingefroren. Für lokale Entwicklung muss ein von Playwright nutzbares Chromium installiert sein; das Docker-Image installiert es automatisch.
+
+Der API-Key wird ausschließlich über das Docker-Secret `openai_api_key` bereitgestellt. Für einen kontrollierten KI-Test in Staging:
+
+```text
+TEXT_GENERATOR_MODE=openai
+IMAGE_GENERATOR_MODE=openai
+OPENAI_MODEL=gpt-5-mini
+OPENAI_IMAGE_MODEL=gpt-image-2
+OPENAI_IMAGE_QUALITY=medium
+```
+
+Nach Änderung der `.env.staging` Web und Worker neu erstellen. Meta/Instagram bleibt davon unabhängig im Dry-Run.
 
 Der FUSSBALL.DE-Parser ist fixture-getestet, muss aber bei HTML-Änderungen angepasst werden. Reale OpenAI-/Meta-Aufrufe wurden nicht durchgeführt. Details und Zustände: [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -78,12 +96,149 @@ Automatisierter Browser-/Integrationslauf: `pytest tests/test_dashboard.py`. Er 
 Der Modus ist standardmäßig aus und verändert weder Spiele noch Beiträge. Nur nach bewusster Aktivierung mit `FUSSBALL_LIVE_TEST_ENABLED=true` kann `python scripts/fussball_live_test.py TEAM_ID` öffentliches HTML lesen. Jeder Abruf wird unverändert und mit SHA-256 unter `data/provider-snapshots/` gespeichert; Parsergebnis oder ein klarer Strukturänderungsfehler landet zusätzlich in `provider_snapshots`. Der Modus plant und veröffentlicht nichts. Abrufintervall und rechtliche/robots-bezogene Vorgaben sind vor Einsatz zu prüfen.
 
 ## Erster Proxmox-Test
-Benötigt werden eine Linux-VM mit Docker Engine/Compose v2, DNS oder Tailscale, ein als read-only eingebundenes SMB-Verzeichnis, ausreichend beschreibbare Docker-Volumes, zufällige Session-/DB-Secrets und ein TLS-Terminierungspunkt. Zuerst Backupziel und Restore prüfen, dann `docker compose config`, Images bauen, Migration/Healthchecks abwarten und den obigen Ablauf vollständig mit Dry-Run durchführen. Meta/OpenAI bleiben deaktiviert. Der Web-/Worker-Entrypoint führt `alembic upgrade head` aus; PostgreSQL-Passwort wird ausschließlich aus Docker Secret gelesen.
+Benötigt werden eine Linux-VM mit Docker Engine/Compose v2, DNS oder Tailscale, ein als read-only eingebundenes SMB-Verzeichnis, ausreichend beschreib…39882 tokens truncated…   Image.new("RGBA", (200, 200), (255, 255, 255, 255)).save(logo)
+    provider = FakeImageProvider()
+    renderer = AIImageRenderer(tmp_path / "out", media, uploads, provider)
+    prompt = builtin_prompt("image", "announcement", "feed", facts())
+    output = renderer.render(
+        "feed",
+        "post/feed.png",
+        {
+            "player_image": str(player),
+            "team_logo": str(logo),
+            "opponent_logo": None,
+            "image_prompt": prompt,
+        },
+    )
+    assert Image.open(output).size == (1080, 1350)
+    assert provider.calls[0]["size"] == "1088x1360"
+    assert provider.calls[0]["model"] == "gpt-image-2"
+    assert provider.calls[0]["references"] == [player.resolve(), logo.resolve()]
 
-## Produktionsnahes Proxmox-Staging
-Die abgesicherte Staging-Konfiguration, der einmalige Migrationsprozess, Docker-Secrets, read-only SMB, Systemprüfung, idempotente Dry-Run-Generalprobe, Provider-Diagnose sowie Backup-/Restore-Probe sind in [`docs/STAGING.md`](docs/STAGING.md) beschrieben. Einstieg: `.env.staging.example` kopieren, ausschließlich zufällige Secret-Dateien anlegen, `docker-compose.yml` mit `docker-compose.staging.yml` starten und anschließend `scripts/staging-check.sh` sowie `scripts/staging-smoke-test.sh` ausführen. Das Staging-Override erzwingt Dry-Run und entfernt Meta-Tokens.
 
-## FUSSBALL.DE-Mannschaftsspielplan
-Der Provider unterstützt neben dem kompakten Testformat die öffentliche Tabelle `#id-team-matchplan-table`: Eine `.row-competition` liefert Datum, Berliner Uhrzeit, Wettbewerb und Spielnummer für die unmittelbar folgende Spielzeile; Heim/Gast und die stabile externe ID stammen aus `.column-club` beziehungsweise `/spiel/.../spiel/ID`. Ein `.hint-pre-publish` markiert sämtliche Treffer als `provisional` und sperrt deren Beitragserstellung. Private Symbolschrift-Glyphen mit `data-obfuscation` werden ausdrücklich nicht dekodiert; nur normale ASCII-Ziffern im vollständigen Format `Zahl : Zahl` werden als unbestätigtes Ergebnis gelesen.
+def test_ai_renderer_refuses_missing_player(tmp_path):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    media.mkdir()
+    uploads.mkdir()
+    renderer = AIImageRenderer(
+        tmp_path / "out", media, uploads, FakeImageProvider()
+    )
+    with pytest.raises(ValueError, match="Spielerbild"):
+        renderer.render(
+            "story",
+            "post/story.png",
+            {
+                "player_image": None,
+                "image_prompt": builtin_prompt(
+                    "image", "announcement", "story", facts()
+                ),
+            },
+        )
 
-Die Provider-Diagnose bleibt read-only. Nach der Vorschau kann ausschließlich ein Administrator mit CSRF-Schutz und der Bestätigung `SPIELE ÜBERNEHMEN` Spiele idempotent importieren. Der Import erzeugt keine Beiträge. Öffentliche AJAX-Aufrufe sind technisch auf HTTPS, `fussball.de`/`www.fussball.de`, die drei bekannten `ajax.team.*`-Pfade, Größenlimit, Timeout und begrenztes Backoff beschränkt. Ob `ajax.team.prev.games` lesbare Ergebnisse liefert, wurde in dieser Änderung nicht live geprüft; verschleierte Werte bleiben deshalb leer.
+
+def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    media.mkdir()
+    uploads.mkdir()
+    player = media / "player.jpg"
+    Image.new("RGB", (600, 900), "blue").save(player)
+    monkeypatch.setattr(
+        "app.posts.service.get_settings", lambda: Settings(media_root=media)
+    )
+    page = InstagramPage(
+        internal_name="main",
+        display_name="Hauptseite",
+        username="sve",
+        club="SV Ehlen",
+        active=True,
+        connection_status="connected",
+    )
+    db.add(page)
+    db.flush()
+    team = Team(
+        internal_name="erste",
+        display_name="SV Ehlen",
+        short_name="SVE",
+        slug="sve",
+        club="SV Ehlen",
+        fussball_url="https://www.fussball.de/team",
+        instagram_page_id=page.id,
+        media_subdir="erste",
+        rules={"feed_before_minutes": 1440},
+    )
+    db.add(team)
+    db.flush()
+    game = Game(
+        team_id=team.id,
+        external_id="ai-1",
+        home_team="SV Ehlen",
+        away_team="SG Beispiel",
+        kickoff=datetime.now(timezone.utc) + timedelta(days=3),
+        competition="Kreisliga A",
+        venue="Ehlen",
+        pitch="Rasenplatz",
+        source_url=team.fussball_url,
+    )
+    db.add(game)
+    db.flush()
+    db.add_all(
+        [
+            MediaAsset(
+                team_id=team.id,
+                relative_path="player.jpg",
+                filename="player.jpg",
+                mime_type="image/jpeg",
+                size=player.stat().st_size,
+                checksum="x" * 64,
+                mtime=datetime.now(timezone.utc),
+            ),
+            StoryRule(
+                team_id=team.id,
+                name="24h",
+                post_type="announcement",
+                reference="kickoff",
+                direction="before",
+                offset_minutes=360,
+                template="default-story",
+            ),
+        ]
+    )
+    db.commit()
+    post = create_post(
+        db,
+        game,
+        team,
+        FixtureTextGenerator(),
+        AIImageRenderer(tmp_path / "out", media, uploads, FakeImageProvider()),
+    )
+    assert post.design_snapshot["mode"]["image"] == "openai"
+    assert post.design_snapshot["prompts"]["feed"]["name"] == "default-image-feed"
+    assert "SV Ehlen gegen SG Beispiel" in post.design_snapshot["prompts"]["feed"]["rendered"]
+    assert post.design_snapshot["stories"][0]["prompt"]["name"] == "default-image-story"
+    assert Image.open(post.feed_path).size == (1080, 1350)
+
+
+def test_openai_text_generator_uses_resolved_prompt_without_live_request():
+    prompt = builtin_prompt("text", "announcement", "none", facts())
+    generator = OpenAITextGenerator("test-key", "unused")
+
+    class Responses:
+        def create(self, model, input):
+            assert model == prompt.model
+            assert input == prompt.rendered
+            return type(
+                "Response",
+                (),
+                {
+                    "output_text": "Kopierbarer Testtext",
+                    "usage": type("Usage", (), {"total_tokens": 42})(),
+                },
+            )()
+
+    generator.client = type("Client", (), {"responses": Responses()})()
+    result = generator.generate({"text_prompt": prompt})
+    assert result.text == "Kopierbarer Testtext"
+    assert result.prompt_version == "default-text-announcement:v1"
+    assert result.tokens == 42
