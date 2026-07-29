@@ -33,7 +33,7 @@ def test_feed_story_player_image_logo_fallback_and_long_names(tmp_path):
         "secondary_color":"#ffffff",
         "competition":"Kreisliga A",
     }
-    renderer=Renderer(tmp_path/"out")
+    renderer=Renderer(tmp_path/"out",media_root=tmp_path,upload_root=tmp_path)
     feed=renderer.render("feed","feed.png",data); story=renderer.render("story","story.png",data)
     with Image.open(feed) as image:
         assert image.size==(1080,1350)
@@ -43,7 +43,30 @@ def test_feed_story_player_image_logo_fallback_and_long_names(tmp_path):
 
 def test_missing_font_falls_back_and_fixture_text_uses_berlin_time(tmp_path):
     data=facts() | {"primary_font_asset":{"family":"Fehlt","path":str(tmp_path/"missing.woff2")}}
-    assert Renderer(tmp_path).render("feed","fallback.png",data).is_file()
+    assert Renderer(tmp_path/"out",media_root=tmp_path,upload_root=tmp_path).render("feed","fallback.png",data).is_file()
     text=FixtureTextGenerator().generate(facts()).text
     assert "01.08.2026" in text and "20:00 Uhr" in text
     assert "T18:00:00" not in text and "+00:00" not in text
+
+
+def test_assets_are_confined_to_allowed_roots_and_symlink_escapes_are_rejected(tmp_path):
+    media=tmp_path/"media"; uploads=tmp_path/"uploads"; outside=tmp_path/"outside"
+    media.mkdir(); uploads.mkdir(); outside.mkdir()
+    secret=outside/"secret.png"; Image.new("RGB",(20,20),"red").save(secret)
+    renderer=Renderer(tmp_path/"out",media,uploads)
+    with pytest.raises(RenderValidationError,match="außerhalb"):
+        renderer.render("feed","absolute.png",facts()|{"player_image":str(secret)})
+    link=media/"escape.png"; link.symlink_to(secret)
+    with pytest.raises(RenderValidationError,match="außerhalb"):
+        renderer.render("feed","symlink.png",facts()|{"player_image":str(link)})
+    invalid=media/"asset.svg"; invalid.write_text("<svg/>")
+    with pytest.raises(RenderValidationError,match="Dateityp"):
+        renderer.render("feed","type.png",facts()|{"team_logo":str(invalid)})
+    with pytest.raises(RenderValidationError,match="Ausgabepfad"):
+        renderer.render("feed","../escape.png",facts())
+
+
+def test_template_scripts_and_file_resources_are_removed(tmp_path):
+    malicious={"name":"test","version":1,"html_template":"<main class='canvas'><script>document.body.innerHTML='';throw new Error('executed')</script><img src='file:///etc/passwd'><div class='teams'>{{ home_team }} gegen {{ away_team }}</div></main>","css":".canvas{width:100%;height:100%;background:linear-gradient(red,blue);color:white}.teams{font-size:60px}","media_kind":"feed"}
+    rendered=Renderer(tmp_path).render("feed","safe.png",facts()|{"template":malicious})
+    assert rendered.is_file() and Image.open(rendered).size==(1080,1350)
