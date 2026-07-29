@@ -228,7 +228,7 @@ def post_text(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_
 
 @router.post("/posts/{post_id}/rerender")
 def rerender_post_media(post_id:str,request:Request,csrf_token_value:str=Form(alias="csrf_token"),version:int=Form(),story_job_ids:list[str]=Form(default=[]),current=Depends(current_user),db:Session=Depends(get_db)):
-    from app.posts.service import rerender_post
+    from app.posts.service import RerenderConflict, rerender_post
     from app.rendering.service import Renderer
     check_csrf(request,csrf_token_value); item=db.get(Post,post_id)
     if not item: raise HTTPException(404)
@@ -236,7 +236,9 @@ def rerender_post_media(post_id:str,request:Request,csrf_token_value:str=Form(al
     if item.version!=version: raise HTTPException(409,"Beitrag wurde zwischenzeitlich geändert")
     allowed_story_ids=set(db.scalars(select(PublicationJob.id).where(PublicationJob.post_id==item.id,PublicationJob.kind=="story")))
     if not set(story_job_ids).issubset(allowed_story_ids): raise HTTPException(422,"Ungültige Story-Auswahl")
-    rerender_post(db,item,Renderer(settings.generated_root,settings.media_root,Path("data/uploads")),story_job_ids)
+    try: rerender_post(db,item,Renderer(settings.generated_root,settings.media_root,Path("data/uploads")),story_job_ids)
+    except RerenderConflict as exc:
+        db.rollback(); raise HTTPException(409,str(exc)) from exc
     audit(db,current,"post.graphics_rerendered","post",item.id,item.team_id,{"post_version":item.version,"story_jobs":story_job_ids}); db.commit(); return redirect(f"/posts/{item.id}","Grafiken versioniert neu erzeugt")
 
 @router.post("/posts/{post_id}/approve")

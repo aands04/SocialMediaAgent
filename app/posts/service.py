@@ -22,6 +22,10 @@ from app.rendering.service import Renderer, builtin_template
 from app.textgen.service import TextGenerator
 
 
+class RerenderConflict(ValueError):
+    pass
+
+
 def reserve_image(db:Session,team_id:str,game_id:str)->MediaAsset|None:
     existing=db.scalar(select(MediaAsset).where(MediaAsset.reserved_game_id==game_id))
     if existing:return existing
@@ -125,8 +129,14 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
 def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]|None=None)->Post:
     game=db.get(Game,post.game_id); team=db.get(Team,post.team_id); asset=db.get(MediaAsset,post.media_asset_id) if post.media_asset_id else None
     if not game or not team: raise ValueError("Beitrag hat keine gültigen Spiel- oder Mannschaftsdaten")
-    facts=_facts(db,game,team,asset,post.post_type); jobs=list(db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id)))
-    selected=set(story_job_ids or []); old_snapshot=dict(post.design_snapshot or {}); snapshots={entry.get("rule_id"):entry for entry in old_snapshot.get("stories",[])}
+    jobs=list(db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id).with_for_update())); selected=set(story_job_ids or [])
+    story_jobs={job.id:job for job in jobs if job.kind=="story"}
+    if not selected.issubset(story_jobs): raise RerenderConflict("Mindestens eine ausgewählte Story gehört nicht zu diesem Beitrag")
+    if any(job.status==JobStatus.PUBLISHED for job in jobs if job.kind=="feed"):
+        raise RerenderConflict("Der Feed wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
+    if any(story_jobs[job_id].status==JobStatus.PUBLISHED for job_id in selected):
+        raise RerenderConflict("Eine ausgewählte Story wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
+    facts=_facts(db,game,team,asset,post.post_type); old_snapshot=dict(post.design_snapshot or {}); snapshots={entry.get("rule_id"):entry for entry in old_snapshot.get("stories",[])}
     feed_design=_design(db,team.feed_template,post.post_type,"feed"); post.feed_version+=1
     post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v{post.feed_version}.png",{**facts,"template":feed_design}))
     for job in jobs:
