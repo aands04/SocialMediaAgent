@@ -1,1 +1,51 @@
-{% extends 'base.html' %}{% block content %}<h1>Beitrag prüfen</h1><p>Status: <span class="badge">{{item.status.value}}</span> · Beitragsversion {{item.version}}</p>{% if item.critical_warnings %}<div class="alert"><strong>Kritische Hinweise:</strong> {{item.critical_warnings|join('; ')}}</div>{% endif %}<h2>Visuelle Prüfübersicht</h2><div class="media-grid">{% for x in jobs %}<figure><figcaption>{{x.kind|upper}} · {{x.scheduled_at|berlin}}</figcaption><img src="/posts/{{item.id}}/media/{{x.id}}" alt="Vorschau {{x.kind}}"><div class="media-check">{{checks[x.id]}}</div></figure>{% endfor %}</div><form method="post" action="/posts/{{item.id}}/rerender"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}"><fieldset><legend>Grafiken neu erzeugen</legend><p>Der Feed wird immer versioniert neu erzeugt. Storys auswählen:</p>{% for x in jobs if x.kind=='story' %}<label><input type="checkbox" name="story_job_ids" value="{{x.id}}" checked> Story {{x.scheduled_at|berlin}}</label>{% endfor %}<button>Grafiken neu erzeugen</button></fieldset></form><form method="post" action="/posts/{{item.id}}/text"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}"><label>Begleittext<textarea name="text" rows="8" required>{{item.text}}</textarea></label><button>Text versioniert speichern</button></form><h2>Veröffentlichungsaufträge</h2><form method="post" action="/posts/{{item.id}}/approve"><input type="hidden" name="csrf_token" value="{{csrf}}"><table><tr><th>Freigeben</th><th>Typ</th><th>Zeitpunkt</th><th>Status</th><th>Medienprüfung</th></tr>{% for x in jobs %}<tr class="{% if x.scheduled_at < now %}late{% endif %}"><td><input type="checkbox" name="job_ids" value="{{x.id}}" checked></td><td>{{x.kind}}</td><td>{{x.scheduled_at|berlin}}{% if x.scheduled_at < now %} <strong>verstrichen</strong>{% endif %}</td><td>{{x.status.value}}</td><td>{{checks[x.id]}}</td></tr>{% endfor %}</table><button class="approve">Ausgewählte Aufträge ausdrücklich freigeben</button></form><form method="post" action="/posts/{{item.id}}/reject"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Ablehnungsgrund<input name="reason" required></label><button class="danger">Ablehnen</button></form>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>Beitrag prüfen</h1>
+<p>Status: <span class="badge">{{item.status.value}}</span> · Beitragsversion {{item.version}}</p>
+{% if item.critical_warnings %}<div class="alert"><strong>Kritische Hinweise:</strong> {{item.critical_warnings|join('; ')}}</div>{% endif %}
+{% if item.design_snapshot.get('mode') %}
+<div class="warning">
+  <strong>Generierung:</strong> Bild {{item.design_snapshot.get('mode',{}).get('image')}} · Text {{item.design_snapshot.get('mode',{}).get('text')}}.
+  Bei KI-Ausgaben sind Spieler, Trikot, Logos, Schreibweisen und Spieldaten vor der Freigabe visuell zu prüfen.
+</div>
+{% endif %}
+{% if item.design_snapshot.get('prompts') %}
+<details>
+  <summary>Verwendete Promptversionen anzeigen</summary>
+  {% for key,prompt in item.design_snapshot.get('prompts',{}).items() %}
+  {% if prompt %}<h3>{{key}}: {{prompt.name}} · v{{prompt.version}} · {{prompt.model}}</h3><pre style="white-space:pre-wrap">{{prompt.rendered}}</pre>{% endif %}
+  {% endfor %}
+  {% for story in item.design_snapshot.get('stories',[]) %}
+  {% if story.get('prompt') %}<h3>Story: {{story.prompt.name}} · v{{story.prompt.version}} · {{story.prompt.model}}</h3><pre style="white-space:pre-wrap">{{story.prompt.rendered}}</pre>{% endif %}
+  {% endfor %}
+</details>
+{% endif %}
+<h2>Visuelle Prüfübersicht</h2>
+<div class="media-grid">
+  {% for x in jobs %}
+  <figure><figcaption>{{x.kind|upper}} · {{x.scheduled_at|berlin}}</figcaption><img src="/posts/{{item.id}}/media/{{x.id}}" alt="Vorschau {{x.kind}}"><div class="media-check">{{checks[x.id]}}</div></figure>
+  {% endfor %}
+</div>
+<form method="post" action="/posts/{{item.id}}/rerender">
+  <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
+  <fieldset><legend>Grafiken neu erzeugen</legend><p>Der Feed wird immer versioniert neu erzeugt. Storys auswählen:</p>
+    {% for x in jobs if x.kind=='story' %}<label><input type="checkbox" name="story_job_ids" value="{{x.id}}" checked> Story {{x.scheduled_at|berlin}}</label>{% endfor %}
+    <button>Grafiken neu erzeugen</button>
+  </fieldset>
+</form>
+<form method="post" action="/posts/{{item.id}}/text">
+  <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
+  <label>Begleittext<textarea name="text" rows="8" required>{{item.text}}</textarea></label><button>Text versioniert speichern</button>
+</form>
+<h2>Veröffentlichungsaufträge</h2>
+<form method="post" action="/posts/{{item.id}}/approve">
+  <input type="hidden" name="csrf_token" value="{{csrf}}">
+  <table><tr><th>Freigeben</th><th>Typ</th><th>Zeitpunkt</th><th>Status</th><th>Medienprüfung</th></tr>
+    {% for x in jobs %}<tr class="{% if x.scheduled_at < now %}late{% endif %}"><td><input type="checkbox" name="job_ids" value="{{x.id}}" checked></td><td>{{x.kind}}</td><td>{{x.scheduled_at|berlin}}{% if x.scheduled_at < now %} <strong>verstrichen</strong>{% endif %}</td><td>{{x.status.value}}</td><td>{{checks[x.id]}}</td></tr>{% endfor %}
+  </table>
+  <button class="approve">Ausgewählte Aufträge ausdrücklich freigeben</button>
+</form>
+<form method="post" action="/posts/{{item.id}}/reject">
+  <input type="hidden" name="csrf_token" value="{{csrf}}"><label>Ablehnungsgrund<input name="reason" required></label><button class="danger">Ablehnen</button>
+</form>
+{% endblock %}
