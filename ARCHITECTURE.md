@@ -3,17 +3,22 @@
 ## Zielbild und Komponenten
 Der Social Media Agent ist ein **modularer Monolith**. `app/main.py` liefert FastAPI/Jinja2/HTMX, `app/models.py` und Alembic bilden PostgreSQL ab. Fachmodule kapseln Authentifizierung, Mannschaften, Instagram-Seiten, Spiele, Medien/SMB, Designs, Rendering, Text, Beiträge, Freigaben, Publishing, Jobs, Audit und Monitoring. Web und Worker sind getrennte Prozesse desselben Artefakts; PostgreSQL ist die einzige Wahrheitsquelle.
 
-Externe Systeme liegen hinter Ports: `GameDataProvider`/`FussballDeProvider`, `StorageProvider`/`LocalStorageProvider`/`SmbStorageProvider`, `TextGenerator` und `SocialMediaPublisher`. Standardmäßig werden Fixture-Texte und `DryRunPublisher` eingesetzt. Playwright-fähige HTML/CSS-Templates können hinter `Renderer` ergänzt werden; der MVP rendert deterministisch ohne externe Ressourcen mittels Pillow.
+Externe Systeme liegen hinter Ports: `GameDataProvider`/`FussballDeProvider`, `StorageProvider`/`LocalStorageProvider`/`SmbStorageProvider`, `TextGenerator`, `ImageProvider` und `SocialMediaPublisher`. Standardmäßig werden Fixture-Texte, der lokale Playwright-Renderer und `DryRunPublisher` eingesetzt. Optional erzeugen `OpenAITextGenerator` und `OpenAIImageProvider` Begleittext und eigenständige Grafiken; beide bleiben von der Instagram-Veröffentlichung getrennt.
 
 ## Datenfluss
 1. Der Worker liest öffentliches HTML über den gekapselten Provider und upsertet anhand `(team_id, provider, external_id)` Spiele.
-2. Regeln berechnen UTC-Zeitpunkte. `create_post` reserviert transaktional ein Bild, snapshotet Design/Seite, rendert Feed und alle Storys und legt pro Ausgabe einen `PublicationJob` an.
+2. Regeln berechnen UTC-Zeitpunkte. `create_post` reserviert transaktional das größte verfügbare Spielerbild, löst die jüngste aktive Promptversion auf, snapshotet Prompt/Design/Seite, erzeugt Text, Feed und alle Storys und legt pro Ausgabe einen `PublicationJob` an.
 3. Vollständige Beiträge gelangen in `pending_approval`; fehlendes Bild oder Widersprüche führen zu `incomplete`/manueller Prüfung.
 4. Ein berechtigter Benutzer genehmigt eine konkrete Beitragsversion und ausgewählte Aufträge. Eigene Bearbeitung und Freigabe ist zulässig.
 5. Der Worker sperrt den Auftrag, prüft unmittelbar sämtliche Gates und ruft erst dann den Publisher. Nur bestätigte Antworten werden `published`.
 
 ## Datenmodell und Invarianten
-`User`, `UserTeam`, `Team`, `InstagramPage`, `Game`, `MediaAsset`, `StoryRule`, `Post`, `PublicationJob`, `AuditLog`, `Notification` und `SystemSetting` bilden das Kernmodell. Eindeutige Constraints verhindern doppelte Spiele, Hauptbeiträge, Story-Regeln, Medienpfade und Idempotency Keys. Das einmalige `reserved_game_id` erlaubt dasselbe Bild für Feed und Story eines Spiels, nicht für andere Spiele. Beiträge speichern Seite, Design-, Farb-, Font-, Medien- und Textversionen als Snapshot.
+`User`, `UserTeam`, `Team`, `InstagramPage`, `Game`, `MediaAsset`, `StoryRule`, `PromptTemplate`, `Post`, `PublicationJob`, `AuditLog`, `Notification` und `SystemSetting` bilden das Kernmodell. Eindeutige Constraints verhindern doppelte Spiele, Hauptbeiträge, Story-Regeln, Promptversionen, Medienpfade und Idempotency Keys. Das einmalige `reserved_game_id` erlaubt dasselbe Bild für Feed und Story eines Spiels, nicht für andere Spiele. Beiträge speichern Seite, Design-, Prompt-, Farb-, Font-, Medien- und Textversionen als Snapshot.
+
+## KI-Generierung und Promptinvarianten
+Bild- und Textprompts werden durch eine `SandboxedEnvironment` mit `StrictUndefined` gerendert. Nur explizit zugelassene Faktenplatzhalter sind erlaubt. Unveränderliche Sicherheitspräfixe verbieten erfundene Spielinformationen, Fantasielogos und zusätzliche Personen. Der Spielort wird vor dem Modellaufruf deterministisch normalisiert: Heimspiel `Habichtswaldstadion Ehlen`, Auswärtsrasen `RP [Ort]`, Auswärtskunstrasen `KR [Ort]`; eine fehlende Platzart blockiert den KI-Aufruf.
+
+Im KI-Bildmodus werden ausschließlich kanonisierte Originaldateien aus `MEDIA_ROOT`/Uploads als Referenzen verwendet. `gpt-image-2` erzeugt ein API-kompatibles Hochformat, das lokal auf exakt 1080 × 1350 beziehungsweise 1080 × 1920 normalisiert und als PNG validiert wird. Modellbedingte Abweichungen bei Identität, Text oder Logos bleiben möglich. Daher markiert der Snapshot jede KI-Ausgabe und die bestehende manuelle visuelle Freigabe bleibt zwingend. `IMAGE_GENERATOR_MODE=playwright` ist der reproduzierbare Offline-Fallback.
 
 Zeitpunkte sind timezone-aware UTC; Anzeige und Regelkonfiguration erfolgen in `Europe/Berlin`. Relative, unveröffentlichte Aufträge werden bei Verlegung verschoben. Absolute Zeitpunkte bleiben unverändert und werden als veraltet markiert. Bereits veröffentlichte Jobs bleiben unverändert.
 
@@ -31,7 +36,7 @@ Der `InstagramPublisher` nutzt ausschließlich die offizielle Graph API: Medienc
 Argon2-Passwort-Hashes, serverseitig signierte HttpOnly-Sessions, SameSite-Cookies, Produktions-`Secure`, CSRF-Token, 15-Minuten-Sperre nach fünf Fehlversuchen, Inaktivitätsablauf, keine Registrierung sowie rollen- und mannschaftsbezogene serverseitige Prüfungen bilden die Basis. Pfade werden kanonisiert; absolute Pfade, Traversal, ausbrechende Symlinks und fremde Dateitypen werden verworfen. SMB wird nur vom Host gemountet, Credentials gelangen weder in DB noch Quellcode. Secrets kommen aus Docker Secrets/Environment. Optimistische Versionsfelder verhindern Lost Updates. Sicherheits- und Freigabeaktionen werden auditiert. TOTP-2FA kann am User-Modul ergänzt werden.
 
 ## Erweiterungspunkte
-Neue Spielprovider, Mount-/Objektspeicher, Browser-Renderer, Benachrichtigungskanäle, Publisher und Textmodelle implementieren die jeweiligen Ports. Scheduler und Publisher dürfen später durch PostgreSQL-backed APScheduler bzw. eine Queue ersetzt werden, ohne Fachmodelle oder Weboberfläche aufzuteilen.
+Neue Spielprovider, Mount-/Objektspeicher, Bildprovider, Browser-Renderer, Benachrichtigungskanäle, Publisher und Textmodelle implementieren die jeweiligen Ports. Scheduler und Publisher dürfen später durch PostgreSQL-backed APScheduler bzw. eine Queue ersetzt werden, ohne Fachmodelle oder Weboberfläche aufzuteilen.
 
 ## Externe Schnittstellenprüfung
 Ein Abruf der offiziellen Meta-Dokumentation war am 27.07.2026 aus der isolierten Tool-Umgebung wegen HTTP 401 nicht möglich. Vor Live-Aktivierung müssen Betreiber die aktuelle offizielle Meta-Dokumentation zu Content Publishing, Stories, erforderlichen Berechtigungen, App Review, Kontoart, Tokenlaufzeiten und der verwendeten Graph-Version erneut prüfen. Die App behauptet daher keine fest verdrahtete, dauerhaft gültige Berechtigungsliste und bleibt standardmäßig im Dry-Run.
