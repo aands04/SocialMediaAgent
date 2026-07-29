@@ -57,8 +57,10 @@ Backup: `scripts/backup.sh`; Restore in Wartungsmodus: `scripts/restore.sh BACKU
 
 Not-Aus: `system_settings.key='emergency_stop'`, `value={"enabled":true}` stoppt noch nicht begonnene Jobs. Laufende/unklare Vorgänge zuerst bei Meta abgleichen. Weitere Schalter existieren global, je Seite, Team, Beitrag und Job.
 
-## Grenzen des MVP
-Der FUSSBALL.DE-Parser ist fixture-getestet, muss aber bei HTML-Änderungen angepasst werden. Der lokale Renderer ist reproduzierbar und maßhaltig, verwendet im MVP Pillow; die Port-Grenze erlaubt einen Playwright-Renderer. Die UI deckt Übersichten ab; komplexe Administration ist über die abgesicherten Service-Schichten weiter auszubauen. Reale OpenAI-/Meta-/FUSSBALL.DE-Aufrufe wurden nicht durchgeführt. Details und Zustände: [ARCHITECTURE.md](ARCHITECTURE.md).
+## Design-Renderer und Grenzen des MVP
+Feed (1080 × 1350) und Story (1080 × 1920) werden reproduzierbar aus HTML/CSS mit Playwright/Chromium gerendert. Die eingebauten Vorlagen `default-feed` und `default-story` unterstützen Ankündigung und Ergebnis; aktive Datenbankvorlagen werden in ihrer neuesten Version gewählt und vollständig im Beitragssnapshot eingefroren. Reservierte Originalbilder, Logos und lokal hochgeladene Fonts werden als Data-URLs eingebettet, sodass beim Rendern kein externer Abruf erfolgt. Fehlende Logos, Orte oder Fonts verwenden sichtbare, definierte Fallbacks. Für lokale Entwicklung muss ein von Playwright nutzbares Chromium installiert sein; das Docker-Image installiert es automatisch.
+
+Der FUSSBALL.DE-Parser ist fixture-getestet, muss aber bei HTML-Änderungen angepasst werden. Reale OpenAI-/Meta-Aufrufe wurden nicht durchgeführt. Details und Zustände: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Lokaler End-to-End-Test (ohne externe Dienste)
 1. `.env.example` nach `.env` kopieren, `PUBLISHER_MODE=dry-run`, `GLOBAL_PUBLISH_ENABLED=false`, `FUSSBALL_LIVE_TEST_ENABLED=false` beibehalten und ein zufälliges Session-Secret setzen.

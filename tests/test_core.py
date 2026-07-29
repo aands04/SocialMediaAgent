@@ -9,6 +9,7 @@ from app.config import Settings
 from app.games.provider import FussballDeProvider, ProviderError
 from app.media.storage import LocalStorageProvider, StorageError
 from app.models import (
+ DesignTemplate,
  Game,
  InstagramPage,
  JobStatus,
@@ -68,3 +69,14 @@ def test_optimistic_lock_and_reapproval(db,tmp_path):
 def test_reschedule_relative_but_not_absolute(db,tmp_path):
  _,team,game=graph(db,tmp_path); post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"out")); jobs=db.query(PublicationJob).filter_by(post_id=post.id).all(); jobs[0].absolute_time=True; old=[x.scheduled_at for x in jobs]; new=game.kickoff+timedelta(days=1); reschedule_game(db,game,new)
  assert jobs[0].scheduled_at==old[0] and jobs[0].stale_time
+
+def test_latest_design_template_version_is_frozen_on_post(db,tmp_path):
+ _,team,game=graph(db,tmp_path)
+ from app.rendering.service import BASE_CSS, BUILTIN_HTML
+ db.add_all([
+  DesignTemplate(name="default-feed",post_type="announcement",media_kind="feed",width=1080,height=1350,html_template=BUILTIN_HTML,css=BASE_CSS,version=1),
+  DesignTemplate(name="default-feed",post_type="announcement",media_kind="feed",width=1080,height=1350,html_template=BUILTIN_HTML,css=BASE_CSS+".canvas{outline:1px solid white}",version=2),
+ ]); db.commit()
+ post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"out"))
+ assert post.design_snapshot["feed"]["version"]==2
+ assert post.design_snapshot["feed"]["builtin"] is False

@@ -1,4 +1,6 @@
 import secrets
+from datetime import timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -6,6 +8,14 @@ from sqlalchemy.orm import Session
 from app.auth.service import allowed
 from app.db import get_db
 from app.models import Role, User
+
+
+def berlin_datetime(value, format_string="%d.%m.%Y, %H:%M Uhr") -> str:
+    if value is None:
+        return "—"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(ZoneInfo("Europe/Berlin")).strftime(format_string)
 
 
 def csrf_token(request: Request) -> str:
