@@ -78,6 +78,13 @@ OPENAI_IMAGE_QUALITY=medium
 
 Nach Änderung der `.env.staging` Web und Worker neu erstellen. Meta/Instagram bleibt davon unabhängig im Dry-Run.
 
+Zeit- und kostenintensive Text- und Bildgenerierungen werden als persistente
+PostgreSQL-Aufträge im vorhandenen Worker verarbeitet. Die Webanfrage reiht nur
+ein und zeigt unmittelbar den Auftragsstatus; Nginx benötigt dafür keinen
+mehrminütigen Request-Timeout. Zustände, Idempotenz, Leases, Abbruch, Retry und
+der Umgang mit unklaren API-Antworten sind in
+[`docs/GENERATION_JOBS.md`](docs/GENERATION_JOBS.md) dokumentiert.
+
 Der FUSSBALL.DE-Parser ist fixture-getestet, muss aber bei HTML-Änderungen angepasst werden. Reale OpenAI-/Meta-Aufrufe wurden nicht durchgeführt. Details und Zustände: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Lokaler End-to-End-Test (ohne externe Dienste)
