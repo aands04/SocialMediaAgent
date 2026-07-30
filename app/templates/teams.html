@@ -30,7 +30,7 @@
       <td>{{x.display_name}}<small>{{x.slug}}</small></td>
       <td>
         {% if logo %}
-          <img class="logo-thumb" src="/logos/{{logo.id}}/preview" alt="Vereinslogo {{x.display_name}}">
+          <img class="logo-thumb" width="88" height="88" src="/logos/{{logo.id}}/preview" alt="Vereinslogo {{x.display_name}}">
           <small>{{logo.original_filename}} · {{logo.width}} × {{logo.height}}</small>
           <small>Version {{logo.version}} · SHA-256 {{logo.checksum[:12]}}… · verifiziert</small>
           <small>Hochgeladen {{logo.created_at|berlin}} durch {{uploaders.get(logo.uploaded_by,logo.uploaded_by)}}</small>

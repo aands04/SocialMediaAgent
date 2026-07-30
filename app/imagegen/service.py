@@ -6,8 +6,9 @@ from pathlib import Path
 from openai import OpenAI
 from PIL import Image, ImageOps
 
-from app.logos.service import LogoCompositor
 from app.rendering.service import Renderer, RenderValidationError
+
+LOGO_REFERENCE_VERSION = "verified-logo-ai-references-v1"
 
 
 class ImageGenerationError(RenderValidationError):
@@ -92,10 +93,9 @@ class AIImageRenderer:
         self.upload_root = Path(upload_root).resolve()
         self.provider = provider
         self.validator = Renderer(root, media_root, upload_root)
-        self.compositor = LogoCompositor(upload_root)
         self._metadata: dict[str, dict] = {}
 
-    def _reference(self, value: str | None) -> Path | None:
+    def _player_reference(self, value: str | None) -> Path | None:
         return Renderer._safe_file(
             value,
             (self.media_root, self.upload_root),
@@ -103,79 +103,122 @@ class AIImageRenderer:
             20 * 1024 * 1024,
         )
 
+    def _logo_reference(self, value: str | None) -> Path | None:
+        return Renderer._safe_file(
+            value,
+            (self.upload_root,),
+            Renderer.image_types,
+            20 * 1024 * 1024,
+        )
+
+    @staticmethod
+    def _reference_metadata(data: dict, opponent_present: bool) -> dict:
+        logos = data.get("logos") if isinstance(data.get("logos"), dict) else {}
+        team = logos.get("team") if isinstance(logos.get("team"), dict) else {}
+        opponent = (
+            logos.get("opponent")
+            if isinstance(logos.get("opponent"), dict)
+            else {}
+        )
+        references = [
+            {"position": 1, "role": "player"},
+            {
+                "position": 2,
+                "role": "team_logo",
+                "logo_id": team.get("id"),
+                "version": team.get("version"),
+                "checksum": team.get("checksum"),
+            },
+        ]
+        if opponent_present:
+            references.append(
+                {
+                    "position": 3,
+                    "role": "opponent_logo",
+                    "logo_id": opponent.get("id"),
+                    "version": opponent.get("version"),
+                    "checksum": opponent.get("checksum"),
+                }
+            )
+        return {
+            "mode": "ai-reference",
+            "version": LOGO_REFERENCE_VERSION,
+            "reference_order": references,
+            "opponent_text_fallback": not opponent_present,
+            "manual_logo_review_required": True,
+        }
+
     def render(self, kind: str, target: str, data: dict) -> Path:
         if kind not in self.sizes:
             raise ImageGenerationError("Unbekanntes Bildformat")
         prompt = data.get("image_prompt")
         if not prompt:
             raise ImageGenerationError("Gerenderter KI-Bildprompt fehlt")
-        player = self._reference(data.get("player_image"))
+        player = self._player_reference(data.get("player_image"))
         if not player:
             raise ImageGenerationError(
                 "Für eine KI-Grafik ist ein verfügbares Spielerbild erforderlich"
             )
+        team_logo = self._logo_reference(data.get("team_logo"))
+        if not team_logo:
+            raise ImageGenerationError(
+                "Für eine KI-Grafik ist ein verifiziertes Mannschaftslogo erforderlich"
+            )
+        opponent_logo = self._logo_reference(data.get("opponent_logo"))
+        references = [player, team_logo]
+        if opponent_logo:
+            references.append(opponent_logo)
+        integration = self._reference_metadata(data, opponent_logo is not None)
         out = (self.root / target).resolve()
         if out != self.root and not out.is_relative_to(self.root):
             raise ImageGenerationError(
                 "Ausgabepfad liegt außerhalb des Render-Verzeichnisses"
             )
         out.parent.mkdir(parents=True, exist_ok=True)
-        base = out.with_name(f"{out.stem}-ai-base.png")
         phase = data.get("_generation_phase")
         if out.is_file():
             self.validate(out, kind)
             self._metadata[str(out)] = {
-                "ai_base_path": str(base),
                 "final_path": str(out),
                 "reused_final": True,
+                "logo_integration": integration,
             }
             return out
-        if not base.is_file():
-            if callable(phase):
-                phase("generating_ai_base")
-            raw = self.provider.generate(
-                prompt=prompt.rendered,
-                references=[player],
-                size=self.api_sizes[kind],
-                model=prompt.model,
-                quality=prompt.quality,
-            )
-            try:
-                with Image.open(BytesIO(raw)) as image:
-                    image.load()
-                    normalized = ImageOps.fit(
-                        image.convert("RGB"),
-                        self.sizes[kind],
-                        method=Image.Resampling.LANCZOS,
-                        centering=(0.5, 0.5),
-                    )
-                    normalized.save(base, "PNG", optimize=True)
-            except Exception as exc:
-                raise ImageGenerationError(
-                    f"KI-Ausgabe ist kein verarbeitbares Bild: {exc}"
-                ) from exc
-            self.validate(base, kind)
-        logos = data.get("logos")
-        composition = None
-        if logos:
-            if callable(phase):
-                phase("compositing_logos")
-            composition = self.compositor.compose(
-                base_path=base,
-                output_path=out,
-                kind=kind,
-                logos=logos,
-            )
-        else:
-            with Image.open(base) as image:
-                image.convert("RGB").save(out, "PNG", optimize=True)
+        if callable(phase):
+            phase("generating_ai_composition")
+        raw = self.provider.generate(
+            prompt=prompt.rendered,
+            references=references,
+            size=self.api_sizes[kind],
+            model=prompt.model,
+            quality=prompt.quality,
+        )
+        temporary = out.with_name(f".{out.name}.tmp")
+        try:
+            with Image.open(BytesIO(raw)) as image:
+                image.load()
+                normalized = ImageOps.fit(
+                    image.convert("RGB"),
+                    self.sizes[kind],
+                    method=Image.Resampling.LANCZOS,
+                    centering=(0.5, 0.5),
+                )
+                normalized.save(temporary, "PNG", optimize=True)
+            self.validate(temporary, kind)
+            temporary.replace(out)
+        except Exception as exc:
+            temporary.unlink(missing_ok=True)
+            if isinstance(exc, ImageGenerationError):
+                raise
+            raise ImageGenerationError(
+                f"KI-Ausgabe ist kein verarbeitbares Bild: {exc}"
+            ) from exc
         if callable(phase):
             phase("validating_final_media")
         self.validate(out, kind)
         self._metadata[str(out)] = {
-            "ai_base_path": str(base),
             "final_path": str(out),
-            "composition": composition,
+            "logo_integration": integration,
         }
         return out
 

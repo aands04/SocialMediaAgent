@@ -42,6 +42,7 @@ from app.models import (
     User,
     UserTeam,
 )
+from app.posts.service import logo_recompose_availability
 from app.web import berlin_datetime, check_csrf, csrf_token, current_user, require, require_admin
 
 router = APIRouter()
@@ -83,7 +84,10 @@ def _invalidate_posts_for_logo_change(
         post.version += 1
         post.approved_version = None
         post.status = PostStatus.REAPPROVAL
-        warning = "Logo-Zuordnung wurde geändert; Grafiken neu zusammensetzen"
+        warning = (
+            "Logo-Zuordnung wurde geändert; Grafiken mit aktualisierten "
+            "Logo-Referenzen neu erzeugen"
+        )
         post.critical_warnings = list(
             dict.fromkeys([*(post.critical_warnings or []), warning])
         )
@@ -786,9 +790,9 @@ def preview_prompt(
         ALLOWED_PLACEHOLDERS,
         DEFAULT_IMAGE_PROMPT,
         DEFAULT_TEXT_PROMPT,
-        IMAGE_SAFETY_PREFIX,
         TEXT_SAFETY_PREFIX,
         PromptValidationError,
+        image_safety_prefix,
         prompt_context,
         render_body,
         sample_facts,
@@ -813,7 +817,7 @@ def preview_prompt(
     except PromptValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
     if prompt_kind == "image":
-        preview = IMAGE_SAFETY_PREFIX + "\n" + preview
+        preview = image_safety_prefix(sample_facts()) + "\n" + preview
     else:
         preview = TEXT_SAFETY_PREFIX + "\n" + preview
     items = db.scalars(
@@ -1091,8 +1095,14 @@ def post_detail(
     from app.rendering.service import Renderer
 
     checks = {}
+    now = datetime.now(timezone.utc)
+    late_jobs = {}
     renderer = Renderer(settings.generated_root, settings.media_root, Path("data/uploads"))
     for job in jobs:
+        scheduled_at = job.scheduled_at
+        if scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+        late_jobs[job.id] = scheduled_at < now
         try:
             report = renderer.validate(Path(job.media_path), job.kind)
             checks[job.id] = f"PNG geprüft – {report['width']} × {report['height']}"
@@ -1106,7 +1116,9 @@ def post_detail(
         jobs=jobs,
         pages=pages,
         checks=checks,
-        now=datetime.now(timezone.utc),
+        late_jobs=late_jobs,
+        logo_recompose=logo_recompose_availability(item, jobs),
+        now=now,
         title="Beitrag prüfen",
     )
 
@@ -1199,6 +1211,8 @@ def recompose_post_media_logos(
         raise HTTPException(422, "Ungültige oder bereits veröffentlichte Story-Auswahl")
     try:
         job = enqueue_logo_recompose(db, item, current, version, story_job_ids)
+    except LogoValidationError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return redirect(

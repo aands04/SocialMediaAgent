@@ -26,7 +26,7 @@
       {% set logo=logo_map.get(x.id) %}
       <strong>{{opponents.get(x.id,'Gegner')}}</strong>
       {% if logo %}
-        <img class="logo-thumb" src="/logos/{{logo.id}}/preview" alt="Gegnerlogo {{logo.display_name}}">
+        <img class="logo-thumb" width="88" height="88" src="/logos/{{logo.id}}/preview" alt="Gegnerlogo {{logo.display_name}}">
         <small>verifiziert · v{{logo.version}} · {{logo.checksum[:12]}}…</small>
         <a class="button" href="/games/{{x.id}}/opponent-logo">Gegnerlogo ändern</a>
       {% else %}

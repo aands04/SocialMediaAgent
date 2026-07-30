@@ -18,6 +18,7 @@ from app.logos.service import (
 from app.models import (
     AuditLog,
     Game,
+    GenerationJob,
     GenerationJobStatus,
     InstagramPage,
     JobStatus,
@@ -28,7 +29,10 @@ from app.models import (
     Team,
     User,
 )
-from app.posts.service import recompose_post_logos
+from app.posts.service import (
+    logo_recompose_availability,
+    recompose_post_logos,
+)
 
 
 def image_bytes(fmt="PNG", color=(210, 20, 30, 255), size=(180, 160)):
@@ -197,6 +201,41 @@ def test_deterministic_compositor_uses_originals_and_text_fallback(db, tmp_path)
     assert first.read_bytes() != base.read_bytes()
 
 
+def test_deterministic_compositor_embeds_both_verified_logos(db, tmp_path):
+    user, _, team, game = graph(db)
+    root = tmp_path / "uploads"
+    team_logo = upload(db, root, user, team, "team", team.club, (245, 10, 20, 255))
+    opponent_logo = upload(
+        db, root, user, team, "opponent", game.away_team, (10, 225, 20, 255)
+    )
+    team.logo_asset_id = team_logo.id
+    game.opponent_logo_id = opponent_logo.id
+    db.commit()
+    base = tmp_path / "verified-base.png"
+    output = tmp_path / "verified-output.png"
+    Image.new("RGB", (1080, 1350), (12, 30, 65)).save(base)
+
+    logos = frozen_logo_set(db, game, team)
+    LogoCompositor(root).compose(
+        base_path=base,
+        output_path=output,
+        kind="feed",
+        logos=logos,
+    )
+
+    assert logos["team"]["id"] == team_logo.id
+    assert logos["opponent"]["id"] == opponent_logo.id
+    with Image.open(output) as rendered:
+        colors = [
+            color
+            for _, color in rendered.convert("RGB").getcolors(
+                maxcolors=rendered.width * rendered.height
+            )
+        ]
+    assert any(red > 200 and green < 50 for red, green, _ in colors)
+    assert any(green > 180 and red < 50 for red, green, _ in colors)
+
+
 def test_logo_only_recomposition_reuses_ai_base_and_preserves_published_story(
     db, tmp_path, monkeypatch
 ):
@@ -326,6 +365,149 @@ def test_logo_only_recomposition_reuses_ai_base_and_preserves_published_story(
     assert db.scalar(
         select(AuditLog).where(AuditLog.action == "graphics.logos_recomposed")
     )
+
+
+def test_legacy_story_without_ai_base_is_rejected_before_files_or_job(
+    db, tmp_path, monkeypatch
+):
+    user, page, team, game = graph(db)
+    upload_root = tmp_path / "uploads"
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    monkeypatch.setattr(
+        "app.posts.service.get_settings",
+        lambda: Settings(
+            generated_root=generated,
+            media_root=tmp_path / "media",
+            upload_root=upload_root,
+        ),
+    )
+    team_logo = upload(db, upload_root, user, team, "team", team.club, (255, 0, 0, 255))
+    team.logo_asset_id = team_logo.id
+    post = Post(
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        post_type="announcement",
+        status=PostStatus.PENDING,
+        text="Legacy",
+        feed_path=str(generated / "legacy-feed.png"),
+        design_snapshot={},
+    )
+    db.add(post)
+    db.flush()
+    feed_base = generated / post.id / "feed-ai-base.png"
+    feed_base.parent.mkdir(parents=True)
+    Image.new("RGB", (1080, 1350), (20, 40, 80)).save(feed_base)
+    feed = PublicationJob(
+        post_id=post.id,
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        kind="feed",
+        media_path=post.feed_path,
+        scheduled_at=game.kickoff,
+        idempotency_key=f"{post.id}:feed:v1",
+    )
+    story = PublicationJob(
+        post_id=post.id,
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        story_rule_id="legacy-story",
+        kind="story",
+        media_path=str(generated / "legacy-story.png"),
+        scheduled_at=game.kickoff,
+        idempotency_key=f"{post.id}:story:legacy-story:v1",
+    )
+    db.add_all([feed, story])
+    post.design_snapshot = {
+        "logos": frozen_logo_set(db, game, team),
+        "media": {"feed": {"ai_base_path": str(feed_base)}},
+        "stories": [
+            {
+                "rule_id": "legacy-story",
+                "media_version": 1,
+                "rendering": {},
+            }
+        ],
+    }
+    db.commit()
+
+    availability = logo_recompose_availability(post, [feed, story])
+    assert availability["feed"]["available"] is True
+    assert availability["stories"][story.id]["available"] is False
+    with pytest.raises(LogoValidationError, match="Grafiken neu erzeugen"):
+        generation.enqueue_logo_recompose(db, post, user, post.version, [story.id])
+    assert db.query(GenerationJob).count() == 0
+    assert post.feed_version == 1
+    assert not (generated / post.id / "feed-v2.png").exists()
+
+
+def test_ai_reference_post_requires_full_rerender_for_logo_change(db):
+    _, page, team, game = graph(db)
+    post = Post(
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        post_type="announcement",
+        status=PostStatus.PENDING,
+        text="KI-Komposition",
+        feed_path="/app/data/generated/feed.png",
+        design_snapshot={},
+    )
+    db.add(post)
+    db.flush()
+    feed = PublicationJob(
+        post_id=post.id,
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        kind="feed",
+        media_path=post.feed_path,
+        scheduled_at=game.kickoff,
+        idempotency_key=f"{post.id}:feed:v1",
+    )
+    story = PublicationJob(
+        post_id=post.id,
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        story_rule_id="ai-story",
+        kind="story",
+        media_path="/app/data/generated/story.png",
+        scheduled_at=game.kickoff,
+        idempotency_key=f"{post.id}:story:ai-story:v1",
+    )
+    db.add_all([feed, story])
+    post.design_snapshot = {
+        "media": {
+            "feed": {
+                "logo_integration": {
+                    "mode": "ai-reference",
+                    "version": "verified-logo-ai-references-v1",
+                }
+            }
+        },
+        "stories": [
+            {
+                "rule_id": "ai-story",
+                "rendering": {
+                    "logo_integration": {
+                        "mode": "ai-reference",
+                        "version": "verified-logo-ai-references-v1",
+                    }
+                },
+            }
+        ],
+    }
+    db.commit()
+
+    availability = logo_recompose_availability(post, [feed, story])
+    assert availability["feed"]["available"] is False
+    assert availability["feed"]["requires_full_rerender"] is True
+    assert "KI-Komposition" in availability["feed"]["reason"]
+    assert availability["stories"][story.id]["requires_full_rerender"] is True
 
 
 def test_openai_job_without_team_logo_stops_before_generator(db, tmp_path, monkeypatch):

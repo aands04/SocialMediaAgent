@@ -24,6 +24,7 @@ from app.models import (
     GenerationJobType,
     Post,
     PostStatus,
+    PublicationJob,
     StoryRule,
     Team,
     User,
@@ -31,6 +32,7 @@ from app.models import (
 from app.posts.service import (
     RerenderConflict,
     create_post,
+    logo_recompose_preflight,
     recompose_post_logos,
     rerender_post,
 )
@@ -83,6 +85,7 @@ class _ProgressRenderer:
         _phase(self.db, self.job, phase, progress, completed)
         phase_progress = {
             "generating_ai_base": progress,
+            "generating_ai_composition": progress,
             "compositing_logos": min(84, progress + 4),
             "validating_final_media": min(88, progress + 7),
         }
@@ -293,6 +296,10 @@ def enqueue_logo_recompose(
     )
     if existing:
         return existing
+    publication_jobs=list(
+        db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id))
+    )
+    logo_recompose_preflight(post,publication_jobs,selected)
     job=GenerationJob(
         job_type=GenerationJobType.RERENDER_POST,
         game_id=post.game_id,

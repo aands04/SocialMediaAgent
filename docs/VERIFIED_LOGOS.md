@@ -2,16 +2,24 @@
 
 ## Grundsatz
 
-Vereinswappen sind keine generativen Inhalte. OpenAI erhält nur das freigegebene
-Spielerfoto als Bildreferenz und wird im versionierten Prompt angewiesen, keine
-Wappen, Logos, Embleme, Marken oder Platzhalter zu erzeugen. Die Anwendung
-speichert die unveränderte KI-Grundgrafik getrennt von der finalen PNG-Datei.
-Erst danach setzt `verified-logo-compositor-v1` die geprüften Originaldateien
-lokal und reproduzierbar ein.
+OpenAI erhält die geprüften lokalen Referenzbilder in fester Reihenfolge:
 
-Die Anwendung kann nicht zuverlässig erkennen, ob das Modell außerhalb der
-geschützten Logobereiche dennoch ein fiktives Wappen erzeugt hat. Jede
-KI-Grafik bleibt deshalb manuell freigabepflichtig.
+1. Spielerfoto als Identitätsreferenz,
+2. verifiziertes Originalwappen der eigenen Mannschaft,
+3. optional das verifizierte Originalwappen des Gegners.
+
+Der versionierte Sicherheitspräfix aus dem Universalprompt weist das Modell an,
+den Spieler als dominantes Motiv zu verwenden, das eigene Logo deutlich und
+harmonisch sowie das Gegnerlogo kleiner, aber klar erkennbar in die
+Gesamtkomposition einzubinden. Form, Farben, Schriftzüge und
+Emblembestandteile sollen den Referenzen entsprechen. Ohne Gegnerlogo wird
+ausschließlich eine neutrale typografische Darstellung des Gegnernamens
+verlangt; ein Wappen-Fallback ist verboten.
+
+Ein Bildmodell kann die pixelgenaue Wiedergabe eines Logos oder das vollständige
+Fehlen zusätzlicher Fantasieelemente nicht garantieren. Die Anwendung zeigt
+deshalb die eingefrorenen Originale neben der Grafik an und verlangt weiterhin
+eine manuelle Freigabe.
 
 ## Upload und Versionierung
 
@@ -37,27 +45,32 @@ vorgeschlagen und erst nach Bestätigung zugeordnet. Mannschaftszusätze wie
 `II`, `Frauen`, `U19` oder Bestandteile einer Spielgemeinschaft bleiben Teil
 des normalisierten Namens.
 
-Ohne Gegnerlogo wird der ausgeschriebene Gegnername in einer neutralen
-Formfläche gesetzt. Ohne eigenes Logo wird ein OpenAI-Generierungsauftrag vor
+Ohne Gegnerlogo verlangt der Bildprompt den ausgeschriebenen Gegnernamen in
+einer neutralen typografischen Lösung. Ohne eigenes Logo wird ein
+OpenAI-Generierungsauftrag vor
 dem ersten kostenpflichtigen Bildaufruf auf `manual_review_required` gesetzt.
 
 ## Hintergrundjobs und Wiederaufnahme
 
 Beim Einreihen werden Logo-ID, Version, SHA-256 und Pfad in den Jobparametern
-eingefroren. Vor dem Modellaufruf prüft der Worker Datenbankstatus, Originalpfad
-und Prüfsumme. Danach gelten die Phasen `loading_verified_logos`,
-`generating_ai_base`, `compositing_logos` und `validating_final_media`.
+eingefroren. Vor dem Modellaufruf prüft der Worker Datenbankstatus,
+Originalpfad und Prüfsumme. Danach gelten für neue KI-Grafiken die Phasen
+`loading_verified_logos`, `generating_ai_composition` und
+`validating_final_media`.
 
-Eine vollständig gespeicherte Grundgrafik wird bei sicherer Wiederaufnahme
-wiederverwendet. Tritt erst bei der Logo-Komposition ein Fehler auf, bleibt sie
-erhalten und der Auftrag wechselt zur manuellen Prüfung. Der Button
-**Logos lokal neu zusammensetzen** verwendet diese Grundgrafik und verursacht
-keinen weiteren OpenAI-Bildaufruf.
+Nach erfolgreicher Speicherung wird die finale KI-Komposition bei einer
+sicheren Wiederaufnahme wiederverwendet und nicht erneut kostenpflichtig
+erzeugt. Für neue KI-Ausgaben existiert keine separate Logoebene: Eine
+Logoänderung erfordert **Grafiken neu erzeugen** und damit einen neuen
+OpenAI-Bildauftrag. Die Referenzreihenfolge und die verwendete
+`verified-logo-ai-references-v1`-Policy werden im Medien-Snapshot gespeichert.
 
 Logoänderungen erhöhen die Beitragsversion, entziehen offenen Aufträgen die
 Freigabe und überschreiben keine vorhandenen Dateien. Veröffentlichte Aufträge
-bleiben unverändert. Legacy-Beiträge ohne Logo-Snapshot werden gekennzeichnet
-und nicht automatisch auf möglicherweise falsche Logos migriert.
+bleiben unverändert. Der lokale `verified-logo-compositor-v1` bleibt nur für
+Legacy-Beiträge mit separat gespeicherter KI-Grundgrafik verfügbar.
+Legacy-Beiträge ohne Logo-Snapshot werden gekennzeichnet und nicht automatisch
+auf möglicherweise falsche Logos migriert.
 
 ## Proxmox-Staging
 
@@ -80,5 +93,7 @@ sudo bash -lc '
 Das bestehende Hostverzeichnis `${STAGING_DATA_ROOT}/uploads` wird weiterhin
 nach `/app/data/uploads` eingebunden. `UPLOAD_ROOT=/app/data/uploads` kann in
 `.env.staging` ausdrücklich gesetzt werden. Zuerst das eigene Mannschaftslogo,
-danach je Spiel ein Gegnerlogo oder den neutralen Fallback prüfen. Instagram
-bleibt im Staging unverändert im Dry-Run.
+danach je Spiel ein Gegnerlogo oder die neutrale Typografie prüfen. Bei jeder
+KI-Ausgabe sind beide eingebetteten Logos visuell mit den im Dashboard
+angezeigten Originalen zu vergleichen. Instagram bleibt im Staging unverändert
+im Dry-Run.
