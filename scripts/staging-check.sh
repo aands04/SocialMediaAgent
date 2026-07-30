@@ -3,11 +3,16 @@ set -u
 COMPOSE="docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.staging.yml"
 failures=0
 check(){ name="$1"; shift; if "$@" >/tmp/staging-check.out 2>&1; then echo "[OK] $name"; else echo "[FEHLER] $name: $(cat /tmp/staging-check.out)"; failures=$((failures+1)); fi; }
+check_alembic_head(){
+  installed="$($COMPOSE exec -T web /app/scripts/entrypoint.sh alembic current 2>/dev/null | awk '/\(head\)/ { print $1 }' | sort)"
+  available="$($COMPOSE exec -T web /app/scripts/entrypoint.sh alembic heads 2>/dev/null | awk '/\(head\)/ { print $1 }' | sort)"
+  test -n "$installed" && test "$installed" = "$available"
+}
 check "Compose-Konfiguration" sh -c "$COMPOSE config -q"
 check "Webanwendung erreichbar" sh -c "curl -fsS --max-time 10 http://127.0.0.1:${HTTP_PORT:-8080}/health"
 check "Anmeldeseite und Session erreichbar" sh -c "curl -fsS --max-time 10 http://127.0.0.1:${HTTP_PORT:-8080}/login | grep -q csrf_token"
 check "PostgreSQL erreichbar" sh -c "$COMPOSE exec -T db pg_isready -U socialmedia -d socialmedia"
-check "Aktuelle Alembic-Migration installiert" sh -c "test \"\$($COMPOSE exec -T web /app/scripts/entrypoint.sh alembic current | tail -1 | awk '{print \$1}')\" = \"0002\""
+check "Aktuelle Alembic-Migration installiert" check_alembic_head
 check "Worker aktiv und Heartbeat frisch" sh -c "$COMPOSE exec -T worker python -c 'import json; from datetime import datetime,timezone; d=json.load(open(\"/app/data/logs/worker-heartbeat.json\")); assert (datetime.now(timezone.utc)-datetime.fromisoformat(d[\"at\"])).total_seconds()<90'"
 check "Scheduler aktiv" sh -c "$COMPOSE exec -T worker python -c 'import json; assert json.load(open(\"/app/data/logs/worker-heartbeat.json\"))[\"scheduler\"] is True'"
 check "SMB-Mount vorhanden und lesbar" sh -c "$COMPOSE exec -T web test -r /app/external-media/staging_smoke/spieler/smoke-player.png"
