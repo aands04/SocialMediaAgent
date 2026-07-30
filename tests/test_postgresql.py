@@ -11,11 +11,14 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app.jobs.generation import claim_next, enqueue_create
+from app.meta.publishing import MetaPublishingError, _reload_attempt_context
 from app.models import (
     Game,
     GenerationJob,
+    InstagramConnection,
     InstagramPage,
     MediaAsset,
+    MetaPublishingAttempt,
     Post,
     PublicationJob,
     Role,
@@ -167,3 +170,68 @@ def test_generation_job_claim_uses_skip_locked(pg):
     assert claimed.count(None) == 1
     with pg() as db:
         assert db.get(GenerationJob, job_id).locked_by in {"worker-a", "worker-b"}
+
+
+def test_meta_attempt_lock_uses_skip_locked(pg):
+    page_id, team_id, game_ids, _ = graph(pg)
+    with pg() as db:
+        user = User(
+            email="meta-lock@pg.invalid",
+            password_hash="x",
+            role=Role.ADMIN,
+            all_teams=True,
+        )
+        connection = InstagramConnection(
+            instagram_page_id=page_id,
+            instagram_user_id="ig-test",
+            status="connected",
+        )
+        post = Post(
+            game_id=game_ids[0],
+            team_id=team_id,
+            instagram_page_id=page_id,
+            post_type="announcement",
+        )
+        db.add_all([user, connection, post])
+        db.flush()
+        publication = PublicationJob(
+            post_id=post.id,
+            game_id=game_ids[0],
+            team_id=team_id,
+            instagram_page_id=page_id,
+            kind="feed",
+            media_path="fixture.png",
+            scheduled_at=datetime.now(timezone.utc),
+            idempotency_key="meta-lock-publication",
+        )
+        db.add(publication)
+        db.flush()
+        attempt = MetaPublishingAttempt(
+            publication_job_id=publication.id,
+            connection_id=connection.id,
+            active_key=publication.id,
+            target_account_id="ig-test",
+            media_kind="feed",
+            local_media_version=1,
+            media_path="fixture.png",
+            file_checksum="a" * 64,
+            started_by=user.id,
+        )
+        db.add(attempt)
+        db.commit()
+        attempt_id = attempt.id
+
+    with pg() as locker:
+        locker.scalar(
+            select(MetaPublishingAttempt)
+            .where(MetaPublishingAttempt.id == attempt_id)
+            .with_for_update()
+        )
+
+        def competing_lock():
+            with pg() as contender:
+                with pytest.raises(MetaPublishingError, match="bereits"):
+                    _reload_attempt_context(contender, attempt_id)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(competing_lock).result(timeout=5)

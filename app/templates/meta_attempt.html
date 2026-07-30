@@ -1,0 +1,68 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="meta-test-alert">META-TEST – ECHTE INSTAGRAM-VERÖFFENTLICHUNGEN MÖGLICH</div>
+<h1>Meta-Veröffentlichungsversuch</h1>
+<section>
+  <dl class="metadata">
+    <dt>Stufe</dt><dd>{{ attempt.stage }}</dd>
+    <dt>Phase</dt><dd>{{ attempt.phase }}</dd>
+    <dt>Medium</dt><dd>{{ attempt.media_kind }}</dd>
+    <dt>Dateiprüfsumme</dt><dd><code>{{ attempt.file_checksum }}</code></dd>
+    <dt>Container-ID</dt><dd>{{ attempt.meta_container_id or 'noch keine' }}</dd>
+    <dt>Containerstatus</dt><dd>{{ attempt.container_status or 'noch nicht geprüft' }}</dd>
+    <dt>Media-ID</dt><dd>{{ attempt.meta_media_id or 'noch keine' }}</dd>
+    <dt>Permalink</dt><dd>{% if attempt.permalink %}<a href="{{ attempt.permalink }}">Instagram öffnen</a>{% else %}—{% endif %}</dd>
+    <dt>Fehler</dt><dd>{{ attempt.error_message or 'keiner' }}</dd>
+  </dl>
+  <details><summary>Bereinigte Anfrage/Plattformantwort</summary><pre>{{ attempt.sanitized_response }}</pre></details>
+</section>
+{% if confirmation_code %}
+<div class="confirmation-code">Einmaliger Bestätigungscode: <strong>{{ confirmation_code }}</strong><small>Der Code wird nicht gespeichert und muss innerhalb der kurzen Frist erneut eingegeben werden.</small></div>
+{% endif %}
+{% if attempt.stage in ['container-only', 'publish'] and not attempt.meta_container_id %}
+<section>
+  <h2>1. Container bewusst erstellen</h2>
+  <form method="post" action="/meta-attempts/{{ attempt.id }}/confirmation"><input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="purpose" value="create_container"><button>Bestätigungscode erzeugen</button></form>
+  <form method="post" action="/meta-attempts/{{ attempt.id }}/container"><input type="hidden" name="csrf_token" value="{{ csrf }}"><label>Code erneut eingeben<input name="confirmation_code" autocomplete="off" required></label><button class="danger">Meta-Container jetzt erstellen</button></form>
+</section>
+{% endif %}
+{% if attempt.meta_container_id and not attempt.meta_media_id %}
+<section>
+  <h2>2. Containerstatus prüfen</h2>
+  <form method="post" action="/meta-attempts/{{ attempt.id }}/status"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Status bei Meta abfragen</button></form>
+</section>
+{% endif %}
+{% if attempt.stage == 'publish' and attempt.container_status == 'FINISHED' and not attempt.meta_media_id %}
+<section class="danger-zone">
+  <h2>3. Veröffentlichung ausdrücklich bestätigen</h2>
+  <p>Der folgende Schritt veröffentlicht dieses Medium wirklich auf Instagram.</p>
+  <form method="post" action="/meta-attempts/{{ attempt.id }}/confirmation"><input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="purpose" value="publish"><button>Neuen Veröffentlichungscode erzeugen</button></form>
+  <form method="post" action="/meta-attempts/{{ attempt.id }}/publish"><input type="hidden" name="csrf_token" value="{{ csrf }}"><label>Code erneut eingeben<input name="confirmation_code" autocomplete="off" required></label><button class="danger">JETZT ECHT AUF INSTAGRAM VERÖFFENTLICHEN</button></form>
+</section>
+{% endif %}
+{% if attempt.phase in ['uncertain', 'validating_public_media', 'creating_container', 'publishing'] %}
+<section class="danger-zone">
+  <h2>Manueller Abgleich erforderlich</h2>
+  <p>Es wird nichts automatisch wiederholt. Prüfe das Instagram-Konto und die bekannten Meta-IDs außerhalb dieses Formulars. Bei einer nach einem Neustart festhängenden Phase wird der Abgleich erst nach einer Sicherheitsfrist zugelassen.</p>
+  <form method="post" action="/meta-attempts/{{ attempt.id }}/reconcile" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Ergebnis
+      <select name="resolution" required>
+        <option value="not_published">Nachweislich nicht veröffentlicht</option>
+        <option value="published">Nachweislich veröffentlicht</option>
+      </select>
+    </label>
+    <label>Instagram-Media-ID<input name="meta_media_id"></label>
+    <label>Permalink<input name="permalink"></label>
+    <label>Prüfvermerk<textarea name="note" required></textarea></label>
+    <button>Manuellen Abgleich speichern</button>
+  </form>
+</section>
+{% endif %}
+{% if attempt.public_media_grant_id %}
+<form method="post" action="/meta-attempts/{{ attempt.id }}/grant/revoke">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <button class="danger">Öffentliche Medienfreigabe widerrufen</button>
+</form>
+{% endif %}
+{% endblock %}

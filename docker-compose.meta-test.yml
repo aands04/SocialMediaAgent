@@ -1,0 +1,99 @@
+name: social-media-agent-meta-test
+services:
+  db:
+    volumes:
+      - ${META_TEST_DATA_ROOT:?META_TEST_DATA_ROOT fehlt}/postgres:/var/lib/postgresql/data
+  migrate:
+    env_file: !override [.env.meta-test]
+    environment:
+      ENVIRONMENT: meta-test
+      PUBLISHER_MODE: instagram
+      GLOBAL_PUBLISH_ENABLED: "false"
+      META_SCHEDULER_ENABLED: "false"
+    secrets: !override
+      - db_password
+      - session_secret
+      - meta_app_id
+      - meta_app_secret
+      - meta_token_encryption_key
+  web:
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --no-access-log
+    env_file: !override [.env.meta-test]
+    environment:
+      ENVIRONMENT: meta-test
+      PUBLISHER_MODE: instagram
+      GLOBAL_PUBLISH_ENABLED: "false"
+      META_SCHEDULER_ENABLED: "false"
+      REQUIRE_MEDIA_MOUNT: "true"
+      LOG_ROOT: /app/data/logs
+    secrets: !override
+      - db_password
+      - session_secret
+      - openai_api_key
+      - meta_app_id
+      - meta_app_secret
+      - meta_token_encryption_key
+    volumes:
+      - ${META_TEST_DATA_ROOT}/generated:/app/data/generated
+      - ${META_TEST_DATA_ROOT}/uploads:/app/data/uploads
+      - ${META_TEST_DATA_ROOT}/provider-snapshots:/app/data/provider-snapshots
+      - ${META_TEST_DATA_ROOT}/logs:/app/data/logs
+      - ${META_TEST_BACKUP_ROOT}:/app/data/backups
+      - type: bind
+        source: ${MEDIA_HOST_ROOT:?MEDIA_HOST_ROOT fehlt}
+        target: /app/external-media
+        read_only: true
+  worker:
+    env_file: !override [.env.meta-test]
+    environment:
+      ENVIRONMENT: meta-test
+      PUBLISHER_MODE: instagram
+      GLOBAL_PUBLISH_ENABLED: "false"
+      META_SCHEDULER_ENABLED: "false"
+      REQUIRE_MEDIA_MOUNT: "true"
+      LOG_ROOT: /app/data/logs
+    secrets: !override
+      - db_password
+      - session_secret
+      - openai_api_key
+    volumes:
+      - ${META_TEST_DATA_ROOT}/generated:/app/data/generated
+      - ${META_TEST_DATA_ROOT}/uploads:/app/data/uploads
+      - ${META_TEST_DATA_ROOT}/provider-snapshots:/app/data/provider-snapshots
+      - ${META_TEST_DATA_ROOT}/logs:/app/data/logs
+      - ${META_TEST_BACKUP_ROOT}:/app/data/backups
+      - type: bind
+        source: ${MEDIA_HOST_ROOT}
+        target: /app/external-media
+        read_only: true
+  proxy:
+    ports: !override ["127.0.0.1:${HTTP_PORT:-8080}:80"]
+  public_proxy:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deploy/nginx/meta-public.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "127.0.0.1:${META_PUBLIC_PORT:-8081}:80"
+    depends_on:
+      web: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, nginx, -t]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+secrets:
+  db_password: {file: "${META_TEST_SECRETS_ROOT:?META_TEST_SECRETS_ROOT fehlt}/db_password"}
+  session_secret: {file: "${META_TEST_SECRETS_ROOT}/session_secret"}
+  openai_api_key: {file: "${META_TEST_SECRETS_ROOT}/openai_api_key"}
+  meta_app_id: {file: "${META_TEST_SECRETS_ROOT}/meta_app_id"}
+  meta_app_secret: {file: "${META_TEST_SECRETS_ROOT}/meta_app_secret"}
+  meta_token_encryption_key: {file: "${META_TEST_SECRETS_ROOT}/meta_token_encryption_key"}

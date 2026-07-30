@@ -32,7 +32,15 @@ Aufträge: `draft/unapproved → approved → scheduled → waiting → publishi
 ## Jobs, Freigabe und Veröffentlichung
 Worker selektieren fällige Zeilen und verwenden Datenbanksperren (`FOR UPDATE`, bei Medien `SKIP LOCKED`). Jeder Job trägt einen stabilen Idempotency Key. Exponentielles Backoff wird aus Versuchszahl und konfigurierter Basis berechnet; Token-/Berechtigungsfehler sind dauerhaft. Vor Publishing werden Freigabe und Versionsbindung, Seite, alle Not-Aus-Ebenen, Zeitpunkt, Datei, Idempotenz und Spieländerungen geprüft. Eine Inhaltsänderung entzieht allen offenen Jobs die Freigabe. Feed und Story sind unabhängig, weshalb Teilerfolg sichtbar bleibt.
 
-Der `InstagramPublisher` nutzt ausschließlich die offizielle Graph API: Mediencontainer, Statusabfrage, `media_publish`. Keine Passwörter, Login-Automation oder inoffiziellen Bibliotheken. Die technische Meta-Konfiguration ist absichtlich opt-in; Live-Publishing erfordert zusätzlich `GLOBAL_PUBLISH_ENABLED=true`, verbundene Seite und Freigabe.
+Das bestehende Staging verwendet ausschließlich `DryRunPublisher`. Der
+Meta-Test kapselt den offiziellen Instagram-Login-Flow in `app/meta`: pro
+Instagram-Seite verschlüsselte Verbindung, einmaliger OAuth-State, kurzlebige
+öffentliche Medienfreigabe sowie persistenter Container- und
+Publishing-Versuch. Containererstellung, Statusabfrage und `media_publish` sind
+getrennte, manuell bestätigte Schritte. Gespeicherte Container- und Media-IDs
+verhindern blinde Wiederholungen; unklare externe Antworten wechseln auf
+`uncertain` und erfordern manuellen Abgleich. Scheduler und normaler
+Publishing-Worker dürfen im Meta-Test keine echten Aufträge beanspruchen.
 
 ## Sicherheit
 Argon2-Passwort-Hashes, serverseitig signierte HttpOnly-Sessions, SameSite-Cookies, Produktions-`Secure`, CSRF-Token, 15-Minuten-Sperre nach fünf Fehlversuchen, Inaktivitätsablauf, keine Registrierung sowie rollen- und mannschaftsbezogene serverseitige Prüfungen bilden die Basis. Pfade werden kanonisiert; absolute Pfade, Traversal, ausbrechende Symlinks und fremde Dateitypen werden verworfen. SMB wird nur vom Host gemountet, Credentials gelangen weder in DB noch Quellcode. Secrets kommen aus Docker Secrets/Environment. Optimistische Versionsfelder verhindern Lost Updates. Sicherheits- und Freigabeaktionen werden auditiert. TOTP-2FA kann am User-Modul ergänzt werden.
@@ -41,7 +49,13 @@ Argon2-Passwort-Hashes, serverseitig signierte HttpOnly-Sessions, SameSite-Cooki
 Neue Spielprovider, Mount-/Objektspeicher, Bildprovider, Browser-Renderer, Benachrichtigungskanäle, Publisher und Textmodelle implementieren die jeweiligen Ports. Scheduler und Publisher dürfen später durch PostgreSQL-backed APScheduler bzw. eine Queue ersetzt werden, ohne Fachmodelle oder Weboberfläche aufzuteilen.
 
 ## Externe Schnittstellenprüfung
-Ein Abruf der offiziellen Meta-Dokumentation war am 27.07.2026 aus der isolierten Tool-Umgebung wegen HTTP 401 nicht möglich. Vor Live-Aktivierung müssen Betreiber die aktuelle offizielle Meta-Dokumentation zu Content Publishing, Stories, erforderlichen Berechtigungen, App Review, Kontoart, Tokenlaufzeiten und der verwendeten Graph-Version erneut prüfen. Die App behauptet daher keine fest verdrahtete, dauerhaft gültige Berechtigungsliste und bleibt standardmäßig im Dry-Run.
+Die für die Meta-Testintegration verwendeten offiziellen Quellen, der
+Abrufstand und die weiterhin vor jedem echten Test zu kontrollierenden
+Voraussetzungen sind in [`docs/META_TEST.md`](docs/META_TEST.md) aufgeführt.
+Die API-Version ist konfigurierbar und wird nicht als dauerhaft gültig
+betrachtet. Tokenlaufzeiten werden aus den offiziellen API-Antworten
+übernommen, nicht lokal erfunden. Produktion und Scheduler-Live-Publishing
+bleiben deaktiviert.
 
 ## Bedienbare Testversion
 `admin_routes` stellt CSRF-geschützte, serverseitig autorisierte Workflows für Mannschaften, Seiten, Benutzer/Teamzuordnungen, SMB-Scan, Medienstatus, Fonts, versionierte Designs, Ankündigungs-/Ergebnisregeln, Multi-Story-Regeln, Beitragsprüfung/Freigabe/Ablehnung und Auftragsabbruch bereit. Versionsfelder verhindern unbemerkte parallele Statusänderungen. Verstrichene Jobs werden sichtbar markiert und gemäß Teamregel sofort, manuell, übersprungen oder am nächsten Story-Termin behandelt.

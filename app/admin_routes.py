@@ -28,10 +28,12 @@ from app.models import (
     Game,
     GenerationJob,
     GenerationJobStatus,
+    InstagramConnection,
     InstagramPage,
     JobStatus,
     LogoAsset,
     MediaAsset,
+    MetaPublishingAttempt,
     Post,
     PostStatus,
     PromptTemplate,
@@ -49,6 +51,8 @@ router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 templates.env.filters["berlin"] = berlin_datetime
 settings = get_settings()
+templates.env.globals["environment"] = settings.environment
+templates.env.globals["meta_test_enabled"] = settings.meta_test_enabled
 
 
 def render(request, name, current, **context):
@@ -378,7 +382,40 @@ def instagram(request: Request, current=Depends(current_user), db: Session = Dep
         .where(InstagramPage.archived_at.is_(None))
         .order_by(InstagramPage.display_name)
     ).all()
-    return render(request, "instagram.html", current, items=items, title="Instagram-Seiten")
+    connections = {
+        connection.instagram_page_id: connection
+        for connection in db.scalars(select(InstagramConnection)).all()
+    }
+    attempt_summary = {}
+    for item in items:
+        connection = connections.get(item.id)
+        attempts = (
+            db.scalars(
+                select(MetaPublishingAttempt)
+                .where(MetaPublishingAttempt.connection_id == connection.id)
+                .order_by(MetaPublishingAttempt.created_at.desc())
+            ).all()
+            if connection
+            else []
+        )
+        attempt_summary[item.id] = {
+            "last_success": next(
+                (x for x in attempts if x.phase == "completed" and x.meta_media_id),
+                None,
+            ),
+            "last_failure": next((x for x in attempts if x.phase == "failed"), None),
+            "uncertain": sum(x.phase == "uncertain" for x in attempts),
+        }
+    return render(
+        request,
+        "instagram.html",
+        current,
+        items=items,
+        connections=connections,
+        attempt_summary=attempt_summary,
+        settings=settings,
+        title="Instagram-Seiten",
+    )
 
 
 @router.post("/instagram")
@@ -433,7 +470,11 @@ def instagram_state(
         item.archived_at = datetime.now(timezone.utc)
         item.active = False
         item.publishing_enabled = False
-    elif action == "mock-connect" and settings.publisher_mode != "live":
+    elif (
+        action == "mock-connect"
+        and settings.publisher_mode != "live"
+        and settings.environment != "meta-test"
+    ):
         item.connection_status = "connected"
         item.active = True
         item.last_check_at = datetime.now(timezone.utc)

@@ -1,6 +1,6 @@
 import json
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -9,11 +9,14 @@ from app.config import Settings
 from app.models import (
     GenerationJob,
     GenerationJobStatus,
+    InstagramConnection,
     JobStatus,
+    MetaPublishingAttempt,
     Post,
     PostStatus,
     ProviderSnapshot,
     PublicationJob,
+    PublicMediaGrant,
     SystemSetting,
 )
 
@@ -36,9 +39,23 @@ def system_status(db: Session, settings: Settings) -> dict:
             "ok": worker_ok,
             "detail": f"Heartbeat vor {int(age)}s, Läufe {data.get('loops', 0)}",
         }
+        scheduler_expected = settings.environment != "meta-test"
         checks["scheduler"] = {
-            "ok": worker_ok and data.get("scheduler", False),
-            "detail": "aktiv" if data.get("scheduler") else "inaktiv",
+            "ok": worker_ok
+            and (
+                bool(data.get("scheduler"))
+                if scheduler_expected
+                else not bool(data.get("scheduler"))
+            ),
+            "detail": (
+                "aktiv"
+                if data.get("scheduler")
+                else (
+                    "im Meta-Test absichtlich deaktiviert"
+                    if not scheduler_expected
+                    else "inaktiv"
+                )
+            ),
         }
     except Exception as exc:
         checks["worker"] = {"ok": False, "detail": f"Heartbeat fehlt: {exc}"}
@@ -75,11 +92,26 @@ def system_status(db: Session, settings: Settings) -> dict:
         and not settings.global_publish_enabled
         and not settings.meta_access_token
     )
+    guarded_meta_test = (
+        settings.environment == "meta-test"
+        and settings.publisher_mode == "instagram"
+        and settings.meta_test_enabled
+        and not settings.meta_scheduler_enabled
+        and not settings.global_publish_enabled
+    )
     checks["publishing"] = {
-        "ok": dry,
-        "detail": "DryRun aktiv; Live deaktiviert" if dry else "UNSICHERE KONFIGURATION",
+        "ok": dry or guarded_meta_test,
+        "detail": (
+            "DryRun aktiv; Live deaktiviert"
+            if dry
+            else (
+                "Meta-Test: ausschließlich manueller Assistent"
+                if guarded_meta_test
+                else "UNSICHERE KONFIGURATION"
+            )
+        ),
     }
-    if not dry:
+    if not (dry or guarded_meta_test):
         critical.append("Publishing")
     marker = settings.backup_root / "last-success.json"
     checks["backup"] = {
@@ -173,6 +205,83 @@ def system_status(db: Session, settings: Settings) -> dict:
         checks["emergency_stop"] = {
             "ok": True,
             "detail": "aktiv" if stop and stop.value.get("enabled") else "aus",
+        }
+        now = datetime.now(timezone.utc)
+        connections = db.scalars(select(InstagramConnection)).all()
+        expiring = [
+            item
+            for item in connections
+            if not item.token_expires_at
+            or (
+                item.token_expires_at
+                if item.token_expires_at.tzinfo
+                else item.token_expires_at.replace(tzinfo=timezone.utc)
+            )
+            <= now + timedelta(days=7)
+        ]
+        meta_counts = {
+            "mode": settings.environment,
+            "live_gate": settings.meta_test_publish_enabled,
+            "scheduler": settings.meta_scheduler_enabled,
+            "connected_pages": sum(item.status == "connected" for item in connections),
+            "expiring_tokens": len(expiring),
+            "missing_permissions": sum(
+                not {
+                    "instagram_business_basic",
+                    "instagram_business_content_publish",
+                }.issubset(set(item.scopes or []))
+                for item in connections
+            ),
+            "open_containers": db.scalar(
+                select(func.count())
+                .select_from(MetaPublishingAttempt)
+                .where(
+                    MetaPublishingAttempt.meta_container_id.is_not(None),
+                    MetaPublishingAttempt.meta_media_id.is_(None),
+                    MetaPublishingAttempt.phase.notin_(["failed", "completed"]),
+                )
+            ),
+            "uncertain": db.scalar(
+                select(func.count())
+                .select_from(MetaPublishingAttempt)
+                .where(MetaPublishingAttempt.phase == "uncertain")
+            ),
+            "failed": db.scalar(
+                select(func.count())
+                .select_from(MetaPublishingAttempt)
+                .where(MetaPublishingAttempt.phase == "failed")
+            ),
+            "active_media_grants": db.scalar(
+                select(func.count())
+                .select_from(PublicMediaGrant)
+                .where(
+                    PublicMediaGrant.revoked_at.is_(None),
+                    PublicMediaGrant.expires_at > now,
+                )
+            ),
+            "last_connection_check": max(
+                (item.last_check_at for item in connections if item.last_check_at),
+                default=None,
+            ),
+            "last_successful_meta_test": db.scalar(
+                select(MetaPublishingAttempt.completed_at)
+                .where(
+                    MetaPublishingAttempt.phase == "completed",
+                    MetaPublishingAttempt.meta_media_id.is_not(None),
+                )
+                .order_by(MetaPublishingAttempt.completed_at.desc())
+            ),
+        }
+        checks["meta_test"] = {
+            "ok": (
+                settings.environment != "meta-test"
+                or (
+                    settings.meta_test_enabled
+                    and not settings.meta_scheduler_enabled
+                    and not settings.global_publish_enabled
+                )
+            ),
+            "detail": meta_counts,
         }
     except Exception as exc:
         db.rollback()

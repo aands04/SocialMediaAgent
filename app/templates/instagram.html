@@ -1,1 +1,76 @@
-{% extends 'base.html' %}{% block content %}<h1>Instagram-Seiten</h1><p class="warning">Verbindungen sind in Testmodus nur simuliert. Keine Tokens werden im Dashboard gespeichert.</p><form method="post" class="gridform"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Interner Name<input name="internal_name" required></label><label>Anzeigename<input name="display_name" required></label><label>Benutzername<input name="username" required></label><label>Verein<input name="club" required></label><label>Instagram-Konto-ID<input name="account_id"></label><button>Sicher deaktiviert anlegen</button></form><table><tr><th>Seite</th><th>Status</th><th>Publishing</th><th>Aktionen</th></tr>{% for x in items %}<tr><td>{{x.display_name}}<small>@{{x.username}}</small></td><td>{{x.connection_status}} / {{'aktiv' if x.active else 'inaktiv'}}</td><td>{{'an' if x.publishing_enabled else 'aus'}}</td><td><form method="post" action="/instagram/{{x.id}}/state"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{x.version}}"><button name="action" value="mock-connect">Mock-Verbindung prüfen</button><button name="action" value="toggle-publishing">Publishing umschalten</button><button name="action" value="archive" class="danger">Archivieren</button></form></td></tr>{% endfor %}</table>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>Instagram-Seiten</h1>
+{% if environment == 'meta-test' %}
+<div class="meta-test-alert">META-TEST – ECHTE INSTAGRAM-VERÖFFENTLICHUNGEN MÖGLICH</div>
+<form method="post" action="/meta-test/emergency-stop" class="button-row">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <button class="danger" name="enabled" value="true">Globalen Not-Aus aktivieren</button>
+  <button name="enabled" value="false">Not-Aus nach Prüfung deaktivieren</button>
+</form>
+{% else %}
+<p class="warning">Diese Umgebung erlaubt keine echte Meta-Verbindung. Das Staging bleibt im harten Dry-Run.</p>
+{% endif %}
+<section>
+  <h2>Seite sicher deaktiviert anlegen</h2>
+  <form method="post" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Interner Name<input name="internal_name" required></label>
+    <label>Anzeigename<input name="display_name" required></label>
+    <label>Benutzername<input name="username" required></label>
+    <label>Verein<input name="club" required></label>
+    <label>Instagram-Konto-ID<input name="account_id"></label>
+    <button>Sicher deaktiviert anlegen</button>
+  </form>
+</section>
+{% for page in items %}
+{% set connection = connections.get(page.id) %}
+{% set summary = attempt_summary.get(page.id, {}) %}
+<section>
+  <h2>{{ page.display_name }} <small>@{{ page.username }}</small></h2>
+  <div class="cards status-cards">
+    <article><strong>{{ connection.status if connection else 'nicht verbunden' }}</strong><span>Verbindungsstatus</span></article>
+    <article><strong>{{ connection.account_type if connection and connection.account_type else '—' }}</strong><span>Kontoart</span></article>
+    <article><strong>{{ connection.api_version if connection else settings.meta_graph_version }}</strong><span>API-Version</span></article>
+    <article><strong>{{ summary.uncertain or 0 }}</strong><span>Unklare Vorgänge</span></article>
+  </div>
+  {% if connection %}
+  <dl class="metadata">
+    <dt>Instagram-ID</dt><dd>{{ connection.instagram_user_id or '—' }}</dd>
+    <dt>Bestätigter Benutzername</dt><dd>@{{ connection.confirmed_username or '—' }}</dd>
+    <dt>Berechtigungen</dt><dd>{{ connection.scopes | join(', ') if connection.scopes else 'keine' }}</dd>
+    <dt>Tokenablauf</dt><dd>{{ connection.token_expires_at | berlin if connection.token_expires_at else 'unbekannt' }}</dd>
+    <dt>Letzte Prüfung</dt><dd>{{ connection.last_check_at | berlin if connection.last_check_at else 'noch nie' }}</dd>
+    <dt>Letzte erfolgreiche Veröffentlichung</dt><dd>{{ summary.last_success.completed_at | berlin if summary.last_success else 'keine' }}</dd>
+    <dt>Letzter Fehler</dt><dd>{{ connection.last_error or (summary.last_failure.error_message if summary.last_failure else 'keiner') }}</dd>
+  </dl>
+  {% endif %}
+  {% if environment == 'meta-test' %}
+  <div class="button-row">
+    {% if not connection or connection.status == 'disconnected' %}
+    <form method="post" action="/instagram/{{ page.id }}/meta/connect"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Instagram verbinden</button></form>
+    {% else %}
+    <form method="post" action="/instagram/{{ page.id }}/meta/check"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Verbindung prüfen</button></form>
+    <form method="post" action="/instagram/{{ page.id }}/meta/refresh"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Token erneuern</button></form>
+    <form method="post" action="/instagram/{{ page.id }}/meta/disconnect"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="danger">Verbindung trennen</button></form>
+    <a class="button" href="/meta-test/{{ page.id }}">Meta-Testassistent öffnen</a>
+    {% endif %}
+  </div>
+  {% if connection %}
+  <form method="post" action="/instagram/{{ page.id }}/meta/settings" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label><input type="checkbox" name="test_account" {% if connection.test_account %}checked{% endif %}> Isolierte Testseite ausdrücklich bestätigen</label>
+    <label><input type="checkbox" name="publishing_enabled" {% if page.publishing_enabled %}checked{% endif %}> Manuelles Meta-Test-Publishing aktivieren</label>
+    <button>Meta-Testeinstellungen speichern</button>
+  </form>
+  {% endif %}
+  {% else %}
+  <form method="post" action="/instagram/{{ page.id }}/state" class="button-row">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="version" value="{{ page.version }}">
+    <button name="action" value="mock-connect">Mock-Verbindung prüfen</button>
+    <button name="action" value="archive" class="danger">Archivieren</button>
+  </form>
+  {% endif %}
+</section>
+{% endfor %}
+{% endblock %}
