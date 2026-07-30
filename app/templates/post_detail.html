@@ -9,6 +9,33 @@
   Bei KI-Ausgaben sind Spieler, Trikot, Logos, Schreibweisen und Spieldaten vor der Freigabe visuell zu prüfen.
 </div>
 {% endif %}
+<div class="warning"><strong>KI-Grundgrafik:</strong> Bitte auf unbeabsichtigte oder erfundene Logos und Wappen prüfen. Die Anwendung kann solche KI-Elemente nicht zuverlässig automatisch erkennen.</div>
+{% set logos=item.design_snapshot.get('logos') %}
+{% if logos %}
+<section>
+  <h2>Verifizierte Logo-Assets</h2>
+  <div class="columns">
+    <div>
+      <h3>Eigenes Mannschaftslogo</h3>
+      {% if logos.get('team') %}
+      <img class="logo-thumb" src="/logos/{{logos.team.id}}/preview" alt="Verifiziertes Mannschaftslogo">
+      <p>{{logos.team.name}} · Version {{logos.team.version}} · SHA-256 {{logos.team.checksum}}</p>
+      <span class="badge">verifiziertes Original</span>
+      {% else %}<div class="alert">Kein verifiziertes Mannschaftslogo eingefroren.</div>{% endif %}
+    </div>
+    <div>
+      <h3>Gegnerlogo</h3>
+      {% if logos.get('opponent') and not logos.opponent.get('fallback') %}
+      <img class="logo-thumb" src="/logos/{{logos.opponent.id}}/preview" alt="Verifiziertes Gegnerlogo">
+      <p>{{logos.opponent.name}} · Version {{logos.opponent.version}} · SHA-256 {{logos.opponent.checksum}}</p>
+      <span class="badge">verifiziertes Original</span>
+      {% else %}<p>Kein verifiziertes Gegnerlogo vorhanden – neutraler Text-Fallback wird verwendet.</p>{% endif %}
+    </div>
+  </div>
+</section>
+{% else %}
+<div class="warning">Legacy-Beitrag ohne eingefrorene Logoversion. Logos zuordnen und anschließend kontrolliert neu zusammensetzen.</div>
+{% endif %}
 {% if item.design_snapshot.get('prompts') %}
 <details>
   <summary>Verwendete Promptversionen anzeigen</summary>
@@ -33,6 +60,17 @@
     <button>Grafiken neu erzeugen</button>
   </fieldset>
 </form>
+{% if item.design_snapshot.get('media',{}).get('feed',{}).get('ai_base_path') %}
+<form method="post" action="/posts/{{item.id}}/recompose-logos">
+  <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
+  <fieldset>
+    <legend>Grafiken mit aktualisierten Logos neu zusammensetzen</legend>
+    <p>Die vorhandenen KI-Grundgrafiken werden wiederverwendet. Es erfolgt kein neuer OpenAI-Bildaufruf.</p>
+    {% for x in jobs if x.kind=='story' and x.status.value!='published' %}<label><input type="checkbox" name="story_job_ids" value="{{x.id}}" checked> Story {{x.scheduled_at|berlin}}</label>{% endfor %}
+    <button>Logos lokal neu zusammensetzen</button>
+  </fieldset>
+</form>
+{% endif %}
 <form method="post" action="/posts/{{item.id}}/text">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
   <label>Begleittext<textarea name="text" rows="8" required>{{item.text}}</textarea></label><button>Text versioniert speichern</button>

@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from app.config import Settings, get_settings
 from app.imagegen.service import AIImageRenderer, OpenAIImageProvider
 from app.rendering.service import Renderer
@@ -16,11 +14,11 @@ def build_renderer(settings: Settings | None = None):
         return AIImageRenderer(
             settings.generated_root,
             settings.media_root,
-            Path("data/uploads"),
+            settings.upload_root,
             OpenAIImageProvider(settings.openai_api_key),
         )
     return Renderer(
-        settings.generated_root, settings.media_root, Path("data/uploads")
+        settings.generated_root, settings.media_root, settings.upload_root
     )
 
 

@@ -149,7 +149,8 @@ def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
     assert Image.open(output).size == (1080, 1350)
     assert provider.calls[0]["size"] == "1088x1360"
     assert provider.calls[0]["model"] == "gpt-image-2"
-    assert provider.calls[0]["references"] == [player.resolve(), logo.resolve()]
+    # Logos are never generative references. Verified originals are composited later.
+    assert provider.calls[0]["references"] == [player.resolve()]
 
 
 def test_ai_renderer_refuses_missing_player(tmp_path):

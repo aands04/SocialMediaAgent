@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +14,12 @@ from app.approvals.service import ApprovalError, approve, edit_text
 from app.auth.service import hash_password
 from app.config import get_settings
 from app.db import get_db
+from app.logos.service import (
+    LogoValidationError,
+    normalize_club_name,
+    opponent_name,
+    store_logo,
+)
 from app.media.storage import LocalStorageProvider, StorageError
 from app.models import (
     AuditLog,
@@ -23,8 +29,11 @@ from app.models import (
     GenerationJob,
     GenerationJobStatus,
     InstagramPage,
+    JobStatus,
+    LogoAsset,
     MediaAsset,
     Post,
+    PostStatus,
     PromptTemplate,
     PublicationJob,
     Role,
@@ -64,6 +73,54 @@ def redirect(path, message="Gespeichert"):
     return RedirectResponse(f"{path}?notice={message}", 303)
 
 
+def _invalidate_posts_for_logo_change(
+    db: Session, game: Game, reason: str
+) -> list[str]:
+    affected = []
+    for post in db.scalars(select(Post).where(Post.game_id == game.id)).all():
+        if post.status in {PostStatus.PUBLISHED, PostStatus.CANCELLED}:
+            continue
+        post.version += 1
+        post.approved_version = None
+        post.status = PostStatus.REAPPROVAL
+        warning = "Logo-Zuordnung wurde geändert; Grafiken neu zusammensetzen"
+        post.critical_warnings = list(
+            dict.fromkeys([*(post.critical_warnings or []), warning])
+        )
+        for publication in db.scalars(
+            select(PublicationJob).where(
+                PublicationJob.post_id == post.id,
+                PublicationJob.status != JobStatus.PUBLISHED,
+            )
+        ):
+            publication.status = JobStatus.UNAPPROVED
+            publication.approval_status = "reapproval_required"
+            publication.approved_post_version = None
+            publication.error = reason
+        affected.append(post.id)
+    return affected
+
+
+def _audit_logo_approval_revocations(
+    db: Session,
+    current: User,
+    team_id: str,
+    game_id: str,
+    post_ids: list[str],
+    reason: str,
+) -> None:
+    for post_id in dict.fromkeys(post_ids):
+        audit(
+            db,
+            current,
+            "post.approval_revoked_logo_change",
+            "post",
+            post_id,
+            team_id,
+            {"game_id": game_id, "reason": reason},
+        )
+
+
 @router.get("/teams", response_class=HTMLResponse)
 def teams(request: Request, current=Depends(current_user), db: Session = Depends(get_db)):
     require(current, db, "view")
@@ -71,7 +128,40 @@ def teams(request: Request, current=Depends(current_user), db: Session = Depends
         select(Team).where(Team.archived_at.is_(None)).order_by(Team.display_name)
     ).all()
     pages = db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
-    return render(request, "teams.html", current, items=items, pages=pages, title="Mannschaften")
+    logos = {
+        item.id: db.get(LogoAsset, item.logo_asset_id) if item.logo_asset_id else None
+        for item in items
+    }
+    logo_versions = {
+        item.id: db.scalars(
+            select(LogoAsset)
+            .where(
+                LogoAsset.logo_type == "team",
+                LogoAsset.team_id == item.id,
+                LogoAsset.active.is_(True),
+                LogoAsset.archived_at.is_(None),
+            )
+            .order_by(LogoAsset.version.desc())
+        ).all()
+        for item in items
+    }
+    uploader_ids = {
+        logo.uploaded_by
+        for versions in logo_versions.values()
+        for logo in versions
+    }
+    uploaders = {user.id: user.email for user in db.scalars(select(User).where(User.id.in_(uploader_ids))).all()} if uploader_ids else {}
+    return render(
+        request,
+        "teams.html",
+        current,
+        items=items,
+        pages=pages,
+        logos=logos,
+        logo_versions=logo_versions,
+        uploaders=uploaders,
+        title="Mannschaften",
+    )
 
 
 @router.post("/teams")
@@ -145,6 +235,135 @@ def team_state(
     audit(db, current, f"team.{action}", "team", item.id, item.id)
     db.commit()
     return redirect("/teams")
+
+
+@router.post("/teams/{team_id}/logo")
+async def upload_team_logo(
+    team_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    file: UploadFile = File(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    team = db.get(Team, team_id)
+    if not team:
+        raise HTTPException(404)
+    old = db.get(LogoAsset, team.logo_asset_id) if team.logo_asset_id else None
+    try:
+        logo, created = store_logo(
+            db,
+            upload_root=settings.upload_root,
+            logo_type="team",
+            team_id=team.id,
+            display_name=team.club,
+            original_filename=file.filename or "logo",
+            content_type=file.content_type,
+            data=await file.read(),
+            uploaded_by=current.id,
+        )
+    except LogoValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    team.logo_asset_id = logo.id
+    team.logo_path = None
+    team.version += 1
+    affected = []
+    if not old or old.id != logo.id:
+        for game in db.scalars(select(Game).where(Game.team_id == team.id)).all():
+            reason = "Mannschaftslogo wurde geändert; erneute Freigabe erforderlich"
+            game_posts = _invalidate_posts_for_logo_change(db, game, reason)
+            affected.extend(game_posts)
+            _audit_logo_approval_revocations(
+                db, current, team.id, game.id, game_posts, reason
+            )
+    audit(
+        db,
+        current,
+        "team_logo.uploaded" if created else "team_logo.selected",
+        "logo_asset",
+        logo.id,
+        team.id,
+        {
+            "old_logo": {"id": old.id, "version": old.version} if old else None,
+            "new_logo": {"id": logo.id, "version": logo.version},
+            "affected_posts": affected,
+        },
+    )
+    db.commit()
+    return redirect("/teams", "Verifiziertes Mannschaftslogo gespeichert")
+
+
+@router.post("/teams/{team_id}/logo/state")
+def team_logo_state(
+    team_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    action: str = Form(),
+    logo_id: str = Form(default=""),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    team = db.get(Team, team_id)
+    if not team:
+        raise HTTPException(404)
+    old = db.get(LogoAsset, team.logo_asset_id) if team.logo_asset_id else None
+    logo = old
+    if action == "select":
+        selected = db.get(LogoAsset, logo_id)
+        if (
+            not selected
+            or selected.logo_type != "team"
+            or selected.team_id != team.id
+            or not selected.active
+            or selected.archived_at
+        ):
+            raise HTTPException(422, "Die gewählte Mannschaftslogoversion ist ungültig")
+        team.logo_asset_id = selected.id
+        logo = selected
+    elif not logo:
+        raise HTTPException(404)
+    elif action == "deactivate":
+        logo.active = False
+        team.logo_asset_id = None
+    elif action == "archive":
+        logo.active = False
+        logo.archived_at = datetime.now(timezone.utc)
+        team.logo_asset_id = None
+    else:
+        raise HTTPException(422, "Unbekannte Logoaktion")
+    team.version += 1
+    affected = []
+    if (old.id if old else None) != (team.logo_asset_id or None):
+        for game in db.scalars(select(Game).where(Game.team_id == team.id)).all():
+            reason = "Mannschaftslogo wurde geändert; erneute Freigabe erforderlich"
+            game_posts = _invalidate_posts_for_logo_change(db, game, reason)
+            affected.extend(game_posts)
+            _audit_logo_approval_revocations(
+                db, current, team.id, game.id, game_posts, reason
+            )
+    audit(
+        db,
+        current,
+        f"team_logo.{action}",
+        "logo_asset",
+        logo.id,
+        team.id,
+        {
+            "old_logo": {"id": old.id, "version": old.version} if old else None,
+            "new_logo": (
+                {"id": logo.id, "version": logo.version}
+                if team.logo_asset_id
+                else None
+            ),
+            "affected_posts": affected,
+        },
+    )
+    db.commit()
+    return redirect("/teams", "Mannschaftslogo aktualisiert")
 
 
 @router.get("/instagram", response_class=HTMLResponse)
@@ -948,6 +1167,46 @@ def rerender_post_media(
     return redirect(f"/generation-jobs/{job.id}", "Neurendern wurde eingereiht")
 
 
+@router.post("/posts/{post_id}/recompose-logos")
+def recompose_post_media_logos(
+    post_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    version: int = Form(),
+    story_job_ids: list[str] = Form(default=[]),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    from app.jobs.generation import enqueue_logo_recompose
+
+    check_csrf(request, csrf_token_value)
+    item = db.get(Post, post_id)
+    if not item:
+        raise HTTPException(404)
+    require(current, db, "generate", item.team_id)
+    if item.version != version:
+        raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    allowed_story_ids = set(
+        db.scalars(
+            select(PublicationJob.id).where(
+                PublicationJob.post_id == item.id,
+                PublicationJob.kind == "story",
+                PublicationJob.status != JobStatus.PUBLISHED,
+            )
+        )
+    )
+    if not set(story_job_ids).issubset(allowed_story_ids):
+        raise HTTPException(422, "Ungültige oder bereits veröffentlichte Story-Auswahl")
+    try:
+        job = enqueue_logo_recompose(db, item, current, version, story_job_ids)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return redirect(
+        f"/generation-jobs/{job.id}",
+        "Logo-Neuzusammensetzung wurde ohne neuen KI-Aufruf eingereiht",
+    )
+
+
 @router.post("/posts/{post_id}/approve")
 def approve_post(
     post_id: str,
@@ -1034,6 +1293,206 @@ def cancel_job(
     return redirect("/publications")
 
 
+@router.get("/logos/{logo_id}/preview")
+def logo_preview(
+    logo_id: str,
+    game_id: str | None = None,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    logo = db.get(LogoAsset, logo_id)
+    if not logo or logo.archived_at:
+        raise HTTPException(404)
+    if logo.logo_type == "team" and logo.team_id:
+        require(current, db, "view", logo.team_id)
+    elif current.role != Role.ADMIN:
+        context_game = db.get(Game, game_id) if game_id else None
+        if context_game:
+            require(current, db, "view", context_game.team_id)
+        else:
+            assigned_team_ids = db.scalars(
+                select(Game.team_id).where(Game.opponent_logo_id == logo.id)
+            ).all()
+            if not any(
+                require_visible(db, current, team_id) for team_id in assigned_team_ids
+            ):
+                raise HTTPException(403, "Keine Berechtigung für dieses Gegnerlogo")
+    relative = Path(logo.original_path)
+    root = settings.upload_root.resolve()
+    path = (root / relative).resolve()
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or not path.is_relative_to(root)
+        or path.is_symlink()
+        or not path.is_file()
+    ):
+        raise HTTPException(404)
+    return FileResponse(
+        path,
+        media_type=logo.mime_type,
+        filename=logo.original_filename,
+        content_disposition_type="inline",
+    )
+
+
+@router.get("/games/{game_id}/opponent-logo", response_class=HTMLResponse)
+def manage_opponent_logo(
+    game_id: str,
+    request: Request,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    game = db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404)
+    require(current, db, "view", game.team_id)
+    team = db.get(Team, game.team_id)
+    name = opponent_name(game, team)
+    normalized = normalize_club_name(name)
+    current_logo = db.get(LogoAsset, game.opponent_logo_id) if game.opponent_logo_id else None
+    suggestions = db.scalars(
+        select(LogoAsset)
+        .where(
+            LogoAsset.logo_type == "opponent",
+            LogoAsset.normalized_name == normalized,
+            LogoAsset.active.is_(True),
+            LogoAsset.archived_at.is_(None),
+        )
+        .order_by(LogoAsset.version.desc())
+    ).all()
+    library = db.scalars(
+        select(LogoAsset)
+        .where(
+            LogoAsset.logo_type == "opponent",
+            LogoAsset.active.is_(True),
+            LogoAsset.archived_at.is_(None),
+        )
+        .order_by(LogoAsset.display_name, LogoAsset.version.desc())
+    ).all()
+    uploader_ids = {logo.uploaded_by for logo in library}
+    uploaders = {user.id: user.email for user in db.scalars(select(User).where(User.id.in_(uploader_ids))).all()} if uploader_ids else {}
+    return render(
+        request,
+        "opponent_logo.html",
+        current,
+        game=game,
+        team=team,
+        opponent=name,
+        current_logo=current_logo,
+        suggestions=suggestions,
+        library=library,
+        uploaders=uploaders,
+        title="Gegnerlogo verwalten",
+    )
+
+
+@router.post("/games/{game_id}/opponent-logo")
+async def update_opponent_logo(
+    game_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    action: str = Form(),
+    logo_id: str = Form(default=""),
+    file: UploadFile | None = File(default=None),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    game = db.scalar(select(Game).where(Game.id == game_id).with_for_update())
+    if not game:
+        raise HTTPException(404)
+    require(current, db, "edit_game", game.team_id)
+    team = db.get(Team, game.team_id)
+    old = db.get(LogoAsset, game.opponent_logo_id) if game.opponent_logo_id else None
+    selected = None
+    created = False
+    if action == "upload":
+        if not file or not file.filename:
+            raise HTTPException(422, "Bitte eine PNG- oder WebP-Datei auswählen")
+        try:
+            selected, created = store_logo(
+                db,
+                upload_root=settings.upload_root,
+                logo_type="opponent",
+                team_id=None,
+                display_name=opponent_name(game, team),
+                original_filename=file.filename,
+                content_type=file.content_type,
+                data=await file.read(),
+                uploaded_by=current.id,
+            )
+        except LogoValidationError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    elif action == "select":
+        selected = db.get(LogoAsset, logo_id)
+        if (
+            not selected
+            or selected.logo_type != "opponent"
+            or not selected.active
+            or selected.archived_at
+        ):
+            raise HTTPException(422, "Das gewählte Gegnerlogo ist nicht aktiv verfügbar")
+    elif action != "remove":
+        raise HTTPException(422, "Unbekannte Logoaktion")
+    if selected and selected.normalized_name != normalize_club_name(opponent_name(game, team)):
+        # Abweichende Schreibweisen sind erlaubt, aber nur nach dieser bewussten Auswahl.
+        source = "manual_confirmed_non_exact"
+    elif selected:
+        source = "exact_name_confirmed"
+    else:
+        source = "removed"
+    game.opponent_logo_id = selected.id if selected else None
+    game.overrides = {
+        **(game.overrides or {}),
+        "opponent_logo_source": source,
+        "opponent_logo_confirmed_by": current.id if selected else None,
+        "opponent_logo_confirmed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    game.version += 1
+    affected = []
+    if (old.id if old else None) != (selected.id if selected else None):
+        reason = "Gegnerlogo wurde geändert; erneute Freigabe erforderlich"
+        affected = _invalidate_posts_for_logo_change(db, game, reason)
+        _audit_logo_approval_revocations(
+            db, current, game.team_id, game.id, affected, reason
+        )
+    action_name = (
+        "opponent_logo.removed"
+        if not selected
+        else (
+            "opponent_logo.uploaded"
+            if created
+            else (
+                "opponent_logo.suggestion_confirmed"
+                if source == "exact_name_confirmed"
+                else "opponent_logo.assigned"
+            )
+        )
+    )
+    audit(
+        db,
+        current,
+        action_name,
+        "game",
+        game.id,
+        game.team_id,
+        {
+            "old_logo": {"id": old.id, "version": old.version} if old else None,
+            "new_logo": (
+                {"id": selected.id, "version": selected.version} if selected else None
+            ),
+            "source": source,
+            "affected_posts": affected,
+        },
+    )
+    db.commit()
+    return redirect(
+        f"/games/{game.id}/opponent-logo",
+        "Gegnerlogo-Zuordnung gespeichert",
+    )
+
+
 @router.get("/games", response_class=HTMLResponse)
 def games(request: Request, current=Depends(current_user), db: Session = Depends(get_db)):
     teams = [
@@ -1046,8 +1505,25 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
         for g in db.scalars(select(Game).order_by(Game.kickoff.desc()))
         if require_visible(db, current, g.team_id)
     ]
+    team_map = {team.id: team for team in teams}
+    logo_map = {
+        game.id: db.get(LogoAsset, game.opponent_logo_id) if game.opponent_logo_id else None
+        for game in items
+    }
+    opponents = {
+        game.id: opponent_name(game, team_map[game.team_id])
+        for game in items
+        if game.team_id in team_map
+    }
     return render(
-        request, "games.html", current, teams=teams, items=items, title="Spiele und Testdaten"
+        request,
+        "games.html",
+        current,
+        teams=teams,
+        items=items,
+        logo_map=logo_map,
+        opponents=opponents,
+        title="Spiele und Testdaten",
     )
 
 

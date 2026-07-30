@@ -49,7 +49,13 @@ IMAGE_SAFETY_PREFIX = """VERBINDLICHE DATEN- UND MEDIENREGELN:
 - Erfinde keine Spieler, Namen, Logos, Sponsoren, Ergebnisse oder Vereinsinformationen.
 - Das bereitgestellte Spielerfoto ist die Identitätsreferenz. Gesicht, Körper,
   Trikot, Vereinsabzeichen und Proportionen müssen erkennbar unverändert bleiben.
-- Verwende ausschließlich die bereitgestellten Logos. Erzeuge keine Fantasielogos.
+- Erzeuge, zeichne, interpretiere oder rekonstruiere keinerlei Vereinswappen,
+  Logos, Embleme, Marken, Sponsorenzeichen oder grafische Wappen-Platzhalter.
+- Füge keine zusätzlichen Sponsorenlogos oder fiktiven Marken hinzu.
+- Halte oben links und oben rechts ruhige, kontrastarme Schutzbereiche für die
+  spätere deterministische Einbettung verifizierter Originallogos frei.
+- Vereinslogos werden nach der KI-Erzeugung durch die Anwendung eingesetzt und
+  gehören ausdrücklich nicht zum generativen Bildauftrag.
 - Stelle jeden angegebenen Text buchstaben- und zahlengenau dar.
 - Keine vollständige Anschrift, keine Spiel-ID, Staffel-ID oder Schiedsrichterdaten.
 """

@@ -33,25 +33,31 @@ def setup(db,tmp_path,late="publish_now"):
 def approver(db):
     user=User(email=f"a{len(db.query(User).all())}@x",password_hash="x",role=Role.APPROVER,all_teams=True); db.add(user); db.commit(); return user
 
+def mark_verified_logo(post):
+    snapshot=dict(post.design_snapshot or {})
+    snapshot["logos"]={"team":{"id":"verified-test-logo","version":1,"checksum":"0"*64,"verified":True}}
+    post.design_snapshot=snapshot
+    return post
+
 def test_late_approval_modes(db,tmp_path):
-    _,team,game=setup(db,tmp_path,"manual"); post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"o")); post.critical_warnings=[]; job=db.query(PublicationJob).filter_by(post_id=post.id).one(); job.scheduled_at=datetime.now(timezone.utc)-timedelta(minutes=1); db.commit()
+    _,team,game=setup(db,tmp_path,"manual"); post=mark_verified_logo(create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"o"))); post.critical_warnings=[]; job=db.query(PublicationJob).filter_by(post_id=post.id).one(); job.scheduled_at=datetime.now(timezone.utc)-timedelta(minutes=1); db.commit()
     with pytest.raises(ApprovalError,match="verstrichen"): approve(db,post,approver(db))
     team.rules={"late_approval":"skip"}; db.commit(); approve(db,post,approver(db)); assert job.status==JobStatus.SKIPPED
 
 def test_change_after_approval_requires_reapproval(db,tmp_path):
-    _,team,game=setup(db,tmp_path); post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"o")); post.critical_warnings=[]; user=approver(db); approve(db,post,user); old=post.version
+    _,team,game=setup(db,tmp_path); post=mark_verified_logo(create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"o"))); post.critical_warnings=[]; user=approver(db); approve(db,post,user); old=post.version
     editor=User(email="e@x",password_hash="x",role=Role.EDITOR,all_teams=True); db.add(editor); db.commit(); edit_text(db,post,editor,"Geändert",old)
     assert post.status==PostStatus.REAPPROVAL and all(j.status==JobStatus.UNAPPROVED for j in db.query(PublicationJob).filter_by(post_id=post.id))
 
 def test_partial_and_duplicate_job_execution(db,tmp_path):
-    _,team,game=setup(db,tmp_path); db.add(StoryRule(team_id=team.id,name="s",post_type="announcement",reference="kickoff",direction="before",offset_minutes=30,template="s")); db.commit(); post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"o")); post.critical_warnings=[]; approve(db,post,approver(db)); jobs=db.query(PublicationJob).filter_by(post_id=post.id).all()
+    _,team,game=setup(db,tmp_path); db.add(StoryRule(team_id=team.id,name="s",post_type="announcement",reference="kickoff",direction="before",offset_minutes=30,template="s")); db.commit(); post=mark_verified_logo(create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"o"))); post.critical_warnings=[]; approve(db,post,approver(db)); jobs=db.query(PublicationJob).filter_by(post_id=post.id).all()
     for job in jobs: job.scheduled_at=datetime.now(timezone.utc)-timedelta(seconds=1)
     db.commit(); first=process_job(db,jobs[0].id,DryRunPublisher(),Settings(global_publish_enabled=True)); attempts=first.attempts; process_job(db,jobs[0].id,DryRunPublisher(),Settings(global_publish_enabled=True))
     assert first.attempts==attempts and post.status==PostStatus.PARTIAL
     process_job(db,jobs[1].id,DryRunPublisher(),Settings(global_publish_enabled=True)); assert post.status==PostStatus.PUBLISHED
 
 def test_global_emergency_stop(db,tmp_path):
-    _,team,game=setup(db,tmp_path); post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"o")); post.critical_warnings=[]; approve(db,post,approver(db)); job=db.query(PublicationJob).filter_by(post_id=post.id).one(); job.scheduled_at=datetime.now(timezone.utc)-timedelta(seconds=1); db.add(SystemSetting(key="emergency_stop",value={"enabled":True})); db.commit()
+    _,team,game=setup(db,tmp_path); post=mark_verified_logo(create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"o"))); post.critical_warnings=[]; approve(db,post,approver(db)); job=db.query(PublicationJob).filter_by(post_id=post.id).one(); job.scheduled_at=datetime.now(timezone.utc)-timedelta(seconds=1); db.add(SystemSetting(key="emergency_stop",value={"enabled":True})); db.commit()
     with pytest.raises(PublishError,match="Not-Aus"): process_job(db,job.id,DryRunPublisher(),Settings(global_publish_enabled=True))
     assert job.attempts==0
 

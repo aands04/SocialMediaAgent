@@ -41,6 +41,12 @@ def graph(db,tmp_path):
  team=Team(internal_name="one",display_name="Erste",short_name="I",slug="erste",club="SV",fussball_url="https://www.fussball.de/x",instagram_page_id=page.id,media_subdir="erste",rules={"feed_before_minutes":60}); db.add(team); db.flush()
  game=Game(team_id=team.id,external_id="g1",home_team="SV",away_team="FC",kickoff=datetime.now(timezone.utc)+timedelta(hours=3),source_url=team.fussball_url); db.add(game); db.commit(); return page,team,game
 
+def mark_verified_logo(post):
+ snapshot=dict(post.design_snapshot or {})
+ snapshot["logos"]={"team":{"id":"verified-test-logo","version":1,"checksum":"0"*64,"verified":True}}
+ post.design_snapshot=snapshot
+ return post
+
 def test_password_and_team_scope(db,tmp_path):
  _,team,_=graph(db,tmp_path); user=User(email="e@x.de",password_hash=hash_password("long-enough"),role=Role.EDITOR,all_teams=False); db.add(user); db.commit()
  assert not allowed(db,user,"edit_post",team.id); db.add(UserTeam(user_id=user.id,team_id=team.id)); db.commit(); assert allowed(db,user,"edit_post",team.id); assert not allowed(db,user,"approve",team.id)
@@ -65,7 +71,7 @@ def test_image_reserved_once_per_matchday(db,tmp_path):
  _,team,game=graph(db,tmp_path); p=tmp_path/"a.jpg";p.write_bytes(b"x"); asset=MediaAsset(team_id=team.id,relative_path="a.jpg",filename="a.jpg",mime_type="image/jpeg",size=1,checksum="x",mtime=datetime.now(timezone.utc));db.add(asset);db.commit()
  assert reserve_image(db,team.id,game.id).id==asset.id; assert reserve_image(db,team.id,game.id).id==asset.id and asset.uses==1
 def test_approval_and_publish_gate(db,tmp_path):
- page,team,game=graph(db,tmp_path); post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"out")); post.critical_warnings=[]; user=User(email="a@x.de",password_hash="x",role=Role.APPROVER,all_teams=True);db.add(user);db.commit()
+ page,team,game=graph(db,tmp_path); post=mark_verified_logo(create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"out"))); post.critical_warnings=[]; user=User(email="a@x.de",password_hash="x",role=Role.APPROVER,all_teams=True);db.add(user);db.commit()
  job=db.query(PublicationJob).filter_by(post_id=post.id).first(); job.scheduled_at=datetime.now(timezone.utc)-timedelta(seconds=1);db.commit()
  with pytest.raises(PublishError): process_job(db,job.id,DryRunPublisher(),Settings(global_publish_enabled=True))
  approve(db,post,user); done=process_job(db,job.id,DryRunPublisher(),Settings(global_publish_enabled=True)); assert done.status==JobStatus.PUBLISHED

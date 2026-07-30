@@ -8,10 +8,12 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,9 +38,45 @@ class UserTeam(Base):
 class InstagramPage(Base,Timestamped):
     __tablename__="instagram_pages"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); internal_name:Mapped[str]=mapped_column(String(120)); display_name:Mapped[str]=mapped_column(String(120)); username:Mapped[str]=mapped_column(String(80)); profile_url:Mapped[str|None]=mapped_column(String(500)); account_id:Mapped[str|None]=mapped_column(String(100)); facebook_page_id:Mapped[str|None]=mapped_column(String(100)); club:Mapped[str]=mapped_column(String(160)); active:Mapped[bool]=mapped_column(Boolean,default=False); connection_status:Mapped[str]=mapped_column(String(30),default="unconfigured"); publishing_enabled:Mapped[bool]=mapped_column(Boolean,default=False); allowed_types:Mapped[dict]=mapped_column(JSON,default=lambda:{"feed":True,"story":True}); defaults:Mapped[dict]=mapped_column(JSON,default=dict); archived_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_check_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_error:Mapped[str|None]=mapped_column(Text)
 class Team(Base,Timestamped):
-    __tablename__="teams"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); internal_name:Mapped[str]=mapped_column(String(120)); display_name:Mapped[str]=mapped_column(String(120)); short_name:Mapped[str]=mapped_column(String(30)); slug:Mapped[str]=mapped_column(String(80),unique=True); club:Mapped[str]=mapped_column(String(160)); active:Mapped[bool]=mapped_column(Boolean,default=True); archived_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); fussball_url:Mapped[str]=mapped_column(String(1000)); instagram_page_id:Mapped[str]=mapped_column(ForeignKey("instagram_pages.id")); media_subdir:Mapped[str]=mapped_column(String(500)); logo_path:Mapped[str|None]=mapped_column(String(500)); feed_template:Mapped[str]=mapped_column(String(100),default="default-feed"); story_templates:Mapped[list]=mapped_column(JSON,default=lambda:["default-story"]); primary_font:Mapped[str]=mapped_column(String(100),default="sans-serif"); secondary_font:Mapped[str]=mapped_column(String(100),default="sans-serif"); colors:Mapped[dict]=mapped_column(JSON,default=lambda:{"primary":"#172554","secondary":"#ffffff"}); text_style:Mapped[dict]=mapped_column(JSON,default=dict); hashtags:Mapped[list]=mapped_column(JSON,default=list); timezone:Mapped[str]=mapped_column(String(50),default="Europe/Berlin"); rules:Mapped[dict]=mapped_column(JSON,default=dict); publishing_enabled:Mapped[bool]=mapped_column(Boolean,default=True); last_sync_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_error_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_error:Mapped[str|None]=mapped_column(Text)
+    __tablename__="teams"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); internal_name:Mapped[str]=mapped_column(String(120)); display_name:Mapped[str]=mapped_column(String(120)); short_name:Mapped[str]=mapped_column(String(30)); slug:Mapped[str]=mapped_column(String(80),unique=True); club:Mapped[str]=mapped_column(String(160)); active:Mapped[bool]=mapped_column(Boolean,default=True); archived_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); fussball_url:Mapped[str]=mapped_column(String(1000)); instagram_page_id:Mapped[str]=mapped_column(ForeignKey("instagram_pages.id")); media_subdir:Mapped[str]=mapped_column(String(500)); logo_path:Mapped[str|None]=mapped_column(String(500)); logo_asset_id:Mapped[str|None]=mapped_column(ForeignKey("logo_assets.id")); feed_template:Mapped[str]=mapped_column(String(100),default="default-feed"); story_templates:Mapped[list]=mapped_column(JSON,default=lambda:["default-story"]); primary_font:Mapped[str]=mapped_column(String(100),default="sans-serif"); secondary_font:Mapped[str]=mapped_column(String(100),default="sans-serif"); colors:Mapped[dict]=mapped_column(JSON,default=lambda:{"primary":"#172554","secondary":"#ffffff"}); text_style:Mapped[dict]=mapped_column(JSON,default=dict); hashtags:Mapped[list]=mapped_column(JSON,default=list); timezone:Mapped[str]=mapped_column(String(50),default="Europe/Berlin"); rules:Mapped[dict]=mapped_column(JSON,default=dict); publishing_enabled:Mapped[bool]=mapped_column(Boolean,default=True); last_sync_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_error_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_error:Mapped[str|None]=mapped_column(Text)
 class Game(Base,Timestamped):
-    __tablename__="games"; __table_args__=(UniqueConstraint("team_id","provider","external_id"),); id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id"),index=True); provider:Mapped[str]=mapped_column(String(40),default="fussball.de"); external_id:Mapped[str]=mapped_column(String(200)); home_team:Mapped[str]=mapped_column(String(160)); away_team:Mapped[str]=mapped_column(String(160)); kickoff:Mapped[datetime]=mapped_column(DateTime(timezone=True)); original_kickoff:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); competition:Mapped[str|None]=mapped_column(String(160)); venue:Mapped[str|None]=mapped_column(String(250)); pitch:Mapped[str|None]=mapped_column(String(80)); status:Mapped[str]=mapped_column(String(40),default="scheduled"); home_score:Mapped[int|None]=mapped_column(Integer); away_score:Mapped[int|None]=mapped_column(Integer); halftime:Mapped[str|None]=mapped_column(String(20)); result_confirmed:Mapped[bool]=mapped_column(Boolean,default=False); source_url:Mapped[str]=mapped_column(String(1000)); checked_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); overrides:Mapped[dict]=mapped_column(JSON,default=dict); data_hash:Mapped[str|None]=mapped_column(String(64))
+    __tablename__="games"; __table_args__=(UniqueConstraint("team_id","provider","external_id"),); id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id"),index=True); provider:Mapped[str]=mapped_column(String(40),default="fussball.de"); external_id:Mapped[str]=mapped_column(String(200)); home_team:Mapped[str]=mapped_column(String(160)); away_team:Mapped[str]=mapped_column(String(160)); kickoff:Mapped[datetime]=mapped_column(DateTime(timezone=True)); original_kickoff:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); competition:Mapped[str|None]=mapped_column(String(160)); venue:Mapped[str|None]=mapped_column(String(250)); pitch:Mapped[str|None]=mapped_column(String(80)); status:Mapped[str]=mapped_column(String(40),default="scheduled"); home_score:Mapped[int|None]=mapped_column(Integer); away_score:Mapped[int|None]=mapped_column(Integer); halftime:Mapped[str|None]=mapped_column(String(20)); result_confirmed:Mapped[bool]=mapped_column(Boolean,default=False); source_url:Mapped[str]=mapped_column(String(1000)); checked_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); overrides:Mapped[dict]=mapped_column(JSON,default=dict); data_hash:Mapped[str|None]=mapped_column(String(64)); opponent_logo_id:Mapped[str|None]=mapped_column(ForeignKey("logo_assets.id"))
+class LogoAsset(Base,Timestamped):
+    __tablename__="logo_assets"
+    __table_args__=(
+        UniqueConstraint("logo_type","team_id","normalized_name","version"),
+        Index(
+            "uq_logo_assets_team_checksum",
+            "team_id",
+            "checksum",
+            unique=True,
+            postgresql_where=text("logo_type = 'team'"),
+            sqlite_where=text("logo_type = 'team'"),
+        ),
+        Index(
+            "uq_logo_assets_opponent_checksum",
+            "checksum",
+            unique=True,
+            postgresql_where=text("logo_type = 'opponent'"),
+            sqlite_where=text("logo_type = 'opponent'"),
+        ),
+    )
+    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
+    logo_type:Mapped[str]=mapped_column(String(20),index=True)
+    team_id:Mapped[str|None]=mapped_column(ForeignKey("teams.id"),index=True)
+    display_name:Mapped[str]=mapped_column(String(200))
+    normalized_name:Mapped[str]=mapped_column(String(200),index=True)
+    original_path:Mapped[str]=mapped_column(String(800),unique=True)
+    render_path:Mapped[str|None]=mapped_column(String(800),unique=True)
+    original_filename:Mapped[str]=mapped_column(String(255))
+    mime_type:Mapped[str]=mapped_column(String(80))
+    size:Mapped[int]=mapped_column(Integer)
+    width:Mapped[int]=mapped_column(Integer)
+    height:Mapped[int]=mapped_column(Integer)
+    checksum:Mapped[str]=mapped_column(String(64),index=True)
+    active:Mapped[bool]=mapped_column(Boolean,default=True)
+    archived_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    uploaded_by:Mapped[str]=mapped_column(ForeignKey("users.id"))
 class MediaAsset(Base,Timestamped):
     __tablename__="media_assets"; __table_args__=(UniqueConstraint("team_id","relative_path"),); id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id")); relative_path:Mapped[str]=mapped_column(String(800)); filename:Mapped[str]=mapped_column(String(255)); mime_type:Mapped[str]=mapped_column(String(80)); size:Mapped[int]=mapped_column(Integer); checksum:Mapped[str]=mapped_column(String(64)); mtime:Mapped[datetime]=mapped_column(DateTime(timezone=True)); player_name:Mapped[str|None]=mapped_column(String(160)); active:Mapped[bool]=mapped_column(Boolean,default=True); available:Mapped[bool]=mapped_column(Boolean,default=True); reserved_game_id:Mapped[str|None]=mapped_column(ForeignKey("games.id"),unique=True); uses:Mapped[int]=mapped_column(Integer,default=0)
 class StoryRule(Base,Timestamped):
