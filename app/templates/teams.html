@@ -1,1 +1,76 @@
-{% extends 'base.html' %}{% block content %}<h1>Mannschaften</h1><section><h2>Neue Mannschaft</h2><form method="post" class="gridform"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Interner Name<input name="internal_name" required></label><label>Anzeigename<input name="display_name" required></label><label>Kurzname<input name="short_name" required maxlength="30"></label><label>Slug<input name="slug" required pattern="[a-z0-9-]+"></label><label>Verein<input name="club" required></label><label>FUSSBALL.DE-Link<input name="fussball_url" type="url" required></label><label>Instagram-Seite<select name="instagram_page_id" required>{% for p in pages %}<option value="{{p.id}}">{{p.display_name}}{% if not p.active %} (inaktiv){% endif %}</option>{% endfor %}</select></label><label>Medien-Unterordner<input name="media_subdir" required></label><button>Anlegen</button></form></section><section><h2>Vorhandene Mannschaften</h2><table><tr><th>Name</th><th>Instagram</th><th>Ordner</th><th>Status</th><th>Aktionen</th></tr>{% for x in items %}<tr><td>{{x.display_name}}<small>{{x.slug}}</small></td><td>{{x.instagram_page_id}}</td><td>{{x.media_subdir}}</td><td>{{'aktiv' if x.active else 'inaktiv'}}</td><td><form method="post" action="/teams/{{x.id}}/state"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{x.version}}"><button name="action" value="toggle">Aktiv umschalten</button><button class="danger" name="action" value="archive">Archivieren</button></form></td></tr>{% endfor %}</table></section>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>Mannschaften</h1>
+<section>
+  <h2>Neue Mannschaft</h2>
+  <form method="post" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <label>Interner Name<input name="internal_name" required></label>
+    <label>Anzeigename<input name="display_name" required></label>
+    <label>Kurzname<input name="short_name" required maxlength="30"></label>
+    <label>Slug<input name="slug" required pattern="[a-z0-9-]+"></label>
+    <label>Verein<input name="club" required></label>
+    <label>FUSSBALL.DE-Link<input name="fussball_url" type="url" required></label>
+    <label>Instagram-Seite
+      <select name="instagram_page_id" required>
+        {% for p in pages %}<option value="{{p.id}}">{{p.display_name}}{% if not p.active %} (inaktiv){% endif %}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Medien-Unterordner<input name="media_subdir" required></label>
+    <button>Anlegen</button>
+  </form>
+</section>
+<section>
+  <h2>Vorhandene Mannschaften</h2>
+  <table>
+    <tr><th>Name</th><th>Verifiziertes Vereinslogo</th><th>Instagram / Ordner</th><th>Status</th><th>Aktionen</th></tr>
+    {% for x in items %}
+    {% set logo=logos.get(x.id) %}
+    <tr>
+      <td>{{x.display_name}}<small>{{x.slug}}</small></td>
+      <td>
+        {% if logo %}
+          <img class="logo-thumb" src="/logos/{{logo.id}}/preview" alt="Vereinslogo {{x.display_name}}">
+          <small>{{logo.original_filename}} · {{logo.width}} × {{logo.height}}</small>
+          <small>Version {{logo.version}} · SHA-256 {{logo.checksum[:12]}}… · verifiziert</small>
+          <small>Hochgeladen {{logo.created_at|berlin}} durch {{uploaders.get(logo.uploaded_by,logo.uploaded_by)}}</small>
+          <form method="post" action="/teams/{{x.id}}/logo/state">
+            <input type="hidden" name="csrf_token" value="{{csrf}}">
+            <button name="action" value="deactivate">Deaktivieren</button>
+            <button class="danger" name="action" value="archive">Archivieren</button>
+          </form>
+        {% else %}
+          <div class="warning">Kein verifiziertes Mannschaftslogo. KI-Beiträge können nicht freigegeben werden.</div>
+        {% endif %}
+        {% if logo_versions.get(x.id)|length > 1 or (not logo and logo_versions.get(x.id)) %}
+        <form method="post" action="/teams/{{x.id}}/logo/state">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <label>Vorhandene Logoversion auswählen
+            <select name="logo_id">{% for candidate in logo_versions.get(x.id,[]) %}<option value="{{candidate.id}}">{{candidate.display_name}} · v{{candidate.version}} · {{candidate.checksum[:12]}}…</option>{% endfor %}</select>
+          </label>
+          <button name="action" value="select">Logoversion auswählen</button>
+        </form>
+        {% endif %}
+        <form method="post" enctype="multipart/form-data" action="/teams/{{x.id}}/logo">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <label>{{'Neue Logoversion hochladen' if logo else 'Mannschaftslogo hochladen'}}
+            <input type="file" name="file" accept=".png,.webp,image/png,image/webp" required>
+          </label>
+          <button>Logo prüfen und speichern</button>
+        </form>
+      </td>
+      <td>{{x.instagram_page_id}}<small>{{x.media_subdir}}</small></td>
+      <td>{{'aktiv' if x.active else 'inaktiv'}}</td>
+      <td>
+        <form method="post" action="/teams/{{x.id}}/state">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <input type="hidden" name="version" value="{{x.version}}">
+          <button name="action" value="toggle">Aktiv umschalten</button>
+          <button class="danger" name="action" value="archive">Archivieren</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

@@ -1,0 +1,67 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Gegnerlogo verwalten</h1>
+<p><strong>{{opponent}}</strong> · {{game.home_team}} – {{game.away_team}} · {{game.kickoff|berlin}}</p>
+{% if current_logo %}
+<section>
+  <h2>Aktuelle Zuordnung</h2>
+  <img class="logo-preview" src="/logos/{{current_logo.id}}/preview?game_id={{game.id}}" alt="Logo {{current_logo.display_name}}">
+  <p>{{current_logo.display_name}} · Version {{current_logo.version}} · SHA-256 {{current_logo.checksum}}</p>
+  <small>Hochgeladen {{current_logo.created_at|berlin}} durch {{uploaders.get(current_logo.uploaded_by,current_logo.uploaded_by)}}</small>
+  <p><span class="badge">verifiziert</span> · Quelle: {{game.overrides.get('opponent_logo_source','manuell')}}</p>
+  <form method="post" action="/games/{{game.id}}/opponent-logo">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <button class="danger" name="action" value="remove">Gegnerlogo entfernen</button>
+  </form>
+</section>
+{% else %}
+<div class="warning">Kein verifiziertes Gegnerlogo vorhanden – neutraler Text-Fallback wird verwendet.</div>
+{% endif %}
+<section>
+  <h2>Neues Original hochladen</h2>
+  <p>Erlaubt sind ausschließlich technisch geprüfte PNG- und WebP-Dateien bis 5 MiB. Das Original bleibt unverändert erhalten.</p>
+  <form method="post" enctype="multipart/form-data" action="/games/{{game.id}}/opponent-logo">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <input type="hidden" name="action" value="upload">
+    <input type="file" name="file" accept=".png,.webp,image/png,image/webp" required>
+    <button>Gegnerlogo hochladen und zuordnen</button>
+  </form>
+</section>
+{% if suggestions %}
+<section>
+  <h2>Eindeutige Namensvorschläge prüfen</h2>
+  <p>Die Anwendung ordnet Vorschläge nicht ohne ausdrückliche Bestätigung zu.</p>
+  <div class="logo-list">
+    {% for logo in suggestions %}
+    <form method="post" action="/games/{{game.id}}/opponent-logo" class="logo-card">
+      <input type="hidden" name="csrf_token" value="{{csrf}}">
+      <input type="hidden" name="action" value="select">
+      <input type="hidden" name="logo_id" value="{{logo.id}}">
+      <img class="logo-thumb" src="/logos/{{logo.id}}/preview?game_id={{game.id}}" alt="Logo {{logo.display_name}}">
+      <strong>{{logo.display_name}}</strong>
+      <small>Version {{logo.version}} · {{logo.checksum[:12]}}…</small>
+      <button>Vorschlag ausdrücklich bestätigen</button>
+    </form>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+<section>
+  <h2>Vorhandenes Gegnerlogo auswählen</h2>
+  {% if library %}
+  <form method="post" action="/games/{{game.id}}/opponent-logo">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <input type="hidden" name="action" value="select">
+    <label>Verifiziertes Logo
+      <select name="logo_id" required>
+        {% for logo in library %}
+        <option value="{{logo.id}}">{{logo.display_name}} · v{{logo.version}} · {{logo.checksum[:12]}}…</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button>Auswahl ausdrücklich zuordnen</button>
+  </form>
+  {% else %}<p>Noch keine Gegnerlogos in der Bibliothek.</p>{% endif %}
+</section>
+<p><a class="button" href="/games">Zurück zu den Spielen</a></p>
+{% endblock %}

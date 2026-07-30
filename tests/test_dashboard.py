@@ -1,7 +1,10 @@
 import re
+from datetime import datetime, timedelta, timezone
+from io import BytesIO
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -18,6 +21,7 @@ from app.models import (
     GenerationJob,
     GenerationJobStatus,
     InstagramPage,
+    LogoAsset,
     Post,
     PromptTemplate,
     ProviderSnapshot,
@@ -80,6 +84,123 @@ def csrf(client):
 def session_csrf(client):
     response = client.get("/teams")
     return re.search(r'name="csrf_token" value="([^"]+)', response.text).group(1)
+
+
+def logo_png(color=(20, 90, 200, 255)):
+    buffer = BytesIO()
+    image = Image.new("RGBA", (160, 160), color)
+    ImageDraw.Draw(image).rectangle((35, 35, 125, 125), fill=(255, 255, 255, 255))
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch):
+    client, factory = browser
+    upload_root = tmp_path / "uploads"
+    monkeypatch.setattr(
+        __import__("app.admin_routes", fromlist=["settings"]).settings,
+        "upload_root",
+        upload_root,
+    )
+    with factory() as db:
+        admin = db.query(User).filter_by(email="admin@test.invalid").one()
+        page = InstagramPage(
+            internal_name="logos",
+            display_name="Logos",
+            username="logos",
+            club="SV Ehlen",
+            active=True,
+            connection_status="connected",
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="logo-team",
+            display_name="SV Ehlen",
+            short_name="SVE",
+            slug="logo-team",
+            club="SV Ehlen",
+            fussball_url="https://www.fussball.de/team",
+            instagram_page_id=page.id,
+            media_subdir="erste",
+        )
+        db.add(team)
+        db.flush()
+        game = Game(
+            team_id=team.id,
+            external_id="logo-dashboard-1",
+            home_team=team.display_name,
+            away_team="TSV Immenhausen II",
+            kickoff=datetime.now(timezone.utc) + timedelta(days=5),
+            competition="Kreisliga A",
+            venue="Ehlen",
+            pitch="Rasenplatz",
+            source_url="fixture://logo-dashboard",
+        )
+        second = Game(
+            team_id=team.id,
+            external_id="logo-dashboard-2",
+            home_team="TSV Immenhausen II",
+            away_team=team.display_name,
+            kickoff=datetime.now(timezone.utc) + timedelta(days=12),
+            competition="Kreisliga A",
+            venue="Immenhausen",
+            pitch="Rasenplatz",
+            source_url="fixture://logo-dashboard",
+        )
+        db.add_all([game, second])
+        db.commit()
+        team_id, game_id, second_id, admin_id = team.id, game.id, second.id, admin.id
+    token = session_csrf(client)
+    assert client.post(
+        f"/teams/{team_id}/logo",
+        data={"csrf_token": "wrong"},
+        files={"file": ("sve.png", logo_png(), "image/png")},
+    ).status_code == 403
+    uploaded = client.post(
+        f"/teams/{team_id}/logo",
+        data={"csrf_token": token},
+        files={"file": ("sve.png", logo_png(), "image/png")},
+        follow_redirects=False,
+    )
+    assert uploaded.status_code == 303
+    assert "verifiziert" in client.get("/teams").text
+    management = client.get(f"/games/{game_id}/opponent-logo")
+    assert management.status_code == 200
+    assert "neutraler Text-Fallback" in management.text
+    opponent_upload = client.post(
+        f"/games/{game_id}/opponent-logo",
+        data={"csrf_token": token, "action": "upload"},
+        files={"file": ("tsv.png", logo_png((0, 150, 60, 255)), "image/png")},
+        follow_redirects=False,
+    )
+    assert opponent_upload.status_code == 303
+    second_version = client.post(
+        f"/games/{game_id}/opponent-logo",
+        data={"csrf_token": token, "action": "upload"},
+        files={"file": ("tsv-v2.png", logo_png((180, 80, 10, 255)), "image/png")},
+        follow_redirects=False,
+    )
+    assert second_version.status_code == 303
+    with factory() as db:
+        first = db.get(Game, game_id)
+        second = db.get(Game, second_id)
+        logo = db.get(LogoAsset, first.opponent_logo_id)
+        assert logo and logo.uploaded_by == admin_id
+        assert second.opponent_logo_id is None
+        logo_id = logo.id
+    suggestion = client.get(f"/games/{second_id}/opponent-logo")
+    assert suggestion.text.count("Vorschlag ausdrücklich bestätigen") == 2
+    with factory() as db:
+        assert db.get(Game, second_id).opponent_logo_id is None
+    assigned = client.post(
+        f"/games/{second_id}/opponent-logo",
+        data={"csrf_token": token, "action": "select", "logo_id": logo_id},
+        follow_redirects=False,
+    )
+    assert assigned.status_code == 303
+    with factory() as db:
+        assert db.get(Game, second_id).opponent_logo_id == logo_id
 
 
 def test_dashboard_admin_flow(browser):
@@ -305,8 +426,38 @@ def test_csrf_and_non_admin_are_rejected(browser):
             role=Role.EDITOR,
             all_teams=False,
         )
-        db.add(editor)
+        page = InstagramPage(
+            internal_name="restricted-logo-page",
+            display_name="Restricted",
+            username="restricted",
+            club="Restricted",
+            active=True,
+        )
+        db.add_all([editor, page])
+        db.flush()
+        team = Team(
+            internal_name="restricted-logo-team",
+            display_name="Restricted",
+            short_name="R",
+            slug="restricted-logo-team",
+            club="Restricted",
+            fussball_url="https://www.fussball.de/restricted",
+            instagram_page_id=page.id,
+            media_subdir="restricted",
+        )
+        db.add(team)
+        db.flush()
+        game = Game(
+            team_id=team.id,
+            external_id="restricted-logo-game",
+            home_team="Restricted",
+            away_team="FC Fremd",
+            kickoff=datetime.now(timezone.utc) + timedelta(days=2),
+            source_url="fixture://restricted",
+        )
+        db.add(game)
         db.commit()
+        team_id, game_id = team.id, game.id
     client.post("/logout")
     page = client.get("/login")
     token = re.search(r'name="csrf_token" value="([^"]+)', page.text).group(1)
@@ -319,6 +470,23 @@ def test_csrf_and_non_admin_are_rejected(browser):
         },
     )
     assert client.get("/users").status_code == 403
+    assert client.get(f"/games/{game_id}/opponent-logo").status_code == 403
+    token = session_csrf(client)
+    assert (
+        client.post(
+            f"/games/{game_id}/opponent-logo",
+            data={"csrf_token": token, "action": "remove"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/teams/{team_id}/logo",
+            data={"csrf_token": token},
+            files={"file": ("logo.png", logo_png(), "image/png")},
+        ).status_code
+        == 403
+    )
 
 
 def test_prompt_dashboard_previews_without_api_and_versions_templates(browser):

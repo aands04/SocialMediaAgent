@@ -10,6 +10,12 @@ from sqlalchemy.orm import Session
 from app.auth.service import allowed
 from app.config import Settings
 from app.generation import build_renderer, build_text_generator
+from app.logos.service import (
+    LogoValidationError,
+    frozen_logo_set,
+    validate_frozen_file,
+    validate_frozen_logo,
+)
 from app.models import (
     AuditLog,
     Game,
@@ -22,7 +28,12 @@ from app.models import (
     Team,
     User,
 )
-from app.posts.service import RerenderConflict, create_post, rerender_post
+from app.posts.service import (
+    RerenderConflict,
+    create_post,
+    recompose_post_logos,
+    rerender_post,
+)
 
 log = structlog.get_logger()
 ACTIVE_STATUSES = {
@@ -70,7 +81,22 @@ class _ProgressRenderer:
         completed = self.job.completed_outputs
         progress = 20 + int(65 * completed / max(1, self.job.planned_outputs))
         _phase(self.db, self.job, phase, progress, completed)
-        path = self.inner.render(kind, relative_path, context)
+        phase_progress = {
+            "generating_ai_base": progress,
+            "compositing_logos": min(84, progress + 4),
+            "validating_final_media": min(88, progress + 7),
+        }
+        render_context = {
+            **context,
+            "_generation_phase": lambda name: _phase(
+                self.db,
+                self.job,
+                name,
+                phase_progress.get(name, progress),
+                completed,
+            ),
+        }
+        path = self.inner.render(kind, relative_path, render_context)
         _check_cancel(self.db, self.job)
         completed += 1
         progress = 20 + int(65 * completed / max(1, self.job.planned_outputs))
@@ -150,7 +176,7 @@ def enqueue_create(
         planned_outputs=1 + _story_count(db, team.id, post_type),
         idempotency_key=key,
         active_key=key,
-        parameters={"post_type": post_type},
+        parameters={"post_type": post_type, "logos": frozen_logo_set(db, game, team)},
     )
     db.add(job)
     try:
@@ -209,6 +235,9 @@ def enqueue_rerender(
         parameters={
             "expected_post_version": expected_version,
             "story_job_ids": selected,
+            "logos": frozen_logo_set(
+                db, db.get(Game, post.game_id), db.get(Team, post.team_id)
+            ),
         },
     )
     db.add(job)
@@ -228,6 +257,75 @@ def enqueue_rerender(
             return existing
         raise
     _audit(db, job, "generation.queued", {"job_type": job.job_type.value})
+    db.commit()
+    return job
+
+
+def enqueue_logo_recompose(
+    db: Session,
+    post: Post,
+    user: User,
+    expected_version: int,
+    story_job_ids: list[str],
+) -> GenerationJob:
+    game=db.get(Game,post.game_id); team=db.get(Team,post.team_id)
+    if not game or not team:
+        raise ValueError("Spiel oder Mannschaft ist nicht mehr vorhanden.")
+    logos=frozen_logo_set(db,game,team)
+    if not logos.get("team"):
+        raise ValueError("Bitte zuerst ein verifiziertes Mannschaftslogo zuordnen.")
+    selected=sorted(set(story_job_ids))
+    logo_key=":".join(
+        [
+            str((logos.get("team") or {}).get("id")),
+            str((logos.get("team") or {}).get("version")),
+            str((logos.get("opponent") or {}).get("id") or "fallback"),
+            str((logos.get("opponent") or {}).get("version") or "0"),
+        ]
+    )
+    selection_hash=hashlib.sha256(":".join(selected).encode()).hexdigest()[:12]
+    key=f"recompose:{post.id}:v{expected_version}:{selection_hash}:{hashlib.sha256(logo_key.encode()).hexdigest()[:12]}"
+    active_key=f"rerender:{post.id}"
+    existing=db.scalar(
+        select(GenerationJob).where(
+            or_(GenerationJob.active_key==active_key,GenerationJob.idempotency_key==key)
+        )
+    )
+    if existing:
+        return existing
+    job=GenerationJob(
+        job_type=GenerationJobType.RERENDER_POST,
+        game_id=post.game_id,
+        team_id=post.team_id,
+        post_id=post.id,
+        post_type=post.post_type,
+        requested_by=user.id,
+        status=GenerationJobStatus.QUEUED,
+        phase="loading_verified_logos",
+        planned_outputs=1+len(selected),
+        idempotency_key=key,
+        active_key=active_key,
+        parameters={
+            "expected_post_version":expected_version,
+            "story_job_ids":selected,
+            "logos":logos,
+            "recompose_only":True,
+        },
+    )
+    db.add(job)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing=db.scalar(
+            select(GenerationJob).where(
+                or_(GenerationJob.active_key==active_key,GenerationJob.idempotency_key==key)
+            )
+        )
+        if existing:
+            return existing
+        raise
+    _audit(db,job,"generation.logo_recompose_queued",{"logos":logos})
     db.commit()
     return job
 
@@ -397,9 +495,34 @@ def process_generation_job(
             raise ValueError(
                 "Das Spiel ist vorläufig, abgesagt, verschoben oder für Automatisierung gesperrt."
             )
+        logos = dict((job.parameters or {}).get("logos") or {})
+        if settings.image_generator_mode == "openai" and not logos.get("team"):
+            raise LogoValidationError(
+                "Eigenes Mannschaftslogo fehlt. Bitte zuerst ein verifiziertes Teamlogo zuordnen."
+            )
+        team_logo = validate_frozen_logo(db, logos.get("team"), "team")
+        opponent_logo = validate_frozen_logo(db, logos.get("opponent"), "opponent")
+        if team_logo and team.logo_asset_id != team_logo.id:
+            raise LogoValidationError(
+                "Das eingefrorene Mannschaftslogo ist dieser Mannschaft nicht mehr zugeordnet."
+            )
+        if opponent_logo and game.opponent_logo_id != opponent_logo.id:
+            raise LogoValidationError(
+                "Das eingefrorene Gegnerlogo ist diesem Spiel nicht mehr zugeordnet."
+            )
+        if (
+            not opponent_logo
+            and (logos.get("opponent") or {}).get("fallback")
+            and game.opponent_logo_id
+        ):
+            raise LogoValidationError(
+                "Die Gegnerlogo-Zuordnung wurde nach dem Einreihen geändert."
+            )
+        validate_frozen_file(team_logo, settings.upload_root)
+        validate_frozen_file(opponent_logo, settings.upload_root)
         _phase(db, job, "preparing", 5)
-        renderer = _ProgressRenderer(build_renderer(settings), db, job)
         if job.job_type == GenerationJobType.CREATE_POST:
+            renderer = _ProgressRenderer(build_renderer(settings), db, job)
             _phase(db, job, "generating_text", 10)
             post = create_post(
                 db,
@@ -408,6 +531,7 @@ def process_generation_job(
                 _ProgressTextGenerator(build_text_generator(settings), db, job),
                 renderer,
                 job.post_type,
+                logos,
             )
             job.result_post_id = post.id
             job.post_id = post.id
@@ -421,13 +545,34 @@ def process_generation_job(
                     "Der Beitrag wurde seit dem Einreihen verändert; es wurden keine "
                     "neuen Dateien erzeugt."
                 )
-            _phase(db, job, "generating_feed", 20)
-            post = rerender_post(
-                db,
-                post,
-                renderer,
-                list(job.parameters.get("story_job_ids", [])),
-            )
+            if job.parameters.get("recompose_only"):
+                _phase(db, job, "compositing_logos", 35)
+                post = recompose_post_logos(
+                    db,
+                    post,
+                    list(job.parameters.get("story_job_ids", [])),
+                    logos,
+                )
+                _audit(
+                    db,
+                    job,
+                    "graphics.logos_recomposed",
+                    {
+                        "post_id": post.id,
+                        "logo_snapshot": logos,
+                        "openai_image_call": False,
+                    },
+                )
+            else:
+                renderer = _ProgressRenderer(build_renderer(settings), db, job)
+                _phase(db, job, "generating_feed", 20)
+                post = rerender_post(
+                    db,
+                    post,
+                    renderer,
+                    list(job.parameters.get("story_job_ids", [])),
+                    logos,
+                )
             job.result_post_id = post.id
             db.commit()
         _phase(db, job, "validating", 90, job.planned_outputs)
@@ -442,6 +587,17 @@ def process_generation_job(
             job,
             GenerationJobStatus.CANCELLED,
             category="cancelled_by_user",
+            message=str(exc),
+        )
+    except LogoValidationError as exc:
+        db.rollback()
+        job = db.get(GenerationJob, job_id)
+        _capture_partial_post(db, job)
+        _finish(
+            db,
+            job,
+            GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
+            category="verified_logo_unavailable",
             message=str(exc),
         )
     except OperationalError as exc:
@@ -531,6 +687,13 @@ def retry_job(db: Session, job: GenerationJob) -> None:
             "Es existiert bereits ein unvollständiger Teilbeitrag. Prüfen Sie ihn "
             "manuell; eine kostenpflichtige Wiederholung wird nicht automatisch gestartet."
         )
+    game = db.get(Game, job.game_id)
+    team = db.get(Team, job.team_id)
+    if game and team:
+        job.parameters = {
+            **(job.parameters or {}),
+            "logos": frozen_logo_set(db, game, team),
+        }
     active_key = (
         f"create:{job.game_id}:{job.post_type}"
         if job.job_type == GenerationJobType.CREATE_POST

@@ -69,7 +69,9 @@ def test_worker_claim_and_success_are_persistent(db, monkeypatch, tmp_path):
     monkeypatch.setattr(generation, "build_renderer", lambda settings: object())
     monkeypatch.setattr(generation, "build_text_generator", lambda settings: object())
 
-    def fake_create(session, game_arg, team_arg, generator, renderer, post_type):
+    def fake_create(
+        session, game_arg, team_arg, generator, renderer, post_type, logo_snapshot=None
+    ):
         post = Post(
             game_id=game_arg.id,
             team_id=team_arg.id,

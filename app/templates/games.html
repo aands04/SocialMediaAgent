@@ -15,13 +15,25 @@
 </form>
 <p>Für KI-Auswärtsgrafiken müssen Wettbewerb, Ort und Platzart vor der Erzeugung vollständig sein. Die Ausgabe lautet automatisch <strong>RP Ort</strong> oder <strong>KR Ort</strong>; Heimspiele verwenden <strong>Habichtswaldstadion Ehlen</strong>.</p>
 <table>
-  <tr><th>Spiel</th><th>Anpfiff</th><th>Quelle</th><th>Status</th><th>Spieldetails</th><th>Beitrag erzeugen</th></tr>
+  <tr><th>Spiel</th><th>Anpfiff</th><th>Quelle</th><th>Status</th><th>Gegnerlogo</th><th>Spieldetails</th><th>Beitrag erzeugen</th></tr>
   {% for x in items %}
   <tr>
     <td>{{x.home_team}} – {{x.away_team}}</td>
     <td>{{x.kickoff|berlin}}</td>
     <td>{{x.provider}} / {{x.source_url}}</td>
     <td>{{x.status}}</td>
+    <td>
+      {% set logo=logo_map.get(x.id) %}
+      <strong>{{opponents.get(x.id,'Gegner')}}</strong>
+      {% if logo %}
+        <img class="logo-thumb" src="/logos/{{logo.id}}/preview" alt="Gegnerlogo {{logo.display_name}}">
+        <small>verifiziert · v{{logo.version}} · {{logo.checksum[:12]}}…</small>
+        <a class="button" href="/games/{{x.id}}/opponent-logo">Gegnerlogo ändern</a>
+      {% else %}
+        <small class="warning">Kein verifiziertes Logo – neutraler Text-Fallback</small>
+        <a class="button" href="/games/{{x.id}}/opponent-logo">Gegnerlogo hochladen / auswählen</a>
+      {% endif %}
+    </td>
     <td>
       <details>
         <summary>{{x.competition or 'Wettbewerb fehlt'}} · {{x.venue or 'Ort fehlt'}} · {{x.pitch or 'Platzart fehlt'}}</summary>

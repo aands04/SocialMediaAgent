@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     media_storage_type: str = "local"
     media_root: Path = Path("data/external-media")
     generated_root: Path = Path("data/generated")
+    upload_root: Path = Path("data/uploads")
     openai_model: str = "gpt-5-mini"
     openai_image_model: str = "gpt-image-2"
     openai_image_quality: str = "medium"

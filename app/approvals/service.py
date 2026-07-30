@@ -28,6 +28,15 @@ def approve(db:Session,post:Post,user:User,selected_jobs:list[str]|None=None)->P
     if not post.text or not post.feed_path: problems.append("Text oder Feed fehlt")
     if not selected or any(not Path(j.media_path).is_file() for j in selected): problems.append("Veröffentlichungsdateien fehlen")
     if post.critical_warnings: problems.extend(post.critical_warnings)
+    logos=(post.design_snapshot or {}).get("logos")
+    team_logo=(logos or {}).get("team")
+    if (
+        not team_logo
+        or not team_logo.get("verified")
+        or not team_logo.get("id")
+        or not team_logo.get("checksum")
+    ):
+        problems.append("Kein eingefrorenes verifiziertes Mannschaftslogo vorhanden")
     if not page or not page.active or page.connection_status!="connected": problems.append("Instagram-Seite nicht aktiv verbunden")
     now=datetime.now(timezone.utc); late=[j for j in selected if (j.scheduled_at.replace(tzinfo=timezone.utc) if j.scheduled_at.tzinfo is None else j.scheduled_at)<now]; behavior=team.rules.get("late_approval","publish_now")
     if late and behavior=="manual": problems.append("Veröffentlichungszeitpunkt verstrichen; manuelle Entscheidung erforderlich")

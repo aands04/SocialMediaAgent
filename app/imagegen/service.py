@@ -6,6 +6,7 @@ from pathlib import Path
 from openai import OpenAI
 from PIL import Image, ImageOps
 
+from app.logos.service import LogoCompositor
 from app.rendering.service import Renderer, RenderValidationError
 
 
@@ -91,6 +92,8 @@ class AIImageRenderer:
         self.upload_root = Path(upload_root).resolve()
         self.provider = provider
         self.validator = Renderer(root, media_root, upload_root)
+        self.compositor = LogoCompositor(upload_root)
+        self._metadata: dict[str, dict] = {}
 
     def _reference(self, value: str | None) -> Path | None:
         return Renderer._safe_file(
@@ -111,40 +114,73 @@ class AIImageRenderer:
             raise ImageGenerationError(
                 "Für eine KI-Grafik ist ein verfügbares Spielerbild erforderlich"
             )
-        references = [player]
-        for key in ("team_logo", "opponent_logo"):
-            reference = self._reference(data.get(key))
-            if reference:
-                references.append(reference)
-        raw = self.provider.generate(
-            prompt=prompt.rendered,
-            references=references,
-            size=self.api_sizes[kind],
-            model=prompt.model,
-            quality=prompt.quality,
-        )
         out = (self.root / target).resolve()
         if out != self.root and not out.is_relative_to(self.root):
             raise ImageGenerationError(
                 "Ausgabepfad liegt außerhalb des Render-Verzeichnisses"
             )
         out.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with Image.open(BytesIO(raw)) as image:
-                image.load()
-                normalized = ImageOps.fit(
-                    image.convert("RGB"),
-                    self.sizes[kind],
-                    method=Image.Resampling.LANCZOS,
-                    centering=(0.5, 0.5),
-                )
-                normalized.save(out, "PNG", optimize=True)
-        except Exception as exc:
-            raise ImageGenerationError(
-                f"KI-Ausgabe ist kein verarbeitbares Bild: {exc}"
-            ) from exc
+        base = out.with_name(f"{out.stem}-ai-base.png")
+        phase = data.get("_generation_phase")
+        if out.is_file():
+            self.validate(out, kind)
+            self._metadata[str(out)] = {
+                "ai_base_path": str(base),
+                "final_path": str(out),
+                "reused_final": True,
+            }
+            return out
+        if not base.is_file():
+            if callable(phase):
+                phase("generating_ai_base")
+            raw = self.provider.generate(
+                prompt=prompt.rendered,
+                references=[player],
+                size=self.api_sizes[kind],
+                model=prompt.model,
+                quality=prompt.quality,
+            )
+            try:
+                with Image.open(BytesIO(raw)) as image:
+                    image.load()
+                    normalized = ImageOps.fit(
+                        image.convert("RGB"),
+                        self.sizes[kind],
+                        method=Image.Resampling.LANCZOS,
+                        centering=(0.5, 0.5),
+                    )
+                    normalized.save(base, "PNG", optimize=True)
+            except Exception as exc:
+                raise ImageGenerationError(
+                    f"KI-Ausgabe ist kein verarbeitbares Bild: {exc}"
+                ) from exc
+            self.validate(base, kind)
+        logos = data.get("logos")
+        composition = None
+        if logos:
+            if callable(phase):
+                phase("compositing_logos")
+            composition = self.compositor.compose(
+                base_path=base,
+                output_path=out,
+                kind=kind,
+                logos=logos,
+            )
+        else:
+            with Image.open(base) as image:
+                image.convert("RGB").save(out, "PNG", optimize=True)
+        if callable(phase):
+            phase("validating_final_media")
         self.validate(out, kind)
+        self._metadata[str(out)] = {
+            "ai_base_path": str(base),
+            "final_path": str(out),
+            "composition": composition,
+        }
         return out
+
+    def metadata_for(self, path: str | Path) -> dict:
+        return dict(self._metadata.get(str(Path(path).resolve()), {}))
 
     def validate(self, path: Path, kind: str) -> dict:
         return self.validator.validate(path, kind)
