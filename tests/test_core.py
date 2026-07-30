@@ -114,6 +114,26 @@ def test_controlled_rerender_versions_files_and_revokes_approval(db,tmp_path):
  assert old_feed.is_file() and old_story.is_file() and Path(post.feed_path)!=old_feed and Path(story.media_path)!=old_story
  assert post.status==PostStatus.REAPPROVAL and all(job.status==JobStatus.UNAPPROVED for job in jobs)
 
+@pytest.mark.parametrize("legacy_format",["whole-snapshot","mixed-list","mapping"])
+def test_rerender_normalizes_legacy_design_snapshots(db,tmp_path,legacy_format):
+ _,team,game=graph(db,tmp_path); rule=StoryRule(team_id=team.id,name="S",post_type="announcement",reference="kickoff",direction="before",offset_minutes=60,template="default-story"); db.add(rule); db.commit()
+ post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"out")); story=db.query(PublicationJob).filter_by(post_id=post.id,kind="story").one()
+ if legacy_format=="whole-snapshot":
+  post.design_snapshot="legacy"
+  expected_media_version=2
+ elif legacy_format=="mixed-list":
+  post.design_snapshot={"stories":["legacy",None,{"rule_id":rule.id,"media_version":7}],"prompts":"legacy"}
+  expected_media_version=8
+ else:
+  post.design_snapshot={"stories":{rule.id:{"media_version":7}},"prompts":["legacy"]}
+  expected_media_version=8
+ db.commit()
+ rerender_post(db,post,Renderer(tmp_path/"out"),[story.id]); db.commit()
+ snapshot=next(entry for entry in post.design_snapshot["stories"] if entry["rule_id"]==rule.id)
+ assert snapshot["media_version"]==expected_media_version
+ assert isinstance(post.design_snapshot["prompts"],dict)
+ assert Path(post.feed_path).is_file() and Path(story.media_path).is_file()
+
 def immutable_job_values(job):
  return (job.media_path,job.version,job.idempotency_key,job.status,job.approval_status,job.approved_post_version,job.error,job.platform_id,job.published_at)
 
