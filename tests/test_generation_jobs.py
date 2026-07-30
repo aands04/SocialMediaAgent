@@ -92,6 +92,26 @@ def test_worker_claim_and_success_are_persistent(db, monkeypatch, tmp_path):
     assert result.active_key is None
 
 
+def test_progress_renderer_passes_persistent_job_identity(db, tmp_path):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+
+    class CapturingRenderer:
+        is_ai = True
+
+        def render(self, kind, relative_path, context):
+            self.kind = kind
+            self.relative_path = relative_path
+            self.context = context
+            return tmp_path / "rendered.png"
+
+    inner = CapturingRenderer()
+    renderer = generation._ProgressRenderer(inner, db, job)
+    renderer.render("feed", "post/feed-v1.png", {})
+
+    assert inner.context["_generation_job_id"] == job.id
+
+
 def test_ambiguous_openai_timeout_requires_manual_review(db, monkeypatch, tmp_path):
     _, team, game, user = graph(db)
     job, _ = generation.enqueue_create(db, game, team, user, "announcement")

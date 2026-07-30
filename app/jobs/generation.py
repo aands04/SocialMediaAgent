@@ -91,6 +91,11 @@ class _ProgressRenderer:
         }
         render_context = {
             **context,
+            # Bind persisted AI outputs to the generation job.  A retry of the
+            # same job may safely reuse its completed, costly result, while a
+            # later rerender job must never adopt an older file that happens
+            # to use the same media version path.
+            "_generation_job_id": self.job.id,
             "_generation_phase": lambda name: _phase(
                 self.db,
                 self.job,

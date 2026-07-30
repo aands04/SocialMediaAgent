@@ -186,6 +186,60 @@ def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
     assert "ai_base_path" not in metadata
 
 
+def test_ai_renderer_reuses_only_output_from_same_generation_job(tmp_path):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    output_root = tmp_path / "out"
+    media.mkdir()
+    uploads.mkdir()
+    player = media / "player.jpg"
+    team_logo = uploads / "team-logo.png"
+    Image.new("RGB", (600, 900), "blue").save(player)
+    Image.new("RGBA", (200, 200), (255, 255, 255, 255)).save(team_logo)
+    provider = FakeImageProvider()
+    renderer = AIImageRenderer(output_root, media, uploads, provider)
+    prompt = builtin_prompt(
+        "image",
+        "announcement",
+        "feed",
+        facts(team_logo=str(team_logo), opponent_logo=None),
+    )
+    legacy_path = output_root / "post" / "feed-v8.png"
+    legacy_path.parent.mkdir(parents=True)
+    Image.new("RGB", (1080, 1350), "red").save(legacy_path)
+    context = {
+        "player_image": str(player),
+        "team_logo": str(team_logo),
+        "opponent_logo": None,
+        "logos": {
+            "team": {"id": "team-1", "version": 1, "checksum": "a" * 64},
+            "opponent": {"fallback": True, "name": "SG Beispiel"},
+        },
+        "image_prompt": prompt,
+        "_generation_job_id": "rerender-job-1",
+    }
+
+    first = renderer.render("feed", "post/feed-v8.png", context)
+    repeated = renderer.render("feed", "post/feed-v8.png", context)
+    second_job = renderer.render(
+        "feed",
+        "post/feed-v8.png",
+        {**context, "_generation_job_id": "rerender-job-2"},
+    )
+
+    assert first != legacy_path
+    assert first == repeated
+    assert second_job not in {legacy_path, first}
+    assert "-job-" in first.name
+    assert len(provider.calls) == 2
+    assert renderer.metadata_for(repeated)["reused_final"] is True
+    assert (
+        renderer.metadata_for(repeated)["generation_job_id"]
+        == "rerender-job-1"
+    )
+    assert Image.open(legacy_path).getpixel((0, 0)) == (255, 0, 0)
+
+
 def test_ai_renderer_uses_text_fallback_without_opponent_logo(tmp_path):
     media = tmp_path / "media"
     uploads = tmp_path / "uploads"

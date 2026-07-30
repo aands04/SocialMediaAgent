@@ -1,4 +1,5 @@
 import base64
+import hashlib
 from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
@@ -169,7 +170,22 @@ class AIImageRenderer:
         if opponent_logo:
             references.append(opponent_logo)
         integration = self._reference_metadata(data, opponent_logo is not None)
-        out = (self.root / target).resolve()
+        requested_out = (self.root / target).resolve()
+        out = requested_out
+        generation_job_id = data.get("_generation_job_id")
+        if generation_job_id:
+            # Media versions are database counters and can point at a file
+            # left behind by a rolled-back or legacy render.  Scope the
+            # physical filename to the persistent job instead of trusting the
+            # version filename alone.  The stable digest also keeps retries of
+            # this exact job idempotent without exposing user-controlled text
+            # in a path.
+            job_digest = hashlib.sha256(
+                str(generation_job_id).encode("utf-8")
+            ).hexdigest()[:12]
+            out = requested_out.with_name(
+                f"{requested_out.stem}-job-{job_digest}{requested_out.suffix}"
+            )
         if out != self.root and not out.is_relative_to(self.root):
             raise ImageGenerationError(
                 "Ausgabepfad liegt außerhalb des Render-Verzeichnisses"
@@ -180,6 +196,10 @@ class AIImageRenderer:
             self.validate(out, kind)
             self._metadata[str(out)] = {
                 "final_path": str(out),
+                "requested_path": str(requested_out),
+                "generation_job_id": str(generation_job_id)
+                if generation_job_id
+                else None,
                 "reused_final": True,
                 "logo_integration": integration,
             }
@@ -218,6 +238,10 @@ class AIImageRenderer:
         self.validate(out, kind)
         self._metadata[str(out)] = {
             "final_path": str(out),
+            "requested_path": str(requested_out),
+            "generation_job_id": str(generation_job_id)
+            if generation_job_id
+            else None,
             "logo_integration": integration,
         }
         return out
