@@ -5,7 +5,7 @@
 {% if current_logo %}
 <section>
   <h2>Aktuelle Zuordnung</h2>
-  <img class="logo-preview" src="/logos/{{current_logo.id}}/preview?game_id={{game.id}}" alt="Logo {{current_logo.display_name}}">
+  <img class="logo-preview" width="240" height="240" src="/logos/{{current_logo.id}}/preview?game_id={{game.id}}" alt="Logo {{current_logo.display_name}}">
   <p>{{current_logo.display_name}} · Version {{current_logo.version}} · SHA-256 {{current_logo.checksum}}</p>
   <small>Hochgeladen {{current_logo.created_at|berlin}} durch {{uploaders.get(current_logo.uploaded_by,current_logo.uploaded_by)}}</small>
   <p><span class="badge">verifiziert</span> · Quelle: {{game.overrides.get('opponent_logo_source','manuell')}}</p>
@@ -37,7 +37,7 @@
       <input type="hidden" name="csrf_token" value="{{csrf}}">
       <input type="hidden" name="action" value="select">
       <input type="hidden" name="logo_id" value="{{logo.id}}">
-      <img class="logo-thumb" src="/logos/{{logo.id}}/preview?game_id={{game.id}}" alt="Logo {{logo.display_name}}">
+      <img class="logo-thumb" width="88" height="88" src="/logos/{{logo.id}}/preview?game_id={{game.id}}" alt="Logo {{logo.display_name}}">
       <strong>{{logo.display_name}}</strong>
       <small>Version {{logo.version}} · {{logo.checksum[:12]}}…</small>
       <button>Vorschlag ausdrücklich bestätigen</button>

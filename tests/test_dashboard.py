@@ -164,7 +164,10 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
         follow_redirects=False,
     )
     assert uploaded.status_code == 303
-    assert "verifiziert" in client.get("/teams").text
+    teams_page = client.get("/teams").text
+    assert "verifiziert" in teams_page
+    assert 'class="logo-thumb" width="88" height="88"' in teams_page
+    assert "/static/style.css?v=20260730-logo-previews" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text
@@ -175,6 +178,8 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
         follow_redirects=False,
     )
     assert opponent_upload.status_code == 303
+    opponent_page = client.get(f"/games/{game_id}/opponent-logo").text
+    assert 'class="logo-preview" width="240" height="240"' in opponent_page
     second_version = client.post(
         f"/games/{game_id}/opponent-logo",
         data={"csrf_token": token, "action": "upload"},
@@ -200,7 +205,44 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     )
     assert assigned.status_code == 303
     with factory() as db:
-        assert db.get(Game, second_id).opponent_logo_id == logo_id
+        second = db.get(Game, second_id)
+        assert second.opponent_logo_id == logo_id
+        team = db.get(Team, team_id)
+        post = Post(
+            game_id=second.id,
+            team_id=team.id,
+            instagram_page_id=team.instagram_page_id,
+            post_type="announcement",
+            status=__import__("app.models", fromlist=["PostStatus"]).PostStatus.PENDING,
+            text="Legacy",
+            feed_path=str(tmp_path / "legacy-feed.png"),
+            design_snapshot={"logos": {}},
+        )
+        db.add(post)
+        db.flush()
+        db.add(
+            PublicationJob(
+                post_id=post.id,
+                game_id=second.id,
+                team_id=team.id,
+                instagram_page_id=team.instagram_page_id,
+                kind="feed",
+                media_path=post.feed_path,
+                scheduled_at=second.kickoff,
+                idempotency_key=f"{post.id}:feed:v1",
+            )
+        )
+        db.commit()
+        post_id, post_version = post.id, post.version
+    legacy_page = client.get(f"/posts/{post_id}").text
+    assert "Lokale Logo-Neuzusammensetzung ist für diesen älteren Beitrag nicht möglich" in legacy_page
+    blocked = client.post(
+        f"/posts/{post_id}/recompose-logos",
+        data={"csrf_token": token, "version": post_version},
+        follow_redirects=False,
+    )
+    assert blocked.status_code == 409
+    assert "Grafiken neu erzeugen" in blocked.json()["detail"]
 
 
 def test_dashboard_admin_flow(browser):

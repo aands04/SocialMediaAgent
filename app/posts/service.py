@@ -265,6 +265,74 @@ def _safe_generated_base(value: str | None) -> Path:
     return path
 
 
+def logo_recompose_availability(
+    post: Post,
+    jobs: list[PublicationJob],
+) -> dict:
+    """Report whether every publication has a safe, frozen AI base image."""
+    snapshot = _normalize_design_snapshot(post.design_snapshot)
+    feed_metadata = dict((snapshot.get("media") or {}).get("feed") or {})
+    stories = _story_snapshot_map(snapshot.get("stories"))
+
+    def status(value: str | None) -> dict:
+        try:
+            return {"available": True, "path": str(_safe_generated_base(value))}
+        except LogoValidationError as exc:
+            return {"available": False, "reason": str(exc)}
+
+    story_status = {}
+    for publication in jobs:
+        if publication.kind != "story":
+            continue
+        entry = dict(stories.get(publication.story_rule_id) or {})
+        rendering = dict(entry.get("rendering") or {})
+        story_status[publication.id] = status(rendering.get("ai_base_path"))
+    feed_status = status(feed_metadata.get("ai_base_path"))
+    return {
+        "feed": feed_status,
+        "stories": story_status,
+        "all_available": feed_status["available"]
+        and all(item["available"] for item in story_status.values()),
+    }
+
+
+def logo_recompose_preflight(
+    post: Post,
+    jobs: list[PublicationJob],
+    story_job_ids: list[str],
+) -> dict:
+    """Resolve all required base images before writing a recomposed file."""
+    availability = logo_recompose_availability(post, jobs)
+    missing = []
+    if not availability["feed"]["available"]:
+        missing.append("Feed")
+    selected = set(story_job_ids)
+    for publication in jobs:
+        if publication.id not in selected:
+            continue
+        item = availability["stories"].get(publication.id) or {"available": False}
+        if not item["available"]:
+            missing.append(
+                f"Story {publication.scheduled_at.astimezone().strftime('%d.%m.%Y %H:%M')}"
+            )
+    if missing:
+        raise LogoValidationError(
+            "Lokale Logo-Neuzusammensetzung nicht möglich: Für "
+            + ", ".join(missing)
+            + " fehlt eine separat eingefrorene KI-Grundgrafik. "
+            "Bitte stattdessen „Grafiken neu erzeugen“ verwenden. "
+            "Dabei werden die verifizierten Logos anschließend automatisch eingebettet."
+        )
+    return {
+        "feed": Path(availability["feed"]["path"]),
+        "stories": {
+            job_id: Path(item["path"])
+            for job_id, item in availability["stories"].items()
+            if job_id in selected
+        },
+    }
+
+
 def recompose_post_logos(
     db: Session,
     post: Post,
@@ -284,6 +352,7 @@ def recompose_post_logos(
         raise RerenderConflict("Der Feed wurde bereits veröffentlicht oder fehlt und darf nicht neu zusammengesetzt werden")
     if any(story_jobs[job_id].status==JobStatus.PUBLISHED for job_id in selected):
         raise RerenderConflict("Eine ausgewählte Story wurde bereits veröffentlicht")
+    sources=logo_recompose_preflight(post,jobs,list(selected))
     old_snapshot=_normalize_design_snapshot(post.design_snapshot)
     media_snapshot=dict(old_snapshot.get("media") or {})
     feed_metadata=dict(media_snapshot.get("feed") or {})
@@ -296,7 +365,7 @@ def recompose_post_logos(
     post.feed_version+=1
     feed_target=(get_settings().generated_root / post.id / f"feed-v{post.feed_version}.png").resolve()
     feed_composition=compositor.compose(
-        base_path=_safe_generated_base(feed_metadata.get("ai_base_path")),
+        base_path=sources["feed"],
         output_path=feed_target,
         kind="feed",
         logos=logo_snapshot,
@@ -324,7 +393,7 @@ def recompose_post_logos(
             / f"story-{publication.story_rule_id}-v{version}.png"
         ).resolve()
         composition=compositor.compose(
-            base_path=_safe_generated_base(rendering.get("ai_base_path")),
+            base_path=sources["stories"][job_id],
             output_path=target,
             kind="story",
             logos=logo_snapshot,
