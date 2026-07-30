@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="meta-test-alert">META-TEST – ECHTE INSTAGRAM-VERÖFFENTLICHUNGEN MÖGLICH</div>
+<h1>Meta-Testassistent: @{{ page.username }}</h1>
+{% if not connection %}
+<div class="alert">Diese Instagram-Seite ist noch nicht verbunden.</div>
+{% else %}
+<section>
+  <h2>Verbindung</h2>
+  <dl class="metadata">
+    <dt>Konto</dt><dd>@{{ connection.confirmed_username }} ({{ connection.instagram_user_id }})</dd>
+    <dt>Kontoart</dt><dd>{{ connection.account_type }}</dd>
+    <dt>Berechtigungen</dt><dd>{{ connection.scopes | join(', ') }}</dd>
+    <dt>Tokenablauf</dt><dd>{{ connection.token_expires_at | berlin }}</dd>
+    <dt>Testseite</dt><dd>{{ 'bestätigt' if connection.test_account else 'nicht bestätigt' }}</dd>
+  </dl>
+</section>
+<section>
+  <h2>Manuellen Test vorbereiten</h2>
+  <p><code>validate-only</code> ist die sichere Standardeinstellung. Erst <code>publish</code> kann nach zwei getrennten Bestätigungen wirklich veröffentlichen.</p>
+  <form method="post" action="/meta-test/{{ page.id }}/attempt" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Freigegebener Auftrag
+      <select name="publication_job_id" required>
+        {% for job in jobs %}
+        {% set post = posts.get(job.post_id) %}
+        <option value="{{ job.id }}">{{ job.kind | upper }} · {{ job.scheduled_at | berlin }} · Beitragsversion {{ post.version if post else '?' }} · {{ job.status.value }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Teststufe
+      <select name="stage">
+        <option value="validate-only">validate-only – keine Meta-Anfrage</option>
+        <option value="container-only">container-only – Container, keine Veröffentlichung</option>
+        <option value="publish">publish – echte Veröffentlichung möglich</option>
+      </select>
+    </label>
+    <button>Prüfung starten</button>
+  </form>
+</section>
+<section>
+  <h2>Bisherige Meta-Versuche</h2>
+  <table>
+    <tr><th>Medium</th><th>Stufe</th><th>Phase</th><th>Container</th><th>Media-ID</th><th></th></tr>
+    {% for attempt in attempts %}
+    <tr><td>{{ attempt.media_kind }}</td><td>{{ attempt.stage }}</td><td>{{ attempt.phase }}</td><td>{{ attempt.meta_container_id or '—' }}</td><td>{{ attempt.meta_media_id or '—' }}</td><td><a href="/meta-attempts/{{ attempt.id }}">Öffnen</a></td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
+{% endblock %}

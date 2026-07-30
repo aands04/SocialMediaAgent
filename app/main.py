@@ -13,6 +13,7 @@ from app.admin_routes import router as admin_router
 from app.auth.service import authenticate
 from app.config import get_settings
 from app.db import get_db
+from app.meta.routes import router as meta_router
 from app.models import Game, GenerationJob, Post, PublicationJob, Team, User
 from app.monitoring.service import system_status
 from app.web import berlin_datetime, csrf_token, current_user
@@ -42,6 +43,8 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 templates.env.filters["berlin"] = berlin_datetime
+templates.env.globals["environment"] = settings.environment
+templates.env.globals["meta_test_enabled"] = settings.meta_test_enabled
 
 
 def csrf(request: Request):
@@ -133,3 +136,4 @@ def dashboard(
 
 
 app.include_router(admin_router)
+app.include_router(meta_router)

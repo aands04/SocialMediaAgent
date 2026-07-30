@@ -18,11 +18,16 @@ settings = get_settings()
 
 
 def run():
+    meta_test = settings.environment == "meta-test"
     if settings.environment == "staging" and (
         settings.publisher_mode != "dry-run" or settings.meta_access_token
     ):
         raise RuntimeError("Staging-Worker verweigert Live-Publishing")
-    if settings.publisher_mode != "dry-run":
+    if meta_test and settings.meta_scheduler_enabled:
+        raise RuntimeError(
+            "Automatische Instagram-Veröffentlichung ist im Meta-Test verboten"
+        )
+    if not meta_test and settings.publisher_mode != "dry-run":
         raise RuntimeError(
             "Dieser Worker-Build ist für Staging ausschließlich im Dry-Run freigegeben"
         )
@@ -50,11 +55,19 @@ def run():
                 generation_ids.append(generation_id)
                 result = process_generation_job(db, generation_id, settings)
                 generated += int(result.status.value == "succeeded")
-            due = list(
-                db.scalars(
-                    select(PublicationJob)
-                    .where(PublicationJob.status.in_([JobStatus.SCHEDULED, JobStatus.RETRY]))
-                    .limit(20)
+            due = (
+                []
+                if meta_test
+                else list(
+                    db.scalars(
+                        select(PublicationJob)
+                        .where(
+                            PublicationJob.status.in_(
+                                [JobStatus.SCHEDULED, JobStatus.RETRY]
+                            )
+                        )
+                        .limit(20)
+                    )
                 )
             )
             for job in due:
@@ -66,12 +79,12 @@ def run():
         payload = {
             "at": datetime.now(timezone.utc).isoformat(),
             "loops": loops,
-            "scheduler": True,
+            "scheduler": not meta_test,
             "due_jobs": len(due),
             "generation_jobs": len(generation_ids),
             "generated": generated,
             "processed": processed,
-            "publisher": "dry-run",
+            "publisher": "manual-meta-test" if meta_test else "dry-run",
         }
         temporary = settings.log_root / "worker-heartbeat.tmp"
         temporary.write_text(json.dumps(payload))

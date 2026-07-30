@@ -2,6 +2,9 @@
 set -eu
 if [ -r /run/secrets/session_secret ]; then export SESSION_SECRET="$(cat /run/secrets/session_secret)"; fi
 if [ -r /run/secrets/openai_api_key ]; then export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"; fi
+if [ -r /run/secrets/meta_app_id ]; then export META_APP_ID="$(cat /run/secrets/meta_app_id)"; fi
+if [ -r /run/secrets/meta_app_secret ]; then export META_APP_SECRET="$(cat /run/secrets/meta_app_secret)"; fi
+if [ -r /run/secrets/meta_token_encryption_key ]; then export META_TOKEN_ENCRYPTION_KEY="$(cat /run/secrets/meta_token_encryption_key)"; fi
 if [ "${DATABASE_URL:-auto}" = "auto" ]; then
   test -r /run/secrets/db_password || { echo "KRITISCH: DB-Secret fehlt" >&2; exit 1; }
   encoded="$(python -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip(), safe=""))' < /run/secrets/db_password)"

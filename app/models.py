@@ -115,6 +115,112 @@ class GenerationJob(Base,Timestamped):
     parameters:Mapped[dict]=mapped_column(JSON,default=dict)
     started_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
     completed_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+
+
+class InstagramConnection(Base, Timestamped):
+    __tablename__ = "instagram_connections"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    instagram_page_id: Mapped[str] = mapped_column(
+        ForeignKey("instagram_pages.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    instagram_user_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    confirmed_username: Mapped[str | None] = mapped_column(String(100))
+    account_type: Mapped[str | None] = mapped_column(String(40))
+    login_variant: Mapped[str] = mapped_column(String(40), default="instagram_login")
+    api_version: Mapped[str] = mapped_column(String(20), default="v23.0")
+    scopes: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(40), default="disconnected", index=True)
+    encrypted_token: Mapped[str | None] = mapped_column(Text)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    token_key_version: Mapped[str | None] = mapped_column(String(40))
+    test_account: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class InstagramOAuthState(Base):
+    __tablename__ = "instagram_oauth_states"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    instagram_page_id: Mapped[str] = mapped_column(
+        ForeignKey("instagram_pages.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    redirect_uri: Mapped[str] = mapped_column(String(1000))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PublicMediaGrant(Base):
+    __tablename__ = "public_media_grants"
+    __table_args__ = (UniqueConstraint("active_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    publication_job_id: Mapped[str] = mapped_column(
+        ForeignKey("publication_jobs.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    active_key: Mapped[str | None] = mapped_column(String(120))
+    media_path: Mapped[str] = mapped_column(String(800))
+    file_checksum: Mapped[str] = mapped_column(String(64))
+    mime_type: Mapped[str] = mapped_column(String(80))
+    file_size: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fetch_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class MetaPublishingAttempt(Base, Timestamped):
+    __tablename__ = "meta_publishing_attempts"
+    __table_args__ = (UniqueConstraint("active_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    publication_job_id: Mapped[str] = mapped_column(
+        ForeignKey("publication_jobs.id", ondelete="CASCADE"), index=True
+    )
+    connection_id: Mapped[str] = mapped_column(
+        ForeignKey("instagram_connections.id", ondelete="RESTRICT"), index=True
+    )
+    public_media_grant_id: Mapped[str | None] = mapped_column(
+        ForeignKey("public_media_grants.id", ondelete="SET NULL")
+    )
+    active_key: Mapped[str | None] = mapped_column(String(120))
+    target_account_id: Mapped[str] = mapped_column(String(100))
+    media_kind: Mapped[str] = mapped_column(String(20))
+    local_media_version: Mapped[int] = mapped_column(Integer)
+    media_path: Mapped[str] = mapped_column(String(800))
+    file_checksum: Mapped[str] = mapped_column(String(64))
+    stage: Mapped[str] = mapped_column(String(20), default="validate-only")
+    phase: Mapped[str] = mapped_column(String(40), default="validating", index=True)
+    meta_container_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    container_status: Mapped[str | None] = mapped_column(String(80))
+    meta_media_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    permalink: Mapped[str | None] = mapped_column(String(1000))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    sanitized_response: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_category: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MetaPublishConfirmation(Base):
+    __tablename__ = "meta_publish_confirmations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("meta_publishing_attempts.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    purpose: Mapped[str] = mapped_column(String(30))
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 class AuditLog(Base):
     __tablename__="audit_logs"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); user_id:Mapped[str|None]=mapped_column(ForeignKey("users.id")); team_id:Mapped[str|None]=mapped_column(ForeignKey("teams.id")); action:Mapped[str]=mapped_column(String(100)); entity_type:Mapped[str]=mapped_column(String(80)); entity_id:Mapped[str|None]=mapped_column(String(36)); details:Mapped[dict]=mapped_column(JSON,default=dict); ip:Mapped[str|None]=mapped_column(String(80))
 class SystemSetting(Base):

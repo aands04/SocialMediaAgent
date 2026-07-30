@@ -20,6 +20,7 @@ from app.models import (
     Game,
     GenerationJob,
     GenerationJobStatus,
+    InstagramConnection,
     InstagramPage,
     LogoAsset,
     Post,
@@ -84,6 +85,64 @@ def csrf(client):
 def session_csrf(client):
     response = client.get("/teams")
     return re.search(r'name="csrf_token" value="([^"]+)', response.text).group(1)
+
+
+def test_instagram_meta_test_dashboard_is_explicit_and_blocks_mock_connect(
+    browser, monkeypatch
+):
+    client, factory = browser
+    import app.admin_routes as admin_routes
+
+    monkeypatch.setattr(admin_routes.settings, "environment", "meta-test")
+    monkeypatch.setattr(admin_routes.settings, "publisher_mode", "instagram")
+    monkeypatch.setitem(
+        admin_routes.templates.env.globals, "environment", "meta-test"
+    )
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="meta-dashboard",
+            display_name="SV Ehlen Instagram",
+            username="svehlen1901",
+            club="SV Ehlen",
+            active=True,
+            publishing_enabled=False,
+            connection_status="connected",
+        )
+        db.add(page)
+        db.flush()
+        db.add(
+            InstagramConnection(
+                instagram_page_id=page.id,
+                instagram_user_id="ig-dashboard",
+                confirmed_username="svehlen1901",
+                account_type="BUSINESS",
+                scopes=[
+                    "instagram_business_basic",
+                    "instagram_business_content_publish",
+                ],
+                status="connected",
+                test_account=True,
+                api_version="v23.0",
+                token_expires_at=datetime.now(timezone.utc) + timedelta(days=20),
+            )
+        )
+        db.commit()
+        page_id = page.id
+        version = page.version
+    response = client.get("/instagram")
+    assert response.status_code == 200
+    assert "META-TEST – ECHTE INSTAGRAM-VERÖFFENTLICHUNGEN MÖGLICH" in response.text
+    assert "Meta-Testassistent öffnen" in response.text
+    token = session_csrf(client)
+    blocked = client.post(
+        f"/instagram/{page_id}/state",
+        data={
+            "csrf_token": token,
+            "version": version,
+            "action": "mock-connect",
+        },
+    )
+    assert blocked.status_code == 422
 
 
 def logo_png(color=(20, 90, 200, 255)):

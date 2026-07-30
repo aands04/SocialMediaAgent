@@ -112,6 +112,14 @@ Benötigt werden eine Linux-VM mit Docker Engine/Compose v2, DNS oder Tailscale,
 ## Produktionsnahes Proxmox-Staging
 Die abgesicherte Staging-Konfiguration, der einmalige Migrationsprozess, Docker-Secrets, read-only SMB, Systemprüfung, idempotente Dry-Run-Generalprobe, Provider-Diagnose sowie Backup-/Restore-Probe sind in [`docs/STAGING.md`](docs/STAGING.md) beschrieben. Einstieg: `.env.staging.example` kopieren, ausschließlich zufällige Secret-Dateien anlegen, `docker-compose.yml` mit `docker-compose.staging.yml` starten und anschließend `scripts/staging-check.sh` sowie `scripts/staging-smoke-test.sh` ausführen. Das Staging-Override erzwingt Dry-Run und entfernt Meta-Tokens.
 
+## Getrennter Instagram-Meta-Test
+Echte, ausschließlich manuell bestätigte Instagram-Tests laufen in einer eigenen
+Compose-Umgebung. Das normale Proxmox-Staging bleibt dauerhaft im harten
+`dry-run`. Einrichtung, OAuth, öffentliche Kurzzeit-Medienfreigaben,
+`validate-only`, Container-Test, erster Feed-/Story-Test, Tokenpflege,
+Not-Aus und unklare Plattformantworten sind in
+[`docs/META_TEST.md`](docs/META_TEST.md) dokumentiert.
+
 ## FUSSBALL.DE-Mannschaftsspielplan
 Der Provider unterstützt neben dem kompakten Testformat die öffentliche Tabelle `#id-team-matchplan-table`: Eine `.row-competition` liefert Datum, Berliner Uhrzeit, Wettbewerb und Spielnummer für die unmittelbar folgende Spielzeile; Heim/Gast und die stabile externe ID stammen aus `.column-club` beziehungsweise `/spiel/.../spiel/ID`. Ein `.hint-pre-publish` markiert sämtliche Treffer als `provisional` und sperrt deren Beitragserstellung. Private Symbolschrift-Glyphen mit `data-obfuscation` werden ausdrücklich nicht dekodiert; nur normale ASCII-Ziffern im vollständigen Format `Zahl : Zahl` werden als unbestätigtes Ergebnis gelesen.
 
