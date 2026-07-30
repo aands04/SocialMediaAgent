@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block content %}
+{% if item.status.value in ['queued','running','retry_wait'] %}<meta http-equiv="refresh" content="3">{% endif %}
+<h1>Generierungsauftrag</h1>
+<section>
+  <p><strong>Typ:</strong> {{item.job_type.value}}</p>
+  <p><strong>Mannschaft:</strong> {{team.display_name if team else item.team_id}}</p>
+  <p><strong>Spiel:</strong> {{game.home_team if game else '—'}} – {{game.away_team if game else '—'}}{% if game %}, {{game.kickoff|berlin}}{% endif %}</p>
+  <p><strong>Ausgelöst durch:</strong> {{requester.email if requester else item.requested_by}}</p>
+  <p><strong>Status:</strong> <span class="badge">{{item.status.value}}</span></p>
+  <p><strong>Phase:</strong> {{item.phase}}</p>
+  <p><strong>Fortschritt:</strong> {{item.progress}} % · {{item.completed_outputs}} von {{item.planned_outputs}} Ausgaben</p>
+  <p><strong>Versuch:</strong> {{item.attempts}} von {{item.max_attempts}}</p>
+  <p><strong>Start:</strong> {{item.started_at|berlin}} · <strong>Geändert:</strong> {{item.updated_at|berlin}}</p>
+  {% if item.error_message %}<div class="alert"><strong>{{item.error_category or 'Fehler'}}:</strong> {{item.error_message}}</div>{% endif %}
+  {% if item.result_post_id %}<p><a class="button" href="/posts/{{item.result_post_id}}">Fertigen Beitrag öffnen</a></p>{% endif %}
+</section>
+{% if item.status.value in ['queued','running','retry_wait'] %}
+<form method="post" action="/generation-jobs/{{item.id}}/cancel"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">{{'Abbruch vormerken' if item.status.value=='running' else 'Auftrag abbrechen'}}</button></form>
+{% endif %}
+{% if item.status.value in ['failed','manual_review_required'] %}
+{% if item.status.value=='manual_review_required' %}<form method="post" action="/generation-jobs/{{item.id}}/review"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Prüfvermerk<input name="note" required></label><button>Manuelle Prüfung dokumentieren</button></form>{% endif %}
+<form method="post" action="/generation-jobs/{{item.id}}/retry"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Bewusst erneut anstoßen</button></form>
+{% endif %}
+{% endblock %}

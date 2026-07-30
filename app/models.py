@@ -23,6 +23,8 @@ def uid(): return str(uuid4())
 class Role(str,enum.Enum): ADMIN="admin"; EDITOR="editor"; APPROVER="approver"; VIEWER="viewer"
 class PostStatus(str,enum.Enum): DETECTED="detected"; PLANNED="planned"; CREATING="creating"; INCOMPLETE="incomplete"; PENDING="pending_approval"; REJECTED="rejected"; APPROVED="approved"; REAPPROVAL="reapproval_required"; SCHEDULED="scheduled"; PARTIAL="partially_published"; PUBLISHED="published"; ERROR="publishing_error"; CANCELLED="cancelled"
 class JobStatus(str,enum.Enum): DRAFT="draft"; UNAPPROVED="unapproved"; APPROVED="approved"; SCHEDULED="scheduled"; WAITING="waiting"; PUBLISHING="publishing"; PUBLISHED="published"; RETRY="retry_scheduled"; FAILED="failed"; CANCELLED="cancelled"; SKIPPED="skipped"; UNCERTAIN="uncertain"
+class GenerationJobStatus(str,enum.Enum): QUEUED="queued"; RUNNING="running"; RETRY_WAIT="retry_wait"; SUCCEEDED="succeeded"; FAILED="failed"; CANCELLED="cancelled"; MANUAL_REVIEW_REQUIRED="manual_review_required"
+class GenerationJobType(str,enum.Enum): CREATE_POST="create_post"; RERENDER_POST="rerender_post"
 class Timestamped:
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
     updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now)
@@ -45,6 +47,36 @@ class Post(Base,Timestamped):
     __tablename__="posts"; __table_args__=(UniqueConstraint("game_id","post_type","active_key"),); id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); game_id:Mapped[str]=mapped_column(ForeignKey("games.id")); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id")); instagram_page_id:Mapped[str]=mapped_column(ForeignKey("instagram_pages.id")); post_type:Mapped[str]=mapped_column(String(30)); active_key:Mapped[str]=mapped_column(String(20),default="active"); status:Mapped[PostStatus]=mapped_column(Enum(PostStatus),default=PostStatus.DETECTED); text:Mapped[str|None]=mapped_column(Text); text_version:Mapped[int]=mapped_column(Integer,default=1); feed_path:Mapped[str|None]=mapped_column(String(800)); feed_version:Mapped[int]=mapped_column(Integer,default=1); media_asset_id:Mapped[str|None]=mapped_column(ForeignKey("media_assets.id")); design_snapshot:Mapped[dict]=mapped_column(JSON,default=dict); critical_warnings:Mapped[list]=mapped_column(JSON,default=list); publishing_enabled:Mapped[bool]=mapped_column(Boolean,default=True); approved_version:Mapped[int|None]=mapped_column(Integer); approved_by:Mapped[str|None]=mapped_column(ForeignKey("users.id")); approved_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_edited_by:Mapped[str|None]=mapped_column(ForeignKey("users.id"))
 class PublicationJob(Base,Timestamped):
     __tablename__="publication_jobs"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); post_id:Mapped[str]=mapped_column(ForeignKey("posts.id")); game_id:Mapped[str]=mapped_column(ForeignKey("games.id")); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id")); instagram_page_id:Mapped[str]=mapped_column(ForeignKey("instagram_pages.id")); story_rule_id:Mapped[str|None]=mapped_column(ForeignKey("story_rules.id")); kind:Mapped[str]=mapped_column(String(10)); media_path:Mapped[str]=mapped_column(String(800)); text_snapshot:Mapped[str|None]=mapped_column(Text); scheduled_at:Mapped[datetime]=mapped_column(DateTime(timezone=True)); absolute_time:Mapped[bool]=mapped_column(Boolean,default=False); stale_time:Mapped[bool]=mapped_column(Boolean,default=False); approval_status:Mapped[str]=mapped_column(String(30),default="unapproved"); status:Mapped[JobStatus]=mapped_column(Enum(JobStatus),default=JobStatus.UNAPPROVED); attempts:Mapped[int]=mapped_column(Integer,default=0); last_attempt_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); published_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); platform_id:Mapped[str|None]=mapped_column(String(200)); permalink:Mapped[str|None]=mapped_column(String(1000)); error:Mapped[str|None]=mapped_column(Text); idempotency_key:Mapped[str]=mapped_column(String(100),unique=True); locked_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); approved_post_version:Mapped[int|None]=mapped_column(Integer)
+class GenerationJob(Base,Timestamped):
+    __tablename__="generation_jobs"
+    __table_args__=(UniqueConstraint("active_key"),UniqueConstraint("idempotency_key"),)
+    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
+    job_type:Mapped[GenerationJobType]=mapped_column(Enum(GenerationJobType),index=True)
+    game_id:Mapped[str]=mapped_column(ForeignKey("games.id"),index=True)
+    team_id:Mapped[str]=mapped_column(ForeignKey("teams.id"),index=True)
+    post_id:Mapped[str|None]=mapped_column(ForeignKey("posts.id"),index=True)
+    result_post_id:Mapped[str|None]=mapped_column(ForeignKey("posts.id"))
+    post_type:Mapped[str]=mapped_column(String(30))
+    requested_by:Mapped[str]=mapped_column(ForeignKey("users.id"))
+    status:Mapped[GenerationJobStatus]=mapped_column(Enum(GenerationJobStatus),default=GenerationJobStatus.QUEUED,index=True)
+    phase:Mapped[str]=mapped_column(String(40),default="preparing")
+    progress:Mapped[int]=mapped_column(Integer,default=0)
+    planned_outputs:Mapped[int]=mapped_column(Integer,default=0)
+    completed_outputs:Mapped[int]=mapped_column(Integer,default=0)
+    attempts:Mapped[int]=mapped_column(Integer,default=0)
+    max_attempts:Mapped[int]=mapped_column(Integer,default=3)
+    available_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+    locked_by:Mapped[str|None]=mapped_column(String(160))
+    locked_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    lease_expires_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True),index=True)
+    cancel_requested:Mapped[bool]=mapped_column(Boolean,default=False)
+    error_category:Mapped[str|None]=mapped_column(String(80))
+    error_message:Mapped[str|None]=mapped_column(Text)
+    idempotency_key:Mapped[str]=mapped_column(String(255))
+    active_key:Mapped[str|None]=mapped_column(String(255))
+    parameters:Mapped[dict]=mapped_column(JSON,default=dict)
+    started_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    completed_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
 class AuditLog(Base):
     __tablename__="audit_logs"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); user_id:Mapped[str|None]=mapped_column(ForeignKey("users.id")); team_id:Mapped[str|None]=mapped_column(ForeignKey("teams.id")); action:Mapped[str]=mapped_column(String(100)); entity_type:Mapped[str]=mapped_column(String(80)); entity_id:Mapped[str|None]=mapped_column(String(36)); details:Mapped[dict]=mapped_column(JSON,default=dict); ip:Mapped[str|None]=mapped_column(String(80))
 class SystemSetting(Base):
