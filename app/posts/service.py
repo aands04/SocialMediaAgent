@@ -88,6 +88,28 @@ def _media_path(relative: str | None) -> str | None:
     return str(get_settings().media_root / path)
 
 
+def _normalize_design_snapshot(value: object) -> dict:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _story_snapshot_map(value: object) -> dict[str, dict]:
+    entries: list[dict] = []
+    if isinstance(value, dict):
+        for rule_id, entry in value.items():
+            if not isinstance(entry, dict):
+                continue
+            normalized = dict(entry)
+            normalized.setdefault("rule_id", str(rule_id))
+            entries.append(normalized)
+    elif isinstance(value, list):
+        entries = [dict(entry) for entry in value if isinstance(entry, dict)]
+    return {
+        str(entry["rule_id"]): entry
+        for entry in entries
+        if entry.get("rule_id")
+    }
+
+
 def _facts(db: Session, game: Game, team: Team, asset: MediaAsset | None, post_type: str) -> dict:
     primary_font=_font(db,team.primary_font); secondary_font=_font(db,team.secondary_font)
     kickoff=game.kickoff.replace(tzinfo=timezone.utc) if game.kickoff.tzinfo is None else game.kickoff
@@ -156,7 +178,9 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
         raise RerenderConflict("Der Feed wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
     if any(story_jobs[job_id].status==JobStatus.PUBLISHED for job_id in selected):
         raise RerenderConflict("Eine ausgewählte Story wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
-    facts=_facts(db,game,team,asset,post.post_type); old_snapshot=dict(post.design_snapshot or {}); snapshots={entry.get("rule_id"):entry for entry in old_snapshot.get("stories",[])}
+    facts=_facts(db,game,team,asset,post.post_type)
+    old_snapshot=_normalize_design_snapshot(post.design_snapshot)
+    snapshots=_story_snapshot_map(old_snapshot.get("stories"))
     feed_design=_design(db,team.feed_template,post.post_type,"feed"); post.feed_version+=1
     feed_prompt_name=team.rules.get(f"image_prompt_feed_{post.post_type}",team.rules.get("image_prompt_feed","default-image-feed"))
     feed_prompt=resolve_prompt(db,feed_prompt_name,"image",post.post_type,"feed",facts) if getattr(renderer,"is_ai",False) else None
@@ -173,7 +197,9 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
             story_prompt=resolve_prompt(db,story_prompt_name,"image",post.post_type,"story",facts) if getattr(renderer,"is_ai",False) else None
             job.media_path=str(renderer.render("story",f"{post.id}/story-{job.story_rule_id}-v{media_version}.png",{**facts,"template":design,"image_prompt":story_prompt})); job.version+=1; job.idempotency_key=f"{post.id}:story:{job.story_rule_id}:v{media_version}"
             snapshots[job.story_rule_id]={"rule_id":job.story_rule_id,"template":design,"prompt":story_prompt.snapshot() if story_prompt else None,"media_version":media_version}
-    prompt_snapshot=dict(old_snapshot.get("prompts") or {}); prompt_snapshot["feed"]=feed_prompt.snapshot() if feed_prompt else None
+    raw_prompts=old_snapshot.get("prompts")
+    prompt_snapshot=dict(raw_prompts) if isinstance(raw_prompts,dict) else {}
+    prompt_snapshot["feed"]=feed_prompt.snapshot() if feed_prompt else None
     post.design_snapshot={**old_snapshot,"feed":feed_design,"prompts":prompt_snapshot,"stories":list(snapshots.values()),"fonts":{"primary":facts["primary_font_asset"] or {"family":team.primary_font,"fallback":True},"secondary":facts["secondary_font_asset"] or {"family":team.secondary_font,"fallback":True}},"colors":team.colors}
     was_approved=post.status in {PostStatus.APPROVED,PostStatus.SCHEDULED,PostStatus.PARTIAL}
     post.version+=1
