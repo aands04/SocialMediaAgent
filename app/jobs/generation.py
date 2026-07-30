@@ -85,6 +85,7 @@ class _ProgressRenderer:
         _phase(self.db, self.job, phase, progress, completed)
         phase_progress = {
             "generating_ai_base": progress,
+            "generating_ai_composition": progress,
             "compositing_logos": min(84, progress + 4),
             "validating_final_media": min(88, progress + 7),
         }

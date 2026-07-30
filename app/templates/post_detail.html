@@ -9,7 +9,11 @@
   Bei KI-Ausgaben sind Spieler, Trikot, Logos, Schreibweisen und Spieldaten vor der Freigabe visuell zu prüfen.
 </div>
 {% endif %}
-<div class="warning"><strong>KI-Grundgrafik:</strong> Bitte auf unbeabsichtigte oder erfundene Logos und Wappen prüfen. Die Anwendung kann solche KI-Elemente nicht zuverlässig automatisch erkennen.</div>
+<div class="warning">
+  <strong>KI-Komposition:</strong> Spielerfoto und verifizierte Logo-Referenzen wurden gemeinsam an das Bildmodell übergeben.
+  Bitte Spieler, Trikot und beide Logos sorgfältig mit den unten angezeigten Originalen vergleichen.
+  Die Anwendung kann weder eine pixelgenaue Logo-Wiedergabe noch das Fehlen zusätzlicher erfundener Wappen automatisch garantieren.
+</div>
 {% set logos=item.design_snapshot.get('logos') %}
 {% if logos %}
 <section>
@@ -79,8 +83,13 @@
 </form>
 {% else %}
 <div class="warning">
+  {% if logo_recompose.feed.requires_full_rerender %}
+  <strong>Die Logos sind Bestandteil dieser KI-Komposition.</strong>
+  Verwende nach einer Logoänderung „Grafiken neu erzeugen“. Dabei werden Spielerfoto, Mannschaftslogo und optionales Gegnerlogo erneut als geordnete Referenzbilder übergeben; dies löst einen neuen OpenAI-Bildauftrag aus.
+  {% else %}
   <strong>Lokale Logo-Neuzusammensetzung ist für diesen älteren Beitrag nicht möglich.</strong>
-  Die getrennte KI-Grundgrafik des Feeds fehlt. Verwende „Grafiken neu erzeugen“; dabei werden die verifizierten Logos automatisch eingebettet und künftig getrennt gespeichert.
+  {{logo_recompose.feed.reason}} Verwende stattdessen „Grafiken neu erzeugen“.
+  {% endif %}
 </div>
 {% endif %}
 <form method="post" action="/posts/{{item.id}}/text">

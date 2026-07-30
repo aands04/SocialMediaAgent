@@ -444,6 +444,72 @@ def test_legacy_story_without_ai_base_is_rejected_before_files_or_job(
     assert not (generated / post.id / "feed-v2.png").exists()
 
 
+def test_ai_reference_post_requires_full_rerender_for_logo_change(db):
+    _, page, team, game = graph(db)
+    post = Post(
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        post_type="announcement",
+        status=PostStatus.PENDING,
+        text="KI-Komposition",
+        feed_path="/app/data/generated/feed.png",
+        design_snapshot={},
+    )
+    db.add(post)
+    db.flush()
+    feed = PublicationJob(
+        post_id=post.id,
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        kind="feed",
+        media_path=post.feed_path,
+        scheduled_at=game.kickoff,
+        idempotency_key=f"{post.id}:feed:v1",
+    )
+    story = PublicationJob(
+        post_id=post.id,
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        story_rule_id="ai-story",
+        kind="story",
+        media_path="/app/data/generated/story.png",
+        scheduled_at=game.kickoff,
+        idempotency_key=f"{post.id}:story:ai-story:v1",
+    )
+    db.add_all([feed, story])
+    post.design_snapshot = {
+        "media": {
+            "feed": {
+                "logo_integration": {
+                    "mode": "ai-reference",
+                    "version": "verified-logo-ai-references-v1",
+                }
+            }
+        },
+        "stories": [
+            {
+                "rule_id": "ai-story",
+                "rendering": {
+                    "logo_integration": {
+                        "mode": "ai-reference",
+                        "version": "verified-logo-ai-references-v1",
+                    }
+                },
+            }
+        ],
+    }
+    db.commit()
+
+    availability = logo_recompose_availability(post, [feed, story])
+    assert availability["feed"]["available"] is False
+    assert availability["feed"]["requires_full_rerender"] is True
+    assert "KI-Komposition" in availability["feed"]["reason"]
+    assert availability["stories"][story.id]["requires_full_rerender"] is True
+
+
 def test_openai_job_without_team_logo_stops_before_generator(db, tmp_path, monkeypatch):
     user, _, team, game = graph(db)
     job, _ = generation.enqueue_create(db, game, team, user, "announcement")

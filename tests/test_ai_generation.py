@@ -6,13 +6,16 @@ from PIL import Image
 
 from app.config import Settings
 from app.imagegen.service import AIImageRenderer, ImageProvider
+from app.logos.service import store_logo
 from app.models import (
     Game,
     InstagramPage,
     MediaAsset,
     PromptTemplate,
+    Role,
     StoryRule,
     Team,
+    User,
 )
 from app.posts.service import create_post
 from app.prompts.service import (
@@ -51,6 +54,10 @@ def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     prompt = builtin_prompt("image", "announcement", "feed", facts())
     assert "SV Ehlen gegen SG Beispiel" in prompt.rendered
     assert "Habichtswaldstadion Ehlen" in prompt.rendered
+    assert "Referenzbild 2" in prompt.rendered
+    assert "kein drittes Referenzbild" in prompt.rendered
+    assert "oben links und oben rechts" not in prompt.rendered
+    assert prompt.policy_version == "verified-logo-ai-references-v1"
     assert "{{" not in prompt.rendered
 
 
@@ -130,27 +137,94 @@ def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
     media.mkdir()
     uploads.mkdir()
     player = media / "player.jpg"
-    logo = media / "logo.png"
+    team_logo = uploads / "team-logo.png"
+    opponent_logo = uploads / "opponent-logo.png"
     Image.new("RGB", (600, 900), "blue").save(player)
-    Image.new("RGBA", (200, 200), (255, 255, 255, 255)).save(logo)
+    Image.new("RGBA", (200, 200), (255, 255, 255, 255)).save(team_logo)
+    Image.new("RGBA", (180, 210), (20, 180, 60, 255)).save(opponent_logo)
     provider = FakeImageProvider()
     renderer = AIImageRenderer(tmp_path / "out", media, uploads, provider)
-    prompt = builtin_prompt("image", "announcement", "feed", facts())
+    prompt = builtin_prompt(
+        "image",
+        "announcement",
+        "feed",
+        facts(team_logo=str(team_logo), opponent_logo=str(opponent_logo)),
+    )
     output = renderer.render(
         "feed",
         "post/feed.png",
         {
             "player_image": str(player),
-            "team_logo": str(logo),
-            "opponent_logo": None,
+            "team_logo": str(team_logo),
+            "opponent_logo": str(opponent_logo),
+            "logos": {
+                "team": {"id": "team-1", "version": 2, "checksum": "a" * 64},
+                "opponent": {
+                    "id": "opponent-1",
+                    "version": 3,
+                    "checksum": "b" * 64,
+                },
+            },
             "image_prompt": prompt,
         },
     )
     assert Image.open(output).size == (1080, 1350)
     assert provider.calls[0]["size"] == "1088x1360"
     assert provider.calls[0]["model"] == "gpt-image-2"
-    # Logos are never generative references. Verified originals are composited later.
-    assert provider.calls[0]["references"] == [player.resolve()]
+    assert "Referenzbild 3" in provider.calls[0]["prompt"]
+    assert provider.calls[0]["references"] == [
+        player.resolve(),
+        team_logo.resolve(),
+        opponent_logo.resolve(),
+    ]
+    metadata = renderer.metadata_for(output)
+    assert metadata["logo_integration"]["mode"] == "ai-reference"
+    assert [
+        item["role"]
+        for item in metadata["logo_integration"]["reference_order"]
+    ] == ["player", "team_logo", "opponent_logo"]
+    assert "ai_base_path" not in metadata
+
+
+def test_ai_renderer_uses_text_fallback_without_opponent_logo(tmp_path):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    media.mkdir()
+    uploads.mkdir()
+    player = media / "player.jpg"
+    team_logo = uploads / "team-logo.png"
+    Image.new("RGB", (600, 900), "blue").save(player)
+    Image.new("RGBA", (200, 200), (255, 255, 255, 255)).save(team_logo)
+    provider = FakeImageProvider()
+    renderer = AIImageRenderer(tmp_path / "out", media, uploads, provider)
+    prompt = builtin_prompt(
+        "image",
+        "announcement",
+        "story",
+        facts(team_logo=str(team_logo), opponent_logo=None),
+    )
+    output = renderer.render(
+        "story",
+        "post/story.png",
+        {
+            "player_image": str(player),
+            "team_logo": str(team_logo),
+            "opponent_logo": None,
+            "logos": {
+                "team": {"id": "team-1", "version": 1, "checksum": "a" * 64},
+                "opponent": {"fallback": True, "name": "SG Beispiel"},
+            },
+            "image_prompt": prompt,
+        },
+    )
+    assert provider.calls[0]["references"] == [
+        player.resolve(),
+        team_logo.resolve(),
+    ]
+    assert renderer.metadata_for(output)["logo_integration"][
+        "opponent_text_fallback"
+    ] is True
+    assert "Erfinde dafür kein Wappen" in prompt.rendered
 
 
 def test_ai_renderer_refuses_missing_player(tmp_path):
@@ -174,15 +248,48 @@ def test_ai_renderer_refuses_missing_player(tmp_path):
         )
 
 
-def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
+def test_ai_renderer_refuses_missing_verified_team_logo(tmp_path):
     media = tmp_path / "media"
     uploads = tmp_path / "uploads"
     media.mkdir()
     uploads.mkdir()
     player = media / "player.jpg"
     Image.new("RGB", (600, 900), "blue").save(player)
+    renderer = AIImageRenderer(
+        tmp_path / "out", media, uploads, FakeImageProvider()
+    )
+    with pytest.raises(ValueError, match="Mannschaftslogo"):
+        renderer.render(
+            "feed",
+            "post/feed.png",
+            {
+                "player_image": str(player),
+                "team_logo": None,
+                "image_prompt": builtin_prompt(
+                    "image", "announcement", "feed", facts()
+                ),
+            },
+        )
+
+
+def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    media.mkdir()
+    uploads.mkdir()
+    player = media / "player.jpg"
+    team_logo_file = uploads / "source-team-logo.png"
+    Image.new("RGB", (600, 900), "blue").save(player)
+    Image.new("RGBA", (200, 200), (20, 70, 180, 255)).save(team_logo_file)
     monkeypatch.setattr(
-        "app.posts.service.get_settings", lambda: Settings(media_root=media)
+        "app.posts.service.get_settings",
+        lambda: Settings(media_root=media, upload_root=uploads),
+    )
+    user = User(
+        email="prompt-test@example.invalid",
+        password_hash="x",
+        role=Role.ADMIN,
+        all_teams=True,
     )
     page = InstagramPage(
         internal_name="main",
@@ -192,7 +299,7 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
         active=True,
         connection_status="connected",
     )
-    db.add(page)
+    db.add_all([user, page])
     db.flush()
     team = Team(
         internal_name="erste",
@@ -207,6 +314,18 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     )
     db.add(team)
     db.flush()
+    team_logo, _ = store_logo(
+        db,
+        upload_root=uploads,
+        logo_type="team",
+        team_id=team.id,
+        display_name=team.club,
+        original_filename="team-logo.png",
+        content_type="image/png",
+        data=team_logo_file.read_bytes(),
+        uploaded_by=user.id,
+    )
+    team.logo_asset_id = team_logo.id
     game = Game(
         team_id=team.id,
         external_id="ai-1",
@@ -252,8 +371,17 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     )
     assert post.design_snapshot["mode"]["image"] == "openai"
     assert post.design_snapshot["prompts"]["feed"]["name"] == "default-image-feed"
+    assert post.design_snapshot["prompts"]["feed"]["version"] == 2
+    assert (
+        post.design_snapshot["prompts"]["feed"]["policy_version"]
+        == "verified-logo-ai-references-v1"
+    )
     assert "SV Ehlen gegen SG Beispiel" in post.design_snapshot["prompts"]["feed"]["rendered"]
     assert post.design_snapshot["stories"][0]["prompt"]["name"] == "default-image-story"
+    assert (
+        post.design_snapshot["media"]["feed"]["logo_integration"]["mode"]
+        == "ai-reference"
+    )
     assert Image.open(post.feed_path).size == (1080, 1350)
 
 

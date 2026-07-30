@@ -236,6 +236,10 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
             if warning
             not in {
                 "Logo-Zuordnung wurde geändert; Grafiken neu zusammensetzen",
+                (
+                    "Logo-Zuordnung wurde geändert; Grafiken mit aktualisierten "
+                    "Logo-Referenzen neu erzeugen"
+                ),
                 "Eigenes Mannschaftslogo fehlt; der Beitrag darf nicht freigegeben werden",
             }
         ]
@@ -274,9 +278,25 @@ def logo_recompose_availability(
     feed_metadata = dict((snapshot.get("media") or {}).get("feed") or {})
     stories = _story_snapshot_map(snapshot.get("stories"))
 
-    def status(value: str | None) -> dict:
+    ai_reference_reason = (
+        "Die Logos sind Bestandteil der KI-Komposition. Eine Logoänderung "
+        "erfordert eine vollständige Bild-Neugenerierung."
+    )
+
+    def status(rendering: dict) -> dict:
+        integration = rendering.get("logo_integration")
+        if isinstance(integration, dict) and integration.get("mode") == "ai-reference":
+            return {
+                "available": False,
+                "reason": ai_reference_reason,
+                "requires_full_rerender": True,
+            }
         try:
-            return {"available": True, "path": str(_safe_generated_base(value))}
+            return {
+                "available": True,
+                "path": str(_safe_generated_base(rendering.get("ai_base_path"))),
+                "legacy_compositor": True,
+            }
         except LogoValidationError as exc:
             return {"available": False, "reason": str(exc)}
 
@@ -286,8 +306,8 @@ def logo_recompose_availability(
             continue
         entry = dict(stories.get(publication.story_rule_id) or {})
         rendering = dict(entry.get("rendering") or {})
-        story_status[publication.id] = status(rendering.get("ai_base_path"))
-    feed_status = status(feed_metadata.get("ai_base_path"))
+        story_status[publication.id] = status(rendering)
+    feed_status = status(feed_metadata)
     return {
         "feed": feed_status,
         "stories": story_status,
@@ -321,7 +341,8 @@ def logo_recompose_preflight(
             + ", ".join(missing)
             + " fehlt eine separat eingefrorene KI-Grundgrafik. "
             "Bitte stattdessen „Grafiken neu erzeugen“ verwenden. "
-            "Dabei werden die verifizierten Logos anschließend automatisch eingebettet."
+            "Dabei werden die verifizierten Logos als Referenzbilder in die "
+            "KI-Komposition integriert."
         )
     return {
         "feed": Path(availability["feed"]["path"]),
@@ -421,6 +442,10 @@ def recompose_post_logos(
     }
     removable={
         "Logo-Zuordnung wurde geändert; Grafiken neu zusammensetzen",
+        (
+            "Logo-Zuordnung wurde geändert; Grafiken mit aktualisierten "
+            "Logo-Referenzen neu erzeugen"
+        ),
         "Eigenes Mannschaftslogo fehlt; der Beitrag darf nicht freigegeben werden",
     }
     post.critical_warnings=[

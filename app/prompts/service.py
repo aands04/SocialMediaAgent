@@ -44,18 +44,22 @@ DEFAULT_STYLE = (
     "Ausgabe soll eine eigenständige Komposition erhalten"
 )
 
+IMAGE_POLICY_VERSION = "verified-logo-ai-references-v1"
+
 IMAGE_SAFETY_PREFIX = """VERBINDLICHE DATEN- UND MEDIENREGELN:
 - Verwende ausschließlich die nachfolgend angegebenen Spieldaten.
 - Erfinde keine Spieler, Namen, Logos, Sponsoren, Ergebnisse oder Vereinsinformationen.
-- Das bereitgestellte Spielerfoto ist die Identitätsreferenz. Gesicht, Körper,
+- Referenzbild 1 ist das Spielerfoto und die verbindliche Identitätsreferenz.
+  Gesicht, Körper,
   Trikot, Vereinsabzeichen und Proportionen müssen erkennbar unverändert bleiben.
-- Erzeuge, zeichne, interpretiere oder rekonstruiere keinerlei Vereinswappen,
-  Logos, Embleme, Marken, Sponsorenzeichen oder grafische Wappen-Platzhalter.
+- Referenzbild 2 ist das verifizierte Originalwappen der eigenen Mannschaft.
+  Binde es deutlich sichtbar, harmonisch und gestalterisch passend in die
+  Gesamtkomposition ein. Form, Farben, Schriftzüge und Emblembestandteile
+  müssen dem Referenzbild entsprechen; nicht neu zeichnen oder umgestalten.
+{opponent_logo_rule}
+- Erzeuge, zeichne oder rekonstruiere keine weiteren Vereinswappen, Logos,
+  Embleme, Marken, Sponsorenzeichen oder grafischen Wappen-Platzhalter.
 - Füge keine zusätzlichen Sponsorenlogos oder fiktiven Marken hinzu.
-- Halte oben links und oben rechts ruhige, kontrastarme Schutzbereiche für die
-  spätere deterministische Einbettung verifizierter Originallogos frei.
-- Vereinslogos werden nach der KI-Erzeugung durch die Anwendung eingesetzt und
-  gehören ausdrücklich nicht zum generativen Bildauftrag.
 - Stelle jeden angegebenen Text buchstaben- und zahlengenau dar.
 - Keine vollständige Anschrift, keine Spiel-ID, Staffel-ID oder Schiedsrichterdaten.
 """
@@ -76,6 +80,11 @@ gestreckte oder beschnittene Kopie des anderen Formats sein.
 Nutze den bereitgestellten einzelnen Spieler als dominantes Hauptmotiv. Erzeuge
 eine dynamische, glaubwürdige Komposition für einen Amateurfußballverein mit
 Licht, Tiefe, Schatten, Kontrast und dezenten Fußball- oder Stadionelementen.
+Binde das verifizierte Logo der eigenen Mannschaft deutlich sichtbar und
+harmonisch in die Komposition ein. Falls ein verifiziertes Gegnerlogo als
+Referenz vorhanden ist, integriere es kleiner, aber klar erkennbar. Die Logos
+sollen Bestandteil des Designs sein und nicht wie nachträglich aufgesetzte
+Eckaufkleber wirken.
 Orientiere die Farbwelt an {{ primary_color }} und {{ secondary_color }}.
 Stilrichtung: {{ style_direction }}.
 
@@ -122,6 +131,7 @@ class ResolvedPrompt:
     body: str
     rendered: str
     builtin: bool
+    policy_version: str | None = None
 
     def snapshot(self) -> dict:
         return {
@@ -135,6 +145,7 @@ class ResolvedPrompt:
             "body": self.body,
             "rendered": self.rendered,
             "builtin": self.builtin,
+            "policy_version": self.policy_version,
         }
 
 
@@ -276,6 +287,24 @@ def render_body(body: str, context: dict) -> str:
         raise PromptValidationError(f"Prompt kann nicht gerendert werden: {exc}") from exc
 
 
+def image_safety_prefix(facts: dict) -> str:
+    if facts.get("opponent_logo"):
+        opponent_logo_rule = (
+            "- Referenzbild 3 ist das verifizierte Originalwappen des Gegners. "
+            "Integriere es kleiner als das eigene Mannschaftslogo, aber klar "
+            "erkennbar. Form, Farben, Schriftzüge und Emblembestandteile müssen "
+            "dem Referenzbild entsprechen; nicht neu zeichnen oder umgestalten."
+        )
+    else:
+        opponent_logo_rule = (
+            "- Es gibt kein verifiziertes Gegnerlogo und deshalb kein drittes "
+            "Referenzbild. Stelle den Gegner ausschließlich mit seinem "
+            "ausgeschriebenen Namen in einer neutralen typografischen Lösung dar. "
+            "Erfinde dafür kein Wappen, Emblem oder Logo."
+        )
+    return IMAGE_SAFETY_PREFIX.format(opponent_logo_rule=opponent_logo_rule)
+
+
 def builtin_prompt(
     prompt_kind: str, post_type: str, media_kind: str, facts: dict
 ) -> ResolvedPrompt:
@@ -288,12 +317,12 @@ def builtin_prompt(
     context = prompt_context(facts, media_kind)
     rendered = render_body(body, context)
     if image:
-        rendered = IMAGE_SAFETY_PREFIX + "\n" + rendered
+        rendered = image_safety_prefix(facts) + "\n" + rendered
     else:
         rendered = TEXT_SAFETY_PREFIX + "\n" + rendered
     return ResolvedPrompt(
         name=name,
-        version=1,
+        version=2 if image else 1,
         prompt_kind=prompt_kind,
         post_type=post_type,
         media_kind=media_kind,
@@ -302,6 +331,7 @@ def builtin_prompt(
         body=body,
         rendered=rendered,
         builtin=True,
+        policy_version=IMAGE_POLICY_VERSION if image else None,
     )
 
 
@@ -334,7 +364,7 @@ def resolve_prompt(
     context = prompt_context(facts, media_kind, item.style_direction)
     rendered = render_body(item.prompt_body, context)
     if prompt_kind == "image":
-        rendered = IMAGE_SAFETY_PREFIX + "\n" + rendered
+        rendered = image_safety_prefix(facts) + "\n" + rendered
     else:
         rendered = TEXT_SAFETY_PREFIX + "\n" + rendered
     return ResolvedPrompt(
@@ -348,6 +378,7 @@ def resolve_prompt(
         body=item.prompt_body,
         rendered=rendered,
         builtin=False,
+        policy_version=IMAGE_POLICY_VERSION if prompt_kind == "image" else None,
     )
 
 

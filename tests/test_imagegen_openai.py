@@ -43,14 +43,19 @@ def test_gpt_image_2_generate_uses_embedded_png_without_response_format():
 
 
 def test_gpt_image_2_edit_omits_unsupported_parameters(tmp_path):
-    reference = tmp_path / "player.png"
-    reference.write_bytes(PNG_BYTES)
+    references = [
+        tmp_path / "player.png",
+        tmp_path / "team-logo.png",
+        tmp_path / "opponent-logo.png",
+    ]
+    for reference in references:
+        reference.write_bytes(PNG_BYTES)
     provider = provider_with_mock_client()
     provider.client.images.edit.return_value = image_response()
 
     result = provider.generate(
         prompt="Testmotiv mit Spieler",
-        references=[reference],
+        references=references,
         size="1088x1920",
         model="gpt-image-2-2026-07-01",
         quality="medium",
@@ -61,8 +66,11 @@ def test_gpt_image_2_edit_omits_unsupported_parameters(tmp_path):
     assert options["output_format"] == "png"
     assert "response_format" not in options
     assert "input_fidelity" not in options
-    assert len(options["image"]) == 1
-    assert options["image"][0].closed
+    assert len(options["image"]) == 3
+    assert [item.name for item in options["image"]] == [
+        str(path) for path in references
+    ]
+    assert all(item.closed for item in options["image"])
 
 
 def test_older_gpt_image_edit_retains_high_input_fidelity(tmp_path):

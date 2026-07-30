@@ -84,7 +84,10 @@ def _invalidate_posts_for_logo_change(
         post.version += 1
         post.approved_version = None
         post.status = PostStatus.REAPPROVAL
-        warning = "Logo-Zuordnung wurde geändert; Grafiken neu zusammensetzen"
+        warning = (
+            "Logo-Zuordnung wurde geändert; Grafiken mit aktualisierten "
+            "Logo-Referenzen neu erzeugen"
+        )
         post.critical_warnings = list(
             dict.fromkeys([*(post.critical_warnings or []), warning])
         )
@@ -787,9 +790,9 @@ def preview_prompt(
         ALLOWED_PLACEHOLDERS,
         DEFAULT_IMAGE_PROMPT,
         DEFAULT_TEXT_PROMPT,
-        IMAGE_SAFETY_PREFIX,
         TEXT_SAFETY_PREFIX,
         PromptValidationError,
+        image_safety_prefix,
         prompt_context,
         render_body,
         sample_facts,
@@ -814,7 +817,7 @@ def preview_prompt(
     except PromptValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
     if prompt_kind == "image":
-        preview = IMAGE_SAFETY_PREFIX + "\n" + preview
+        preview = image_safety_prefix(sample_facts()) + "\n" + preview
     else:
         preview = TEXT_SAFETY_PREFIX + "\n" + preview
     items = db.scalars(
