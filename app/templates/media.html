@@ -1,1 +1,81 @@
-{% extends 'base.html' %}{% block content %}<h1>SMB-Medienbibliothek</h1><div class="{{'notice' if storage_ok else 'alert'}}">Medienwurzel: {{'erreichbar' if storage_ok else 'nicht erreichbar'}}</div><form method="get"><label>Mannschaft<select name="team_id" onchange="this.form.submit()">{% for t in teams %}<option value="{{t.id}}" {% if selected and t.id==selected.id %}selected{% endif %}>{{t.display_name}}</option>{% endfor %}</select></label></form>{% if selected %}<p>Konfigurierter Ordner: <code>{{selected.media_subdir}}</code>. Sichtbare Basisordner: {{folders|join(', ') or 'keine'}}</p><form method="post" action="/media/{{selected.id}}/scan"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Dateien neu einlesen</button></form><table><tr><th>Datei</th><th>Größe</th><th>Prüfsumme</th><th>Verfügbarkeit</th><th>Nutzung</th><th>Aktion</th></tr>{% for x in items %}<tr><td>{{x.filename}}<small>{{x.relative_path}}</small></td><td>{{x.size}}</td><td><code>{{x.checksum[:12]}}</code></td><td>{{'vorhanden' if x.available else 'entfernt'}}</td><td>{{x.uses}} / {{x.reserved_game_id or 'frei'}}</td><td><form method="post" action="/media/{{x.id}}/toggle"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>{{'Deaktivieren' if x.active else 'Aktivieren'}}</button></form></td></tr>{% endfor %}</table>{% endif %}{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>Spielerbilder</h1>
+<div class="{{ 'notice' if storage_ok else 'alert' }}">
+  Externe Medienwurzel: {{ 'erreichbar' if storage_ok else 'nicht erreichbar' }}
+</div>
+<form method="get">
+  <label>Mannschaft
+    <select name="team_id" onchange="this.form.submit()">
+      {% for team in teams %}
+      <option value="{{ team.id }}" {% if selected and team.id == selected.id %}selected{% endif %}>{{ team.display_name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</form>
+{% if selected %}
+<section>
+  <h2>Spielerbilder hochladen</h2>
+  <p>JPG, PNG oder WebP; maximal 20 MiB je Bild und höchstens 25 Dateien pro Upload.</p>
+  <form method="post" action="/media/{{ selected.id }}/upload" enctype="multipart/form-data">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Bilder auswählen
+      <input
+        type="file"
+        name="files"
+        accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+        multiple
+        required
+      >
+    </label>
+    <button>Spielerbilder hochladen</button>
+  </form>
+</section>
+<section>
+  <h2>Externe Medien einlesen</h2>
+  <p>
+    Konfigurierter Ordner: <code>{{ selected.media_subdir }}</code>.
+    Sichtbare Basisordner: {{ folders | join(', ') or 'keine' }}
+  </p>
+  <form method="post" action="/media/{{ selected.id }}/scan">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <button>Dateien neu einlesen</button>
+  </form>
+</section>
+<table>
+  <tr>
+    <th>Vorschau</th>
+    <th>Datei</th>
+    <th>Quelle</th>
+    <th>Größe</th>
+    <th>Prüfsumme</th>
+    <th>Verfügbarkeit</th>
+    <th>Nutzung</th>
+    <th>Aktion</th>
+  </tr>
+  {% for item in items %}
+  <tr>
+    <td>
+      {% if item.available %}
+      <img class="player-thumb" src="/media/{{ item.id }}/preview" alt="Vorschau {{ item.filename }}">
+      {% else %}
+      —
+      {% endif %}
+    </td>
+    <td>{{ item.filename }}<small>{{ item.player_name or 'Spieler nicht benannt' }}</small></td>
+    <td>{{ 'Dashboard-Upload' if item.storage_kind == 'upload' else 'Externer Ordner' }}</td>
+    <td>{{ item.size }}</td>
+    <td><code>{{ item.checksum[:12] }}</code></td>
+    <td>{{ 'vorhanden' if item.available else 'entfernt' }}</td>
+    <td>{{ item.uses }} / {{ item.reserved_game_id or 'frei' }}</td>
+    <td>
+      <form method="post" action="/media/{{ item.id }}/toggle">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button>{{ 'Deaktivieren' if item.active else 'Aktivieren' }}</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endblock %}
