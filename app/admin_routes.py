@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -1863,11 +1863,16 @@ def delete_mock_game(
     ):
         asset.reserved_game_id = None
         asset.uses = max(0, asset.uses - 1)
-    terminal_jobs = list(
-        db.scalars(select(GenerationJob).where(GenerationJob.game_id == game.id))
+    terminal_job_ids = list(
+        db.scalars(select(GenerationJob.id).where(GenerationJob.game_id == game.id))
     )
-    for job in terminal_jobs:
-        db.delete(job)
+    if terminal_job_ids:
+        db.execute(delete(GenerationJob).where(GenerationJob.game_id == game.id))
+
+    # SQLAlchemy kennt hier keine ORM-Beziehung, aus der es die erforderliche
+    # Reihenfolge ableiten könnte. Deshalb müssen Reservierungen und abhängige
+    # Generierungsaufträge vor dem DELETE des Spiels explizit geschrieben werden.
+    db.flush()
     audit(
         db,
         current,
@@ -1879,10 +1884,11 @@ def delete_mock_game(
             "home_team": game.home_team,
             "away_team": game.away_team,
             "kickoff": game.kickoff.isoformat(),
-            "removed_generation_jobs": len(terminal_jobs),
+            "removed_generation_jobs": len(terminal_job_ids),
         },
     )
     db.delete(game)
+    db.flush()
     db.commit()
     return redirect("/games", "Lokales Testspiel gelöscht")
 
