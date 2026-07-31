@@ -21,7 +21,7 @@ class SnapshotImportError(ValueError):
     pass
 
 
-BLOCKING_PROVIDER_STATUSES = {"cancelled", "postponed", "provisional"}
+HARD_BLOCKING_PROVIDER_STATUSES = {"cancelled", "postponed"}
 REAPPROVAL_POST_STATUSES = {
     PostStatus.APPROVED,
     PostStatus.SCHEDULED,
@@ -117,17 +117,42 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
         incoming_scores = (item.get("home_score"), item.get("away_score"))
         existing_overrides = dict(game.overrides or {}) if game else {}
         provisional_confirmed = bool(existing_overrides.get("provisional_confirmed_by"))
-        effective_status = (
-            game.status
-            if game and provider_status == "provisional" and provisional_confirmed
-            else provider_status
+        allow_provisional = bool((team.rules or {}).get("allow_provisional_games"))
+        provisional_allowed = provider_status == "provisional" and (
+            provisional_confirmed or allow_provisional
+        )
+        effective_status = "scheduled" if provisional_allowed else provider_status
+        automation_blocked = (
+            provider_status in HARD_BLOCKING_PROVIDER_STATUSES
+            or (provider_status == "provisional" and not provisional_allowed)
+        )
+        manual_venue_details = bool(existing_overrides.get("manual_venue_details"))
+        incoming_venue = item.get("venue")
+        incoming_pitch = item.get("pitch")
+        venue = (
+            game.venue
+            if game and manual_venue_details
+            else incoming_venue or (game.venue if game else None)
+        )
+        pitch = (
+            game.pitch
+            if game and manual_venue_details
+            else incoming_pitch or (game.pitch if game else None)
+        )
+        venue_address = (
+            existing_overrides.get("venue_address")
+            if manual_venue_details
+            else item.get("venue_address") or existing_overrides.get("venue_address")
         )
         provider_overrides = {
             "game_number": item.get("game_number"),
             "snapshot_id": snapshot.id,
             "provider_status": provider_status,
-            "automation_blocked": provider_status in BLOCKING_PROVIDER_STATUSES
-            and not (provider_status == "provisional" and provisional_confirmed),
+            "automation_blocked": automation_blocked,
+            "provisional_allowed_by_team_rule": bool(
+                provider_status == "provisional" and allow_provisional
+            ),
+            "venue_address": venue_address,
         }
         merged_overrides = {**existing_overrides, **provider_overrides}
         values = {
@@ -135,6 +160,8 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
             "away_team": item["away_team"],
             "kickoff": kickoff,
             "competition": item.get("competition"),
+            "venue": venue,
+            "pitch": pitch,
             "status": effective_status,
             "home_score": incoming_scores[0],
             "away_score": incoming_scores[1],
@@ -161,6 +188,10 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
                 game.away_team,
                 old_kickoff,
                 existing_overrides.get("provider_status", game.status),
+                game.status,
+                bool(existing_overrides.get("automation_blocked")),
+                game.venue,
+                game.pitch,
                 *old_scores,
             )
             relevant_after = (
@@ -168,6 +199,10 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
                 values["away_team"],
                 kickoff,
                 provider_status,
+                effective_status,
+                automation_blocked,
+                venue,
+                pitch,
                 *incoming_scores,
             )
             changed = any(_different(getattr(game, key), value) for key, value in values.items())

@@ -1,1 +1,38 @@
-{% extends 'base.html' %}{% block content %}<h1>Spielübernahme prüfen</h1><div class="warning">Diese Aktion übernimmt nur Spiele. Sie erzeugt keine Beiträge und keine Veröffentlichungsaufträge. Vorläufige Spiele bleiben für Automatisierung gesperrt.</div><p>Mannschaft: <strong>{{team.display_name if team else 'Unbekannt'}}</strong><br>Snapshot: {{snapshot.fetched_at}} · <code>{{snapshot.checksum}}</code></p><table><tr><th>ID</th><th>Begegnung</th><th>Anpfiff</th><th>Wettbewerb</th><th>Status</th></tr>{% for game in games %}<tr><td><code>{{game.external_id}}</code></td><td>{{game.home_team}} – {{game.away_team}}</td><td>{{game.kickoff_berlin}}</td><td>{{game.competition}} / {{game.game_number}}</td><td>{{game.status}}<small>{{game.warnings|join('; ')}}</small></td></tr>{% endfor %}</table><form method="post"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Bestätigung<input name="confirmation" placeholder="SPIELE ÜBERNEHMEN" required></label><button class="approve">Angezeigte Spiele kontrolliert übernehmen</button></form>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<h1>Spielübernahme prüfen</h1>
+<div class="warning">
+  Diese Aktion übernimmt nur Spiele. Sie erzeugt keine Beiträge und keine Veröffentlichungsaufträge.
+  {% if team and team.rules.get('allow_provisional_games') %}
+    Vorläufige Spiele werden laut Mannschaftsregel als geplant übernommen; der Providerstatus bleibt sichtbar.
+  {% else %}
+    Vorläufige Spiele bleiben für die Automatisierung gesperrt.
+  {% endif %}
+  Absagen und Verlegungen bleiben immer gesperrt.
+</div>
+<p>
+  Mannschaft: <strong>{{team.display_name if team else 'Unbekannt'}}</strong><br>
+  Snapshot: {{snapshot.fetched_at}} · <code>{{snapshot.checksum}}</code>
+</p>
+<table>
+  <tr><th>ID</th><th>Begegnung</th><th>Anpfiff</th><th>Wettbewerb</th><th>Spielort</th><th>Status</th></tr>
+  {% for game in games %}
+  <tr>
+    <td><code>{{game.external_id}}</code></td>
+    <td>{{game.home_team}} – {{game.away_team}}</td>
+    <td>{{game.kickoff_berlin}}</td>
+    <td>{{game.competition or '—'}}<small>Nr. {{game.game_number or '—'}}</small></td>
+    <td>
+      {{game.venue or 'Ort fehlt'}} · {{game.pitch or 'Platzart fehlt'}}
+      {% if game.venue_address %}<small>{{game.venue_address}}</small>{% endif %}
+    </td>
+    <td>{{game.status}}<small>{{game.warnings|join('; ')}}</small></td>
+  </tr>
+  {% endfor %}
+</table>
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{csrf}}">
+  <label>Bestätigung<input name="confirmation" placeholder="SPIELE ÜBERNEHMEN" required></label>
+  <button class="approve">Angezeigte Spiele kontrolliert übernehmen</button>
+</form>
+{% endblock %}

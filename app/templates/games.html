@@ -21,7 +21,12 @@
     <td>{{x.home_team}} – {{x.away_team}}</td>
     <td>{{x.kickoff|berlin}}</td>
     <td>{{x.provider}} / {{x.source_url}}</td>
-    <td>{{x.status}}</td>
+    <td>
+      {{x.status}}
+      {% if x.overrides.get('provider_status')=='provisional' %}
+        <small>FUSSBALL.DE: vorläufig{% if x.overrides.get('provisional_allowed_by_team_rule') %} · laut Mannschaftsregel zugelassen{% endif %}</small>
+      {% endif %}
+    </td>
     <td>
       {% set logo=logo_map.get(x.id) %}
       <strong>{{opponents.get(x.id,'Gegner')}}</strong>
@@ -37,6 +42,7 @@
     <td>
       <details>
         <summary>{{x.competition or 'Wettbewerb fehlt'}} · {{x.venue or 'Ort fehlt'}} · {{x.pitch or 'Platzart fehlt'}}</summary>
+        {% if x.overrides.get('venue_address') %}<small>Anschrift: {{x.overrides.get('venue_address')}}</small>{% endif %}
         <form method="post" action="/games/{{x.id}}/details">
           <input type="hidden" name="csrf_token" value="{{csrf}}">
           <label>Wettbewerb<input name="competition" value="{{x.competition or ''}}" required></label>
