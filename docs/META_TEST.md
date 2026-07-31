@@ -33,6 +33,17 @@ geprüften offiziellen Sammlung gezeigten Version und ist ausdrücklich
 konfigurierbar. Vor einem realen Test ist zu prüfen, ob Meta inzwischen eine
 andere unterstützte Version verlangt.
 
+Der Instagram-Login-Flow stellt keinen Facebook-Graph-Endpunkt
+`/me/permissions` bereit. Die Anwendung fordert deshalb im OAuth-Dialog exakt
+die beiden oben genannten Scopes an und speichert diesen OAuth-Grant nach einem
+erfolgreichen Codeaustausch. Verbindungstests validieren Token, Konto-ID,
+Benutzername und Kontoart über den unterstützten Instagram-Endpunkt `/me` und
+prüfen zusätzlich den gespeicherten Scope-Satz. Ein fehlender gespeicherter
+Scope sperrt die Verbindung; der ungültige `/me/permissions`-Aufruf wird nicht
+verwendet. Effektiv entzogene Rechte werden außerdem von jedem konkreten
+Instagram-Endpunkt abgewiesen und niemals durch einen automatischen Retry
+umgangen.
+
 Feed und Story verwenden eine öffentlich erreichbare `image_url`. Für eine
 Bild-Story sendet die Anwendung `media_type=STORIES` und keine erfundene
 Caption. Die Container-ID wird vor jedem weiteren Schritt persistent

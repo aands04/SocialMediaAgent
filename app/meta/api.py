@@ -172,19 +172,6 @@ class MetaApiClient:
             headers={"Authorization": f"Bearer {access_token}"},
         )
 
-    def permissions(self, access_token: str) -> set[str]:
-        data = self._request_json(
-            "GET",
-            f"{self.base}/me/permissions",
-            "Berechtigungsprüfung",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        return {
-            str(item.get("permission"))
-            for item in data.get("data", [])
-            if item.get("status") == "granted"
-        }
-
     def create_container(
         self,
         *,
