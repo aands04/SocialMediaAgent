@@ -2,6 +2,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -163,6 +164,14 @@ def player_image(image_format="JPEG", color=(20, 90, 200)):
     return buffer.getvalue()
 
 
+def player_image_archive(entries: dict[str, bytes]):
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    return buffer.getvalue()
+
+
 def test_player_images_can_be_uploaded_from_dashboard(browser, tmp_path, monkeypatch):
     client, factory = browser
     media_root = tmp_path / "external-media"
@@ -265,6 +274,83 @@ def test_player_images_can_be_uploaded_from_dashboard(browser, tmp_path, monkeyp
                 team_id=team_id, storage_kind="upload"
             )
         )
+
+
+def test_player_images_can_be_uploaded_as_safe_zip_archive(browser, tmp_path, monkeypatch):
+    client, factory = browser
+    upload_root = tmp_path / "uploads"
+    import app.admin_routes as admin_routes
+
+    monkeypatch.setattr(admin_routes.settings, "upload_root", upload_root)
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="player-zip-upload",
+            display_name="Player ZIP Upload",
+            username="player-zip-upload",
+            club="SV Ehlen",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="zip-upload-team",
+            display_name="SV Ehlen",
+            short_name="SVE",
+            slug="zip-upload-team",
+            club="SV Ehlen",
+            fussball_url="https://www.fussball.de/team",
+            instagram_page_id=page.id,
+            media_subdir="erste",
+        )
+        db.add(team)
+        db.commit()
+        team_id = team.id
+
+    archive = player_image_archive(
+        {
+            f"mannschaft/SVE_{number:02d}.png": player_image(
+                "PNG", color=(number * 10, 90, 200)
+            )
+            for number in range(25)
+        }
+    )
+    response = client.post(
+        f"/media/{team_id}/upload",
+        data={"csrf_token": session_csrf(client)},
+        files={"archive": ("spielerbilder.zip", archive, "application/zip")},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "25%20Spielerbilder%20hochgeladen" in response.headers["location"]
+    with factory() as db:
+        assets = db.query(MediaAsset).filter_by(team_id=team_id).all()
+        assert len(assets) == 25
+        assert {asset.storage_kind for asset in assets} == {"upload"}
+        assert all((upload_root / asset.relative_path).is_file() for asset in assets)
+
+    unsafe_archive = player_image_archive({"../escape.jpg": player_image()})
+    rejected = client.post(
+        f"/media/{team_id}/upload",
+        data={"csrf_token": session_csrf(client)},
+        files={"archive": ("unsicher.zip", unsafe_archive, "application/zip")},
+    )
+    assert rejected.status_code == 422
+    assert "unsicherer Pfad" in rejected.json()["detail"]
+    assert not (tmp_path / "escape.jpg").exists()
+    with factory() as db:
+        assert db.query(MediaAsset).filter_by(team_id=team_id).count() == 25
+
+    page = client.get(f"/media?team_id={team_id}")
+    assert "Alternativ ZIP-Archiv auswählen" in page.text
+
+
+def test_nginx_allows_large_requests_only_for_player_image_uploads():
+    config = (
+        Path(__file__).parents[1] / "deploy" / "nginx" / "default.conf"
+    ).read_text(encoding="utf-8")
+    assert "client_max_body_size 20m;" in config
+    assert "location ~ ^/media/[A-Za-z0-9_-]+/upload$" in config
+    assert "client_max_body_size 512m;" in config
 
 
 def test_player_image_upload_rejects_fake_images(browser, tmp_path, monkeypatch):

@@ -16,7 +16,10 @@
 {% if selected %}
 <section>
   <h2>Spielerbilder hochladen</h2>
-  <p>JPG, PNG oder WebP; maximal 20 MiB je Bild und höchstens 25 Dateien pro Upload.</p>
+  <p>
+    Bis zu 25 Bilder als einzelne JPG-, PNG- oder WebP-Dateien oder gemeinsam
+    in einem ZIP-Archiv; maximal 20 MiB je entpacktem Bild.
+  </p>
   <form method="post" action="/media/{{ selected.id }}/upload" enctype="multipart/form-data">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <label>Bilder auswählen
@@ -25,7 +28,13 @@
         name="files"
         accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
         multiple
-        required
+      >
+    </label>
+    <label>Alternativ ZIP-Archiv auswählen
+      <input
+        type="file"
+        name="archive"
+        accept=".zip,application/zip,application/x-zip-compressed"
       >
     </label>
     <button>Spielerbilder hochladen</button>
