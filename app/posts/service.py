@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.games.identity import resolve_team_side, team_aliases
 from app.logos.service import LogoCompositor, LogoValidationError, frozen_logo_set
 from app.models import (
     DesignTemplate,
@@ -131,7 +132,9 @@ def _facts(
     kickoff=game.kickoff.replace(tzinfo=timezone.utc) if game.kickoff.tzinfo is None else game.kickoff
     logos=logos or frozen_logo_set(db,game,team)
     team_logo=logos.get("team") or {}; opponent_logo=logos.get("opponent") or {}
-    facts={"home_team":game.home_team,"away_team":game.away_team,"own_team":team.display_name,"kickoff":kickoff.isoformat(),"venue":game.venue,"pitch":game.pitch,"competition":game.competition,"post_type":post_type,"hashtags":team.hashtags,"primary_color":team.colors.get("primary"),"secondary_color":team.colors.get("secondary"),"style_direction":team.rules.get("style_direction"),"team_short":team.short_name,"side_label":"Heimspiel" if game.home_team in {team.display_name,team.club} else "Auswärtsspiel","player_image":_media_path(asset),"team_logo":_upload_path(team_logo.get("path")),"opponent_logo":_upload_path(opponent_logo.get("path")) if not opponent_logo.get("fallback") else None,"logos":logos,"primary_font_asset":primary_font,"secondary_font_asset":secondary_font}
+    aliases=team_aliases(team)
+    side=resolve_team_side(game.home_team,game.away_team,aliases)
+    facts={"home_team":game.home_team,"away_team":game.away_team,"own_team":team.display_name,"own_team_aliases":list(aliases),"kickoff":kickoff.isoformat(),"venue":game.venue,"pitch":game.pitch,"competition":game.competition,"post_type":post_type,"hashtags":team.hashtags,"primary_color":team.colors.get("primary"),"secondary_color":team.colors.get("secondary"),"style_direction":team.rules.get("style_direction"),"team_short":team.short_name,"side_label":"Heimspiel" if side=="home" else "Auswärtsspiel","player_image":_media_path(asset),"team_logo":_upload_path(team_logo.get("path")),"opponent_logo":_upload_path(opponent_logo.get("path")) if not opponent_logo.get("fallback") else None,"logos":logos,"primary_font_asset":primary_font,"secondary_font_asset":secondary_font}
     if post_type=="result" and game.result_confirmed:facts["score"]=f"{game.home_score}:{game.away_score}"
     if post_type=="result" and not game.result_confirmed: raise ValueError("Ergebnis ist nicht bestätigt")
     return facts

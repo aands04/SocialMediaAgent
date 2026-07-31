@@ -14,6 +14,7 @@ from app.approvals.service import ApprovalError, approve, edit_text
 from app.auth.service import hash_password
 from app.config import get_settings
 from app.db import get_db
+from app.games.identity import team_name_variants
 from app.logos.service import (
     LogoValidationError,
     normalize_club_name,
@@ -1759,8 +1760,8 @@ def create_mock_game(
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
     team_id: str = Form(),
-    home_team: str = Form(),
-    away_team: str = Form(),
+    opponent: str = Form(),
+    side: str = Form(),
     kickoff: str = Form(),
     competition: str = Form(default=""),
     venue: str = Form(default=""),
@@ -1770,6 +1771,24 @@ def create_mock_game(
 ):
     check_csrf(request, csrf_token_value)
     require(current, db, "edit_game", team_id)
+    team = db.get(Team, team_id)
+    if not team or team.archived_at:
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    opponent = opponent.strip()
+    if not opponent:
+        raise HTTPException(422, "Gegner muss angegeben werden")
+    if side not in {"home", "away"}:
+        raise HTTPException(422, "Bitte Heim- oder Auswärtsspiel auswählen")
+    own_variants = set().union(
+        team_name_variants(team.display_name),
+        team_name_variants(team.club),
+    )
+    if own_variants & team_name_variants(opponent):
+        raise HTTPException(422, "Der Gegner darf nicht die eigene Mannschaft sein")
+    own_name = team.display_name
+    home_team, away_team = (
+        (own_name, opponent) if side == "home" else (opponent, own_name)
+    )
     from zoneinfo import ZoneInfo
 
     try:
@@ -1802,6 +1821,70 @@ def create_mock_game(
     audit(db, current, "game.mock_created", "game", item.id, team_id)
     db.commit()
     return redirect("/games", "Lokales Testspiel angelegt")
+
+
+@router.post("/games/{game_id}/delete-mock")
+def delete_mock_game(
+    game_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    game = db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "Spiel nicht gefunden")
+    require(current, db, "edit_game", game.team_id)
+    if game.provider != "mock" or game.source_url != "fixture://dashboard":
+        raise HTTPException(409, "Nur lokal angelegte Mock-Spiele können gelöscht werden")
+    if db.scalar(select(Post.id).where(Post.game_id == game.id)):
+        raise HTTPException(
+            409,
+            "Das Mock-Spiel besitzt bereits einen Beitrag und kann nicht gelöscht werden",
+        )
+    active_statuses = {
+        GenerationJobStatus.QUEUED,
+        GenerationJobStatus.RUNNING,
+        GenerationJobStatus.RETRY_WAIT,
+    }
+    if db.scalar(
+        select(GenerationJob.id).where(
+            GenerationJob.game_id == game.id,
+            GenerationJob.status.in_(active_statuses),
+        )
+    ):
+        raise HTTPException(
+            409,
+            "Für dieses Mock-Spiel läuft noch ein Generierungsauftrag",
+        )
+    for asset in db.scalars(
+        select(MediaAsset).where(MediaAsset.reserved_game_id == game.id)
+    ):
+        asset.reserved_game_id = None
+        asset.uses = max(0, asset.uses - 1)
+    terminal_jobs = list(
+        db.scalars(select(GenerationJob).where(GenerationJob.game_id == game.id))
+    )
+    for job in terminal_jobs:
+        db.delete(job)
+    audit(
+        db,
+        current,
+        "game.mock_deleted",
+        "game",
+        game.id,
+        game.team_id,
+        {
+            "home_team": game.home_team,
+            "away_team": game.away_team,
+            "kickoff": game.kickoff.isoformat(),
+            "removed_generation_jobs": len(terminal_jobs),
+        },
+    )
+    db.delete(game)
+    db.commit()
+    return redirect("/games", "Lokales Testspiel gelöscht")
 
 
 @router.post("/games/{game_id}/details")

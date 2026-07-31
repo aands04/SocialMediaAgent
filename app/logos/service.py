@@ -1,6 +1,4 @@
 import hashlib
-import re
-import unicodedata
 from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
@@ -10,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.games.identity import normalize_team_name, opponent_for_game
 from app.models import LogoAsset
 
 MAX_LOGO_SIZE = 5 * 1024 * 1024
@@ -24,16 +23,11 @@ class LogoValidationError(ValueError):
 
 
 def normalize_club_name(value: str) -> str:
-    value = unicodedata.normalize("NFKC", value or "").replace("\u200b", "")
-    value = value.casefold().replace("&", " und ")
-    value = re.sub(r"[^a-z0-9äöüß]+", " ", value)
-    return " ".join(value.split())
+    return normalize_team_name(value)
 
 
 def opponent_name(game, team) -> str:
-    own_names = {normalize_club_name(team.display_name), normalize_club_name(team.club)}
-    home = normalize_club_name(game.home_team)
-    return game.away_team if home in own_names else game.home_team
+    return opponent_for_game(game, team)
 
 
 def _inspect_image(data: bytes, suffix: str, content_type: str | None) -> tuple[str, int, int]:

@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.games.identity import TeamIdentityError, resolve_team_side
 from app.models import PromptTemplate
 
 
@@ -183,13 +184,12 @@ def _own_and_opponent(facts: dict) -> tuple[str, str, bool]:
     away = str(facts.get("away_team") or "").strip()
     if not own:
         raise PromptValidationError("Eigene Mannschaft fehlt")
-    if own == home:
-        return own, away, True
-    if own == away:
-        return own, home, False
-    raise PromptValidationError(
-        "Eigene Mannschaft konnte der Spielpaarung nicht eindeutig zugeordnet werden"
-    )
+    aliases = [own, *(facts.get("own_team_aliases") or [])]
+    try:
+        side = resolve_team_side(home, away, aliases)
+    except TeamIdentityError as exc:
+        raise PromptValidationError(str(exc)) from exc
+    return (home, away, True) if side == "home" else (away, home, False)
 
 
 def _place_name(venue: str) -> str:
