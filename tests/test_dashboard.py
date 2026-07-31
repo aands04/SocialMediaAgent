@@ -1,6 +1,7 @@
 import re
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +24,7 @@ from app.models import (
     InstagramConnection,
     InstagramPage,
     LogoAsset,
+    MediaAsset,
     Post,
     PromptTemplate,
     ProviderSnapshot,
@@ -153,6 +155,157 @@ def logo_png(color=(20, 90, 200, 255)):
     return buffer.getvalue()
 
 
+def player_image(image_format="JPEG", color=(20, 90, 200)):
+    buffer = BytesIO()
+    image = Image.new("RGB", (900, 1200), color)
+    ImageDraw.Draw(image).rectangle((250, 120, 650, 1100), fill=(240, 240, 240))
+    image.save(buffer, image_format)
+    return buffer.getvalue()
+
+
+def test_player_images_can_be_uploaded_from_dashboard(browser, tmp_path, monkeypatch):
+    client, factory = browser
+    media_root = tmp_path / "external-media"
+    upload_root = tmp_path / "uploads"
+    (media_root / "erste_mannschaft" / "spieler").mkdir(parents=True)
+    import app.admin_routes as admin_routes
+
+    monkeypatch.setattr(admin_routes.settings, "media_root", media_root)
+    monkeypatch.setattr(admin_routes.settings, "upload_root", upload_root)
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="player-upload",
+            display_name="Player Upload",
+            username="player-upload",
+            club="SV Ehlen",
+            active=True,
+            connection_status="connected",
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="upload-team",
+            display_name="SV Ehlen",
+            short_name="SVE",
+            slug="upload-team",
+            club="SV Ehlen",
+            fussball_url="https://www.fussball.de/team",
+            instagram_page_id=page.id,
+            media_subdir="erste_mannschaft/spieler",
+        )
+        db.add(team)
+        db.commit()
+        team_id = team.id
+
+    token = session_csrf(client)
+    assert client.post(
+        f"/media/{team_id}/upload",
+        data={"csrf_token": "wrong"},
+        files={"files": ("spieler.jpg", player_image(), "image/jpeg")},
+    ).status_code == 403
+    response = client.post(
+        f"/media/{team_id}/upload",
+        data={"csrf_token": token},
+        files=[
+            ("files", ("Max_Mustermann.jpg", player_image(), "image/jpeg")),
+            ("files", ("Erika-Musterfrau.png", player_image("PNG"), "image/png")),
+        ],
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "2%20Spielerbilder%20hochgeladen" in response.headers["location"]
+
+    with factory() as db:
+        assets = db.query(MediaAsset).filter_by(team_id=team_id).order_by(MediaAsset.filename).all()
+        assert len(assets) == 2
+        assert {asset.storage_kind for asset in assets} == {"upload"}
+        assert {asset.player_name for asset in assets} == {
+            "Erika Musterfrau",
+            "Max Mustermann",
+        }
+        for asset in assets:
+            assert not Path(asset.relative_path).is_absolute()
+            assert (upload_root / asset.relative_path).is_file()
+        asset_id = assets[0].id
+        import app.posts.service as post_service
+
+        monkeypatch.setattr(post_service, "get_settings", lambda: admin_routes.settings)
+        assert Path(post_service._media_path(assets[0])).is_relative_to(upload_root)
+        assert db.query(AuditLog).filter_by(action="media.player_images_uploaded").count() == 1
+
+    preview = client.get(f"/media/{asset_id}/preview")
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] in {"image/jpeg", "image/png"}
+    page = client.get(f"/media?team_id={team_id}")
+    assert page.status_code == 200
+    assert "Spielerbilder hochladen" in page.text
+    assert "Dashboard-Upload" in page.text
+    assert f'/media/{asset_id}/preview' in page.text
+
+    duplicate = client.post(
+        f"/media/{team_id}/upload",
+        data={"csrf_token": token},
+        files={"files": ("Kopie.jpg", player_image(), "image/jpeg")},
+        follow_redirects=False,
+    )
+    assert duplicate.status_code == 303
+    with factory() as db:
+        assert db.query(MediaAsset).filter_by(team_id=team_id).count() == 2
+
+    scan = client.post(
+        f"/media/{team_id}/scan",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert scan.status_code == 303
+    with factory() as db:
+        assert all(
+            asset.available
+            for asset in db.query(MediaAsset).filter_by(
+                team_id=team_id, storage_kind="upload"
+            )
+        )
+
+
+def test_player_image_upload_rejects_fake_images(browser, tmp_path, monkeypatch):
+    client, factory = browser
+    import app.admin_routes as admin_routes
+
+    monkeypatch.setattr(admin_routes.settings, "upload_root", tmp_path / "uploads")
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="invalid-player-upload",
+            display_name="Invalid Player Upload",
+            username="invalid-player-upload",
+            club="SV Ehlen",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="invalid-upload-team",
+            display_name="SV Ehlen",
+            short_name="SVE",
+            slug="invalid-upload-team",
+            club="SV Ehlen",
+            fussball_url="https://www.fussball.de/team",
+            instagram_page_id=page.id,
+            media_subdir="erste",
+        )
+        db.add(team)
+        db.commit()
+        team_id = team.id
+    response = client.post(
+        f"/media/{team_id}/upload",
+        data={"csrf_token": session_csrf(client)},
+        files={"files": ("kein-bild.jpg", b"not-an-image", "image/jpeg")},
+    )
+    assert response.status_code == 422
+    assert "keine technisch lesbare Bilddatei" in response.json()["detail"]
+    with factory() as db:
+        assert db.query(MediaAsset).filter_by(team_id=team_id).count() == 0
+
+
 def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch):
     client, factory = browser
     upload_root = tmp_path / "uploads"
@@ -226,7 +379,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260730-logo-previews" in teams_page
+    assert "/static/style.css?v=20260731-player-uploads" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text

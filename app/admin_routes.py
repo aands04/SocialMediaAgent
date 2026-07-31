@@ -20,7 +20,14 @@ from app.logos.service import (
     opponent_name,
     store_logo,
 )
-from app.media.storage import LocalStorageProvider, StorageError
+from app.media.storage import LocalStorageProvider, StorageError, media_asset_path
+from app.media.uploads import (
+    MAX_PLAYER_IMAGE_BYTES,
+    MAX_PLAYER_IMAGE_FILES,
+    PlayerImageUploadError,
+    store_player_image,
+    validate_player_image,
+)
 from app.models import (
     AuditLog,
     DesignTemplate,
@@ -649,7 +656,9 @@ def scan_media(
         stat = after
         asset = db.scalar(
             select(MediaAsset).where(
-                MediaAsset.team_id == team.id, MediaAsset.relative_path == relative
+                MediaAsset.team_id == team.id,
+                MediaAsset.storage_kind == "external",
+                MediaAsset.relative_path == relative,
             )
         )
         values = {
@@ -664,14 +673,159 @@ def scan_media(
             for key, value in values.items():
                 setattr(asset, key, value)
         else:
-            db.add(MediaAsset(team_id=team.id, relative_path=relative, active=True, **values))
-    for asset in db.scalars(select(MediaAsset).where(MediaAsset.team_id == team.id)):
+            db.add(
+                MediaAsset(
+                    team_id=team.id,
+                    storage_kind="external",
+                    relative_path=relative,
+                    active=True,
+                    **values,
+                )
+            )
+    for asset in db.scalars(
+        select(MediaAsset).where(
+            MediaAsset.team_id == team.id,
+            MediaAsset.storage_kind == "external",
+        )
+    ):
         if asset.relative_path not in seen:
             asset.available = False
     team.last_sync_at = datetime.now(timezone.utc)
     audit(db, current, "media.scanned", "team", team.id, team.id, {"files": len(seen)})
     db.commit()
     return redirect(f"/media?team_id={team.id}", f"{len(seen)} Dateien eingelesen")
+
+
+@router.post("/media/{team_id}/upload")
+async def upload_player_images(
+    team_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    files: list[UploadFile] = File(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require(current, db, "generate", team_id)
+    team = db.get(Team, team_id)
+    if not team:
+        raise HTTPException(404)
+    if not files:
+        raise HTTPException(422, "Mindestens ein Spielerbild auswählen")
+    if len(files) > MAX_PLAYER_IMAGE_FILES:
+        raise HTTPException(
+            422,
+            f"Pro Upload sind höchstens {MAX_PLAYER_IMAGE_FILES} Spielerbilder erlaubt",
+        )
+
+    validated = []
+    try:
+        for file in files:
+            content = await file.read(MAX_PLAYER_IMAGE_BYTES + 1)
+            validated.append(
+                validate_player_image(file.filename or "", file.content_type, content)
+            )
+    except PlayerImageUploadError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    created_paths: list[Path] = []
+    created_assets: list[MediaAsset] = []
+    skipped: list[str] = []
+    batch_checksums: set[str] = set()
+    try:
+        for image in validated:
+            if image.checksum in batch_checksums:
+                skipped.append(image.original_filename)
+                continue
+            batch_checksums.add(image.checksum)
+            existing = db.scalar(
+                select(MediaAsset).where(
+                    MediaAsset.team_id == team.id,
+                    MediaAsset.checksum == image.checksum,
+                    MediaAsset.available.is_(True),
+                )
+            )
+            if existing:
+                try:
+                    media_asset_path(existing, settings.media_root, settings.upload_root)
+                except StorageError:
+                    existing.available = False
+                else:
+                    skipped.append(image.original_filename)
+                    continue
+
+            relative, target = store_player_image(settings.upload_root, team.id, image)
+            created_paths.append(target)
+            stat = target.stat()
+            asset = MediaAsset(
+                team_id=team.id,
+                storage_kind="upload",
+                relative_path=relative,
+                filename=image.original_filename,
+                mime_type=image.mime_type,
+                size=stat.st_size,
+                checksum=image.checksum,
+                mtime=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
+                player_name=image.player_name or None,
+                active=True,
+                available=True,
+            )
+            db.add(asset)
+            created_assets.append(asset)
+        db.flush()
+        team.last_sync_at = datetime.now(timezone.utc)
+        audit(
+            db,
+            current,
+            "media.player_images_uploaded",
+            "team",
+            team.id,
+            team.id,
+            {
+                "created": [
+                    {
+                        "asset_id": asset.id,
+                        "filename": asset.filename,
+                        "checksum": asset.checksum,
+                    }
+                    for asset in created_assets
+                ],
+                "duplicates_skipped": skipped,
+            },
+        )
+        db.commit()
+    except PlayerImageUploadError as exc:
+        db.rollback()
+        for path in created_paths:
+            path.unlink(missing_ok=True)
+        raise HTTPException(422, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        for path in created_paths:
+            path.unlink(missing_ok=True)
+        raise
+
+    message = f"{len(created_assets)} Spielerbilder hochgeladen"
+    if skipped:
+        message += f", {len(skipped)} Duplikate übersprungen"
+    return redirect(f"/media?team_id={team.id}", message)
+
+
+@router.get("/media/{asset_id}/preview")
+def preview_media(
+    asset_id: str,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    asset = db.get(MediaAsset, asset_id)
+    if not asset:
+        raise HTTPException(404)
+    require(current, db, "view", asset.team_id)
+    try:
+        path = media_asset_path(asset, settings.media_root, settings.upload_root)
+    except StorageError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return FileResponse(path, media_type=asset.mime_type)
 
 
 @router.post("/media/{asset_id}/toggle")

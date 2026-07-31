@@ -80,13 +80,12 @@ def _font(db: Session, configured: str) -> dict | None:
     return {"id": item.id, "family": item.family, "path": item.relative_path} if item else None
 
 
-def _media_path(relative: str | None) -> str | None:
-    if not relative:
+def _media_path(asset: MediaAsset | None) -> str | None:
+    if not asset:
         return None
-    path = Path(relative)
-    if path.is_absolute():
-        return str(path)
-    return str(get_settings().media_root / path)
+    settings = get_settings()
+    root = settings.upload_root if asset.storage_kind == "upload" else settings.media_root
+    return str(root / asset.relative_path)
 
 
 def _upload_path(relative: str | None) -> str | None:
@@ -132,7 +131,7 @@ def _facts(
     kickoff=game.kickoff.replace(tzinfo=timezone.utc) if game.kickoff.tzinfo is None else game.kickoff
     logos=logos or frozen_logo_set(db,game,team)
     team_logo=logos.get("team") or {}; opponent_logo=logos.get("opponent") or {}
-    facts={"home_team":game.home_team,"away_team":game.away_team,"own_team":team.display_name,"kickoff":kickoff.isoformat(),"venue":game.venue,"pitch":game.pitch,"competition":game.competition,"post_type":post_type,"hashtags":team.hashtags,"primary_color":team.colors.get("primary"),"secondary_color":team.colors.get("secondary"),"style_direction":team.rules.get("style_direction"),"team_short":team.short_name,"side_label":"Heimspiel" if game.home_team in {team.display_name,team.club} else "Auswärtsspiel","player_image":_media_path(asset.relative_path) if asset else None,"team_logo":_upload_path(team_logo.get("path")),"opponent_logo":_upload_path(opponent_logo.get("path")) if not opponent_logo.get("fallback") else None,"logos":logos,"primary_font_asset":primary_font,"secondary_font_asset":secondary_font}
+    facts={"home_team":game.home_team,"away_team":game.away_team,"own_team":team.display_name,"kickoff":kickoff.isoformat(),"venue":game.venue,"pitch":game.pitch,"competition":game.competition,"post_type":post_type,"hashtags":team.hashtags,"primary_color":team.colors.get("primary"),"secondary_color":team.colors.get("secondary"),"style_direction":team.rules.get("style_direction"),"team_short":team.short_name,"side_label":"Heimspiel" if game.home_team in {team.display_name,team.club} else "Auswärtsspiel","player_image":_media_path(asset),"team_logo":_upload_path(team_logo.get("path")),"opponent_logo":_upload_path(opponent_logo.get("path")) if not opponent_logo.get("fallback") else None,"logos":logos,"primary_font_asset":primary_font,"secondary_font_asset":secondary_font}
     if post_type=="result" and game.result_confirmed:facts["score"]=f"{game.home_score}:{game.away_score}"
     if post_type=="result" and not game.result_confirmed: raise ValueError("Ergebnis ist nicht bestätigt")
     return facts
