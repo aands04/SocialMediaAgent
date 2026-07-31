@@ -5,8 +5,8 @@
 <form method="post" action="/games/mock" class="gridform">
   <input type="hidden" name="csrf_token" value="{{csrf}}">
   <label>Mannschaft<select name="team_id">{% for t in teams %}<option value="{{t.id}}">{{t.display_name}}</option>{% endfor %}</select></label>
-  <label>Heimteam<input name="home_team" required></label>
-  <label>Gastteam<input name="away_team" required></label>
+  <label>Gegner<input name="opponent" required></label>
+  <label>Heim / Auswärts<select name="side" required><option value="home">Heimspiel</option><option value="away">Auswärtsspiel</option></select></label>
   <label>Anpfiff (Europe/Berlin)<input type="datetime-local" name="kickoff" required></label>
   <label>Wettbewerb<input name="competition"></label>
   <label>Spielort<input name="venue"></label>
@@ -58,6 +58,12 @@
         <input type="hidden" name="csrf_token" value="{{csrf}}">
         <input name="confirmation" placeholder="VORLÄUFIGES SPIEL BESTÄTIGEN" required>
         <button class="warning">Manuell bestätigen</button>
+      </form>
+      {% endif %}
+      {% if x.provider=='mock' and x.source_url=='fixture://dashboard' %}
+      <form method="post" action="/games/{{x.id}}/delete-mock" onsubmit="return confirm('Dieses lokale Mock-Spiel wirklich löschen?');">
+        <input type="hidden" name="csrf_token" value="{{csrf}}">
+        <button class="danger">Mock-Spiel löschen</button>
       </form>
       {% endif %}
     </td>

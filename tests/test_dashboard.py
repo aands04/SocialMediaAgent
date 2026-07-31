@@ -22,6 +22,7 @@ from app.models import (
     Game,
     GenerationJob,
     GenerationJobStatus,
+    GenerationJobType,
     InstagramConnection,
     InstagramPage,
     LogoAsset,
@@ -610,8 +611,8 @@ def test_dashboard_admin_flow(browser):
         data={
             "csrf_token": token,
             "team_id": team.id,
-            "home_team": "SV Test",
-            "away_team": "FC Fixture",
+            "opponent": "FC Fixture",
+            "side": "home",
             "kickoff": "2026-08-10T18:00",
             "venue": "Testplatz",
         },
@@ -888,3 +889,164 @@ def test_prompt_dashboard_previews_without_api_and_versions_templates(browser):
         },
     )
     assert rejected.status_code == 422
+
+
+def test_mock_game_uses_opponent_and_side_and_can_be_deleted(browser):
+    client, factory = browser
+    token = session_csrf(client)
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="mock-page",
+            display_name="Mock-Seite",
+            username="mockseite",
+            club="SV Ehlen",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="erste-mannschaft",
+            display_name="SV Ehlen I",
+            short_name="I",
+            slug="mock-team-delete",
+            club="SV Ehlen",
+            fussball_url="https://www.fussball.de/mock-team",
+            instagram_page_id=page.id,
+            media_subdir="erste_mannschaft/spieler",
+        )
+        db.add(team)
+        db.commit()
+        team_id = team.id
+
+    page = client.get("/games")
+    assert 'name="opponent"' in page.text
+    assert 'name="side"' in page.text
+    assert 'name="home_team"' not in page.text
+
+    result = client.post(
+        "/games/mock",
+        data={
+            "csrf_token": token,
+            "team_id": team_id,
+            "opponent": "Testverein Kassel",
+            "side": "home",
+            "kickoff": "2026-08-08T13:00",
+            "competition": "Freundschaftsspiel",
+            "venue": "Habichtswaldstadion Ehlen",
+            "pitch": "Rasenplatz",
+        },
+        follow_redirects=False,
+    )
+    assert result.status_code == 303
+    with factory() as db:
+        game = db.query(Game).one()
+        assert (game.home_team, game.away_team) == (
+            "SV Ehlen I",
+            "Testverein Kassel",
+        )
+        failed = GenerationJob(
+            job_type=GenerationJobType.CREATE_POST,
+            game_id=game.id,
+            team_id=team_id,
+            post_type="announcement",
+            requested_by=db.query(User).one().id,
+            status=GenerationJobStatus.FAILED,
+            phase="generating_text",
+            idempotency_key=f"failed:{game.id}",
+            active_key=None,
+        )
+        asset = MediaAsset(
+            team_id=team_id,
+            relative_path="uploaded/mock-player.png",
+            filename="mock-player.png",
+            mime_type="image/png",
+            size=123,
+            checksum="mock-player-checksum",
+            mtime=datetime.now(timezone.utc),
+            reserved_game_id=game.id,
+            uses=1,
+        )
+        db.add_all([failed, asset])
+        db.commit()
+        game_id = game.id
+        asset_id = asset.id
+
+    result = client.post(
+        f"/games/{game_id}/delete-mock",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert result.status_code == 303
+    with factory() as db:
+        assert db.get(Game, game_id) is None
+        assert db.query(GenerationJob).count() == 0
+        asset = db.get(MediaAsset, asset_id)
+        assert asset.reserved_game_id is None and asset.uses == 0
+        deleted = db.query(AuditLog).filter_by(action="game.mock_deleted").one()
+        assert deleted.entity_id == game_id
+
+    result = client.post(
+        "/games/mock",
+        data={
+            "csrf_token": token,
+            "team_id": team_id,
+            "opponent": "FC Auswärts",
+            "side": "away",
+            "kickoff": "2026-08-15T15:00",
+        },
+        follow_redirects=False,
+    )
+    assert result.status_code == 303
+    with factory() as db:
+        away_game = db.query(Game).one()
+        assert (away_game.home_team, away_game.away_team) == (
+            "FC Auswärts",
+            "SV Ehlen I",
+        )
+
+
+def test_real_provider_game_cannot_be_deleted_from_dashboard(browser):
+    client, factory = browser
+    token = session_csrf(client)
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="real-page",
+            display_name="Real-Seite",
+            username="realseite",
+            club="SV Ehlen",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="real-team",
+            display_name="SV Ehlen I",
+            short_name="I",
+            slug="real-team-delete-protection",
+            club="SV Ehlen",
+            fussball_url="https://www.fussball.de/real-team",
+            instagram_page_id=page.id,
+            media_subdir="erste_mannschaft/spieler",
+        )
+        db.add(team)
+        db.flush()
+        game = Game(
+            team_id=team.id,
+            provider="fussball.de",
+            external_id="real-game-delete-protection",
+            home_team="SV Ehlen",
+            away_team="FC Real",
+            kickoff=datetime.now(timezone.utc) + timedelta(days=2),
+            source_url="https://www.fussball.de/spiel/real",
+        )
+        db.add(game)
+        db.commit()
+        game_id = game.id
+
+    result = client.post(
+        f"/games/{game_id}/delete-mock",
+        data={"csrf_token": token},
+    )
+    assert result.status_code == 409
+    with factory() as db:
+        assert db.get(Game, game_id) is not None
