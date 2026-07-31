@@ -26,7 +26,7 @@
   <form method="post" action="/meta-attempts/{{ attempt.id }}/container"><input type="hidden" name="csrf_token" value="{{ csrf }}"><label>Code erneut eingeben<input name="confirmation_code" autocomplete="off" required></label><button class="danger">Meta-Container jetzt erstellen</button></form>
 </section>
 {% endif %}
-{% if attempt.meta_container_id and not attempt.meta_media_id %}
+{% if attempt.meta_container_id and not attempt.meta_media_id and attempt.phase not in ['completed', 'failed'] %}
 <section>
   <h2>2. Containerstatus prüfen</h2>
   <form method="post" action="/meta-attempts/{{ attempt.id }}/status"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Status bei Meta abfragen</button></form>
@@ -59,7 +59,7 @@
   </form>
 </section>
 {% endif %}
-{% if attempt.public_media_grant_id %}
+{% if media_grant_active %}
 <form method="post" action="/meta-attempts/{{ attempt.id }}/grant/revoke">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   <button class="danger">Öffentliche Medienfreigabe widerrufen</button>

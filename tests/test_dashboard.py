@@ -1031,7 +1031,7 @@ def test_mock_game_uses_opponent_and_side_and_can_be_deleted(browser):
         )
 
 
-def test_real_provider_game_cannot_be_deleted_from_dashboard(browser):
+def test_real_provider_game_is_suppressed_and_can_be_restored(browser):
     client, factory = browser
     token = session_csrf(client)
     with factory() as db:
@@ -1070,9 +1070,82 @@ def test_real_provider_game_cannot_be_deleted_from_dashboard(browser):
         game_id = game.id
 
     result = client.post(
-        f"/games/{game_id}/delete-mock",
+        f"/games/{game_id}/delete",
         data={"csrf_token": token},
+        follow_redirects=False,
     )
-    assert result.status_code == 409
+    assert result.status_code == 303
     with factory() as db:
-        assert db.get(Game, game_id) is not None
+        game = db.get(Game, game_id)
+        assert game is not None
+        assert game.overrides["import_suppressed"] is True
+        assert game.overrides["automation_blocked"] is True
+        assert db.query(AuditLog).filter_by(action="game.provider_suppressed").count() == 1
+    overview = client.get("/games")
+    assert "Gelöschte Spiele" in overview.text
+    result = client.post(
+        f"/games/{game_id}/restore",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert result.status_code == 303
+    with factory() as db:
+        game = db.get(Game, game_id)
+        assert not game.overrides.get("import_suppressed")
+        assert db.query(AuditLog).filter_by(action="game.provider_restored").count() == 1
+
+
+def test_mock_game_with_existing_post_is_safely_hidden_instead_of_destroyed(browser):
+    client, factory = browser
+    token = session_csrf(client)
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="mock-preserved-page",
+            display_name="Mock erhalten",
+            username="mockpreserved",
+            club="SV Ehlen",
+            active=True,
+        )
+        db.add(page); db.flush()
+        team = Team(
+            internal_name="mock-preserved-team",
+            display_name="SV Ehlen I",
+            short_name="I",
+            slug="mock-preserved-team",
+            club="SV Ehlen",
+            fussball_url="https://www.fussball.de/mock-preserved",
+            instagram_page_id=page.id,
+            media_subdir="erste_mannschaft/spieler",
+        )
+        db.add(team); db.flush()
+        game = Game(
+            team_id=team.id,
+            provider="mock",
+            external_id="mock-preserved-game",
+            home_team="SV Ehlen I",
+            away_team="FC Archiv",
+            kickoff=datetime.now(timezone.utc) + timedelta(days=2),
+            source_url="fixture://dashboard",
+        )
+        db.add(game); db.flush()
+        post = Post(
+            game_id=game.id,
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="announcement",
+        )
+        db.add(post); db.commit()
+        game_id, post_id = game.id, post.id
+
+    result = client.post(
+        f"/games/{game_id}/delete",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert result.status_code == 303
+    with factory() as db:
+        game = db.get(Game, game_id)
+        post = db.get(Post, post_id)
+        assert game.overrides["dashboard_deleted"] is True
+        assert post is not None and post.publishing_enabled is False
+        assert db.query(AuditLog).filter_by(action="game.mock_suppressed").count() == 1

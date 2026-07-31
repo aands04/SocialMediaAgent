@@ -187,6 +187,21 @@ def test_manual_import_is_idempotent_audited_and_blocks_provisional_posts(db,tmp
     assert db.scalar(select(func.count()).select_from(AuditLog).where(AuditLog.action=="provider_snapshot.games_imported"))==2
     with pytest.raises(ValueError,match="Vorläufige Spiele"): create_post(db,games[0],team,FixtureTextGenerator(),Renderer(tmp_path/"render"))
 
+def test_suppressed_provider_game_stays_hidden_on_reimport(db):
+    team,user=entities(db); item=snapshot(db,team)
+    import_snapshot(db,item,user)
+    game=db.scalar(select(Game).where(Game.team_id==team.id))
+    overrides=dict(game.overrides or {})
+    overrides.update({"import_suppressed":True,"automation_blocked":True})
+    game.overrides=overrides
+    db.commit()
+    result=import_snapshot(db,item,user)
+    db.refresh(game)
+    assert result["created"]==0
+    assert db.scalar(select(func.count()).select_from(Game).where(Game.external_id==game.external_id))==1
+    assert game.overrides["import_suppressed"] is True
+    assert game.overrides["automation_blocked"] is True
+
 def test_team_rule_allows_provisional_games_but_not_cancellations(db):
     team, user = entities(db)
     team.rules = {"allow_provisional_games": True}

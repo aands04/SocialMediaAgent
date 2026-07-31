@@ -27,6 +27,12 @@ set +a
 
 COMPOSE="docker compose --env-file .env.meta-test -f docker-compose.yml -f docker-compose.meta-test.yml"
 
+check_alembic_head() {
+  installed="$($COMPOSE exec -T web /app/scripts/entrypoint.sh alembic current 2>/dev/null | awk '/\(head\)/ { print $1 }' | sort)"
+  available="$($COMPOSE exec -T web /app/scripts/entrypoint.sh alembic heads 2>/dev/null | awk '/\(head\)/ { print $1 }' | sort)"
+  test -n "$installed" && test "$installed" = "$available"
+}
+
 check "Compose-Konfiguration" sh -c "$COMPOSE config --quiet"
 
 [ "${ENVIRONMENT:-}" = "meta-test" ] &&
@@ -65,8 +71,7 @@ done
 
 check "Webanwendung erreichbar" curl -fsS "http://127.0.0.1:${HTTP_PORT:-8080}/health"
 check "Instagram-Verwaltung erreichbar" curl -fsS "http://127.0.0.1:${HTTP_PORT:-8080}/login"
-check "Aktuelle Alembic-Migration installiert" sh -c \
-  "$COMPOSE exec -T web /app/scripts/entrypoint.sh alembic current | grep -q '0006 (head)'"
+check "Aktuelle Alembic-Migration installiert" check_alembic_head
 check "Worker läuft ohne automatischen Meta-Scheduler" sh -c \
   "$COMPOSE exec -T worker sh -c 'test \"\$META_SCHEDULER_ENABLED\" = false'"
 check "Web sieht Meta-Secrets, ohne sie auszugeben" sh -c \

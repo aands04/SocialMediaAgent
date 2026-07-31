@@ -1308,6 +1308,16 @@ def post_detail(
         .order_by(PublicationJob.scheduled_at)
     ).all()
     pages = db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
+    current_media_asset = db.get(MediaAsset, item.media_asset_id) if item.media_asset_id else None
+    alternative_media_assets = db.scalars(
+        select(MediaAsset).where(
+            MediaAsset.team_id == item.team_id,
+            MediaAsset.active.is_(True),
+            MediaAsset.available.is_(True),
+            MediaAsset.reserved_game_id.is_(None),
+            MediaAsset.uses == 0,
+        ).order_by(MediaAsset.filename)
+    ).all()
     from app.rendering.service import Renderer
 
     checks = {}
@@ -1334,6 +1344,8 @@ def post_detail(
         checks=checks,
         late_jobs=late_jobs,
         logo_recompose=logo_recompose_availability(item, jobs),
+        current_media_asset=current_media_asset,
+        alternative_media_assets=alternative_media_assets,
         now=now,
         title="Beitrag prüfen",
     )
@@ -1370,6 +1382,7 @@ def rerender_post_media(
     csrf_token_value: str = Form(alias="csrf_token"),
     version: int = Form(),
     story_job_ids: list[str] = Form(default=[]),
+    media_asset_id: str = Form(default=""),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -1391,7 +1404,26 @@ def rerender_post_media(
     )
     if not set(story_job_ids).issubset(allowed_story_ids):
         raise HTTPException(422, "Ungültige Story-Auswahl")
-    job = enqueue_rerender(db, item, current, version, story_job_ids)
+    selected_media_asset_id = media_asset_id or item.media_asset_id
+    if selected_media_asset_id and selected_media_asset_id != item.media_asset_id:
+        selected_asset = db.get(MediaAsset, selected_media_asset_id)
+        if not selected_asset or selected_asset.team_id != item.team_id:
+            raise HTTPException(422, "Ungültiges Spielerbild")
+        if (
+            not selected_asset.active
+            or not selected_asset.available
+            or selected_asset.reserved_game_id is not None
+            or selected_asset.uses != 0
+        ):
+            raise HTTPException(409, "Das ausgewählte Spielerbild ist nicht mehr frei")
+    job = enqueue_rerender(
+        db,
+        item,
+        current,
+        version,
+        story_job_ids,
+        selected_media_asset_id,
+    )
     return redirect(f"/generation-jobs/{job.id}", "Neurendern wurde eingereiht")
 
 
@@ -1730,10 +1762,22 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
         for t in db.scalars(select(Team).where(Team.archived_at.is_(None)))
         if require_visible(db, current, t.id)
     ]
-    items = [
+    visible_games = [
         g
         for g in db.scalars(select(Game).order_by(Game.kickoff.desc()))
         if require_visible(db, current, g.team_id)
+    ]
+    items = [
+        game
+        for game in visible_games
+        if not bool((game.overrides or {}).get("dashboard_deleted"))
+        and not bool((game.overrides or {}).get("import_suppressed"))
+    ]
+    suppressed_items = [
+        game
+        for game in visible_games
+        if bool((game.overrides or {}).get("dashboard_deleted"))
+        or bool((game.overrides or {}).get("import_suppressed"))
     ]
     team_map = {team.id: team for team in teams}
     logo_map = {
@@ -1753,6 +1797,7 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
         items=items,
         logo_map=logo_map,
         opponents=opponents,
+        suppressed_items=suppressed_items,
         title="Spiele und Testdaten",
     )
 
@@ -1825,8 +1870,9 @@ def create_mock_game(
     return redirect("/games", "Lokales Testspiel angelegt")
 
 
+@router.post("/games/{game_id}/delete")
 @router.post("/games/{game_id}/delete-mock")
-def delete_mock_game(
+def delete_game(
     game_id: str,
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
@@ -1838,13 +1884,6 @@ def delete_mock_game(
     if not game:
         raise HTTPException(404, "Spiel nicht gefunden")
     require(current, db, "edit_game", game.team_id)
-    if game.provider != "mock" or game.source_url != "fixture://dashboard":
-        raise HTTPException(409, "Nur lokal angelegte Mock-Spiele können gelöscht werden")
-    if db.scalar(select(Post.id).where(Post.game_id == game.id)):
-        raise HTTPException(
-            409,
-            "Das Mock-Spiel besitzt bereits einen Beitrag und kann nicht gelöscht werden",
-        )
     active_statuses = {
         GenerationJobStatus.QUEUED,
         GenerationJobStatus.RUNNING,
@@ -1858,8 +1897,82 @@ def delete_mock_game(
     ):
         raise HTTPException(
             409,
-            "Für dieses Mock-Spiel läuft noch ein Generierungsauftrag",
+            "Für dieses Spiel läuft noch ein Generierungsauftrag",
         )
+    posts = db.scalars(select(Post).where(Post.game_id == game.id)).all()
+    publication_jobs = db.scalars(
+        select(PublicationJob).where(PublicationJob.game_id == game.id)
+    ).all()
+    publication_job_ids = [job.id for job in publication_jobs]
+    if publication_job_ids and db.scalar(
+        select(MetaPublishingAttempt.id).where(
+            MetaPublishingAttempt.publication_job_id.in_(publication_job_ids),
+            MetaPublishingAttempt.phase.not_in(["completed", "failed"]),
+        )
+    ):
+        raise HTTPException(
+            409,
+            "Für dieses Spiel läuft ein Meta-Veröffentlichungsversuch; zuerst abschließen oder abgleichen",
+        )
+
+    is_dashboard_mock = game.provider == "mock" and game.source_url == "fixture://dashboard"
+    if not is_dashboard_mock or posts:
+        now = datetime.now(timezone.utc)
+        overrides = dict(game.overrides or {})
+        overrides.update(
+            {
+                "dashboard_deleted": True,
+                "dashboard_deleted_at": now.isoformat(),
+                "dashboard_deleted_by": current.id,
+                "automation_blocked": True,
+            }
+        )
+        if not is_dashboard_mock:
+            overrides.update(
+                {
+                    "import_suppressed": True,
+                    "import_suppressed_at": now.isoformat(),
+                    "import_suppressed_by": current.id,
+                }
+            )
+        game.overrides = overrides
+        game.version += 1
+        for post in posts:
+            post.publishing_enabled = False
+            if post.status not in {PostStatus.PUBLISHED, PostStatus.PARTIAL}:
+                post.status = PostStatus.CANCELLED
+                post.approved_version = None
+        for publication_job in publication_jobs:
+            if publication_job.status != JobStatus.PUBLISHED:
+                publication_job.status = JobStatus.CANCELLED
+                publication_job.approval_status = "unapproved"
+                publication_job.approved_post_version = None
+                publication_job.error = "Spiel wurde im Dashboard gelöscht und für Provider-Importe unterdrückt"
+        audit(
+            db,
+            current,
+            "game.mock_suppressed" if is_dashboard_mock else "game.provider_suppressed",
+            "game",
+            game.id,
+            game.team_id,
+            {
+                "provider": game.provider,
+                "external_id": game.external_id,
+                "home_team": game.home_team,
+                "away_team": game.away_team,
+                "preserved_published_jobs": sum(
+                    job.status == JobStatus.PUBLISHED for job in publication_jobs
+                ),
+            },
+        )
+        db.commit()
+        return redirect(
+            "/games",
+            "Spiel ausgeblendet"
+            if is_dashboard_mock
+            else "Spiel gelöscht und für erneute Provider-Importe unterdrückt",
+        )
+
     for asset in db.scalars(
         select(MediaAsset).where(MediaAsset.reserved_game_id == game.id)
     ):
@@ -1893,6 +2006,55 @@ def delete_mock_game(
     db.flush()
     db.commit()
     return redirect("/games", "Lokales Testspiel gelöscht")
+
+
+@router.post("/games/{game_id}/restore")
+def restore_provider_game(
+    game_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    game = db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404, "Spiel nicht gefunden")
+    require(current, db, "edit_game", game.team_id)
+    overrides = dict(game.overrides or {})
+    is_dashboard_mock = game.provider == "mock" and game.source_url == "fixture://dashboard"
+    if not overrides.get("dashboard_deleted") and not overrides.get("import_suppressed"):
+        raise HTTPException(409, "Dieses Spiel ist nicht gelöscht")
+    for key in (
+        "dashboard_deleted",
+        "dashboard_deleted_at",
+        "dashboard_deleted_by",
+        "import_suppressed",
+        "import_suppressed_at",
+        "import_suppressed_by",
+    ):
+        overrides.pop(key, None)
+    team = db.get(Team, game.team_id)
+    provider_status = overrides.get("provider_status", game.status)
+    provisional_allowed = bool(overrides.get("provisional_confirmed_by")) or bool(
+        (team.rules or {}).get("allow_provisional_games") if team else False
+    )
+    overrides["automation_blocked"] = provider_status in {"cancelled", "postponed"} or (
+        provider_status == "provisional" and not provisional_allowed
+    )
+    game.overrides = overrides
+    game.version += 1
+    audit(
+        db,
+        current,
+        "game.mock_restored" if is_dashboard_mock else "game.provider_restored",
+        "game",
+        game.id,
+        game.team_id,
+        {"provider": game.provider, "external_id": game.external_id},
+    )
+    db.commit()
+    return redirect("/games", "Unterdrücktes Provider-Spiel wieder eingeblendet")
 
 
 @router.post("/games/{game_id}/details")
