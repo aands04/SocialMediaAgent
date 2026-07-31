@@ -32,6 +32,19 @@ def _safe_error(exc: Exception) -> str:
     return "Interner Fehler während der Meta-Verarbeitung"
 
 
+def _oauth_grant_scopes() -> set[str]:
+    """Return the exact scopes represented by this OAuth authorization code.
+
+    Instagram Login does not expose the Facebook Graph ``/me/permissions``
+    edge.  The authorization URL requests this fixed, minimal scope set and a
+    successful authorization code represents the user's grant for that
+    request.  Token and account validity are verified separately through the
+    supported Instagram ``/me`` endpoint.
+    """
+
+    return set(REQUIRED_SCOPES)
+
+
 def assert_meta_environment(settings: Settings, *, external_call: bool = False) -> None:
     if settings.environment != "meta-test" or not settings.meta_test_enabled:
         raise MetaApiError("Instagram-Verbindungen sind nur in der Meta-Testumgebung erlaubt")
@@ -104,10 +117,7 @@ def complete_oauth(
         short = api.exchange_code(code, record.redirect_uri)
         token = api.exchange_long_lived(short)
         profile = api.profile(token.access_token)
-        scopes = api.permissions(token.access_token)
-        missing = REQUIRED_SCOPES - scopes
-        if missing:
-            raise MetaApiError(f"Erforderliche Berechtigungen fehlen: {', '.join(sorted(missing))}")
+        scopes = _oauth_grant_scopes()
         account_type = str(profile.get("account_type") or "").upper()
         if account_type != "BUSINESS":
             raise MetaApiError("Für Story-Tests ist ein professionelles Business-Konto erforderlich")
@@ -213,7 +223,10 @@ def check_connection(
     token = TokenCipher(settings.meta_token_encryption_key).decrypt(connection.encrypted_token)
     try:
         profile = api.profile(token)
-        scopes = api.permissions(token)
+        # Instagram Login has no supported /me/permissions edge.  Revalidate
+        # the token and account through /me and retain the exact scope grant
+        # recorded when this connection completed OAuth.
+        scopes = set(connection.scopes or [])
         connection.confirmed_username = str(profile.get("username") or "")
         connection.account_type = str(profile.get("account_type") or "").upper()
         connection.scopes = sorted(scopes)

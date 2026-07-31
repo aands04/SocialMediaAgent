@@ -15,7 +15,12 @@ from app.meta.media import (
     resolve_grant,
     verify_public_media_url,
 )
-from app.meta.oauth import complete_oauth, consume_oauth_state, start_oauth
+from app.meta.oauth import (
+    check_connection,
+    complete_oauth,
+    consume_oauth_state,
+    start_oauth,
+)
 from app.meta.publishing import (
     MetaPublishingError,
     create_attempt,
@@ -196,6 +201,7 @@ def test_token_cipher_and_sanitizer_never_expose_secrets(tmp_path):
 class OAuthApi:
     def __init__(self, username="svehlen1901"):
         self.username = username
+        self.profile_calls = 0
 
     def authorization_url(self, state, redirect_uri):
         return f"https://www.instagram.com/oauth/authorize?state={state}"
@@ -207,14 +213,12 @@ class OAuthApi:
         return OAuthToken("long-secret", token.user_id, 60 * 24 * 3600)
 
     def profile(self, access_token):
+        self.profile_calls += 1
         return {
             "user_id": "ig-user",
             "username": self.username,
             "account_type": "BUSINESS",
         }
-
-    def permissions(self, access_token):
-        return set(REQUIRED_SCOPES)
 
 
 def test_oauth_state_is_one_time_and_token_is_encrypted(db, tmp_path):
@@ -235,11 +239,14 @@ def test_oauth_state_is_one_time_and_token_is_encrypted(db, tmp_path):
     db.commit()
     url = start_oauth(db, settings, page, user, OAuthApi())
     state = parse_qs(url.split("?", 1)[1])["state"][0]
+    api = OAuthApi()
     connection = complete_oauth(
-        db, settings, state=state, code="single-use-code", api=OAuthApi()
+        db, settings, state=state, code="single-use-code", api=api
     )
     assert connection.status == "connected"
     assert connection.account_type == "BUSINESS"
+    assert set(connection.scopes) == REQUIRED_SCOPES
+    assert api.profile_calls == 1
     assert connection.encrypted_token != "long-secret"
     assert "long-secret" not in connection.encrypted_token
     assert TokenCipher(settings.meta_token_encryption_key).decrypt(
@@ -247,6 +254,32 @@ def test_oauth_state_is_one_time_and_token_is_encrypted(db, tmp_path):
     ) == "long-secret"
     with pytest.raises(MetaApiError, match="bereits verwendet"):
         consume_oauth_state(db, state)
+
+
+def test_connection_check_uses_stored_oauth_grant_without_permissions_edge(
+    db, tmp_path
+):
+    settings = meta_settings(tmp_path)
+    user, _, connection, _, _ = make_context(db, settings)
+    api = OAuthApi()
+
+    checked = check_connection(db, settings, connection, user, api)
+
+    assert checked.status == "connected"
+    assert set(checked.scopes) == REQUIRED_SCOPES
+    assert api.profile_calls == 1
+
+
+def test_connection_check_rejects_incomplete_stored_oauth_grant(db, tmp_path):
+    settings = meta_settings(tmp_path)
+    user, _, connection, _, _ = make_context(db, settings)
+    connection.scopes = ["instagram_business_basic"]
+    db.commit()
+
+    checked = check_connection(db, settings, connection, user, OAuthApi())
+
+    assert checked.status == "invalid"
+    assert "Berechtigungen" in checked.last_error
 
 
 def test_oauth_rejects_wrong_instagram_page(db, tmp_path):
