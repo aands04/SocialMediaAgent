@@ -597,6 +597,25 @@ def test_dashboard_admin_flow(browser):
     with factory() as db:
         team = db.query(Team).one()
     result = client.post(
+        f"/rules/{team.id}/defaults",
+        data={
+            "csrf_token": token,
+            "announcement_enabled": "true",
+            "feed_before_minutes": "1440",
+            "late_approval": "manual",
+            "result_wait_minutes": "120",
+            "allow_provisional_games": "true",
+        },
+        follow_redirects=False,
+    )
+    assert result.status_code == 303
+    with factory() as db:
+        saved_team = db.get(Team, team.id)
+        assert saved_team.rules["allow_provisional_games"] is True
+    assert "Vorläufige FUSSBALL.DE-Spielpläne" in client.get(
+        f"/rules?team_id={team.id}"
+    ).text
+    result = client.post(
         f"/rules/{team.id}/stories",
         data={
             "csrf_token": token,

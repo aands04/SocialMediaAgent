@@ -16,6 +16,8 @@
     <label>Verspätete Freigabe<select name="late_approval">{% for v,n in [('publish_now','Sofort'),('manual','Manuelle Entscheidung'),('skip','Überspringen'),('next_story','Nächste Story')] %}<option value="{{v}}" {% if selected.rules.get('late_approval')==v %}selected{% endif %}>{{n}}</option>{% endfor %}</select></label>
     <label><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Ergebnismeldung aktiv</label>
     <label>Wartezeit nach Ergebnis<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',15)}}"></label>
+    <label><input type="checkbox" name="allow_provisional_games" value="true" {% if selected.rules.get('allow_provisional_games') %}checked{% endif %}> Vorläufige FUSSBALL.DE-Spielpläne für Ankündigungen zulassen</label>
+    <p class="warning">Der vorläufige Providerstatus bleibt sichtbar. Absagen und Verlegungen bleiben immer gesperrt. Nach einer Änderung den Diagnose-Snapshot erneut importieren.</p>
     <label>KI-Bildprompt Feed
       <select name="image_prompt_feed">
         <option value="default-image-feed">Standard-KI-Prompt Feed</option>

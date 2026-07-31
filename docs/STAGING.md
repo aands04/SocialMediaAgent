@@ -82,7 +82,9 @@ Der Smoke-Test läuft zweimal, verwendet deterministische Schlüssel und erwarte
 
 ## 4. Kontrollierte FUSSBALL.DE-Diagnose
 
-Standard ist `FUSSBALL_LIVE_TEST_ENABLED=false`. Für ein enges Wartungsfenster auf `true` setzen und nur Web neu erstellen. Ein Administrator öffnet **Provider-Diagnose**, wählt die Mannschaft und bestätigt `NUR LESEN`. HTML, URL, UTC-Zeit, Status und SHA-256 werden gespeichert; Parserdaten und Fixture-Differenz liegen separat in der DB. Es werden keine Spiele übernommen. HTML-Download und Übernahme als neues Fixture sind getrennte Administratoraktionen. Danach Flag wieder deaktivieren. Rate Limits, Nutzungsbedingungen und robots-Vorgaben sind vor dem Abruf zu prüfen.
+Standard ist `FUSSBALL_LIVE_TEST_ENABLED=false`. Für ein enges Wartungsfenster auf `true` setzen und nur Web neu erstellen. Ein Administrator öffnet **Provider-Diagnose**, wählt die Mannschaft und bestätigt `NUR LESEN`. HTML, URL, UTC-Zeit, Status und SHA-256 werden gespeichert; Parserdaten und Fixture-Differenz liegen separat in der DB. Die Diagnose liest zusätzlich die verlinkten öffentlichen Spiel-Detailseiten in begrenzter Anzahl, um Platzname, Platzart und Anschrift in die Vorschau aufzunehmen. Es werden keine Spiele übernommen. HTML-Download und Übernahme als neues Fixture sind getrennte Administratoraktionen. Danach Flag wieder deaktivieren. Rate Limits, Nutzungsbedingungen und robots-Vorgaben sind vor dem Abruf zu prüfen.
+
+Vorläufig markierte Spielpläne bleiben standardmäßig für die Automatisierung gesperrt. Soll eine Mannschaft diese Termine regulär für Ankündigungen verwenden, kann ein Administrator unter **Regeln & Storys** die Option **Vorläufige FUSSBALL.DE-Spielpläne für Ankündigungen zulassen** aktivieren und den Snapshot anschließend erneut importieren. Der Providerstatus bleibt sichtbar; abgesagte oder verlegte Spiele werden weiterhin immer blockiert.
 
 ## 5. Backup und Restore-Probe
 

@@ -2,7 +2,7 @@ import hashlib
 import re
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo
@@ -18,6 +18,7 @@ ALLOWED_AJAX_PREFIXES = (
     "/ajax.team.matchplan/",
 )
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+MAX_DETAIL_FETCHES = 25
 GAME_ID_RE = re.compile(r"/spiel/(?:[^/?#]+/)*spiel/([A-Z0-9]+)(?:[/?#]|$)", re.I)
 DATE_RE = re.compile(r"(\d{2}\.\d{2}\.(?:\d{2}|\d{4})).*?(\d{1,2}:\d{2})")
 SCORE_RE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*$", re.ASCII)
@@ -33,6 +34,7 @@ class GameRecord:
     competition: str | None = None
     venue: str | None = None
     pitch: str | None = None
+    venue_address: str | None = None
     status: str = "scheduled"
     home_score: int | None = None
     away_score: int | None = None
@@ -46,6 +48,13 @@ class GameRecord:
 
 class ProviderError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class GameVenueDetail:
+    venue: str
+    pitch: str
+    address: str | None = None
 
 
 class GameDataProvider(ABC):
@@ -67,6 +76,16 @@ class FussballDeProvider(GameDataProvider):
             raise ProviderError("URL enthält unzulässige Zugangsdaten oder Ports")
         if ajax_only and not any(parsed.path.startswith(prefix) for prefix in ALLOWED_AJAX_PREFIXES):
             raise ProviderError("Nicht erlaubter FUSSBALL.DE-AJAX-Pfad")
+        return url
+
+    @classmethod
+    def validate_game_detail_url(cls, url: str, expected_external_id: str | None = None) -> str:
+        cls.validate_public_url(url)
+        match = GAME_ID_RE.search(urlparse(url).path)
+        if not match:
+            raise ProviderError("Nicht erlaubter FUSSBALL.DE-Spielpfad")
+        if expected_external_id and match.group(1).upper() != expected_external_id.upper():
+            raise ProviderError("Spiel-ID der Detailseite stimmt nicht mit dem Spielplan überein")
         return url
 
     def _get(self, url: str, *, ajax_only: bool = False) -> str:
@@ -100,6 +119,83 @@ class FussballDeProvider(GameDataProvider):
     def fetch_ajax(self, url: str) -> list[GameRecord]:
         """Optionaler read-only Abruf ausschließlich erlaubter öffentlicher AJAX-Ressourcen."""
         return self.parse(self._get(url, ajax_only=True))
+
+    def fetch_game_detail(self, url: str, expected_external_id: str) -> GameVenueDetail:
+        self.validate_game_detail_url(url, expected_external_id)
+        return self.parse_game_detail(
+            self._get(url), expected_external_id=expected_external_id
+        )
+
+    def enrich_game_details(
+        self, records: list[GameRecord], *, delay_seconds: float = 0.25
+    ) -> list[GameRecord]:
+        """Read-only enrichment from the linked public game pages.
+
+        A failed detail page must not discard the matchplan record. Requests are
+        deliberately sequential and bounded to keep the diagnostic considerate.
+        """
+        enriched: list[GameRecord] = []
+        fetched_count = 0
+        for record in records:
+            if not record.source_url:
+                enriched.append(record)
+                continue
+            if fetched_count >= MAX_DETAIL_FETCHES:
+                enriched.append(
+                    replace(
+                        record,
+                        warnings=record.warnings
+                        + (
+                            "Spielort/Platzart nicht angereichert: "
+                            f"Abruflimit von {MAX_DETAIL_FETCHES} Detailseiten erreicht",
+                        ),
+                    )
+                )
+                continue
+            if delay_seconds > 0 and fetched_count:
+                time.sleep(delay_seconds)
+            fetched_count += 1
+            try:
+                detail = self.fetch_game_detail(record.source_url, record.external_id)
+            except ProviderError as exc:
+                enriched.append(
+                    replace(
+                        record,
+                        warnings=record.warnings
+                        + (f"Spielort/Platzart konnten nicht gelesen werden: {exc}",),
+                    )
+                )
+            else:
+                enriched.append(
+                    replace(
+                        record,
+                        venue=detail.venue,
+                        pitch=detail.pitch,
+                        venue_address=detail.address,
+                    )
+                )
+        return enriched
+
+    @classmethod
+    def parse_game_detail(
+        cls, html: str, *, expected_external_id: str | None = None
+    ) -> GameVenueDetail:
+        soup = BeautifulSoup(html, "html.parser")
+        canonical = soup.select_one('link[rel="canonical"][href]')
+        if expected_external_id:
+            if not canonical:
+                raise ProviderError("Kanonische Spiel-URL fehlt auf der Detailseite")
+            cls.validate_game_detail_url(canonical.get("href", ""), expected_external_id)
+        location = soup.select_one("a.location")
+        raw = clean_name(location.get_text(" ", strip=True)) if location else ""
+        parts = [clean_name(part) for part in raw.split(",") if clean_name(part)]
+        if len(parts) < 2:
+            raise ProviderError("Spielort oder Platzart fehlen auf der Detailseite")
+        pitch, venue = parts[:2]
+        address = ", ".join(parts[2:]) or None
+        if len(pitch) > 80 or len(venue) > 250 or (address and len(address) > 500):
+            raise ProviderError("Spielortdaten überschreiten die zulässige Länge")
+        return GameVenueDetail(venue=venue, pitch=pitch, address=address)
 
     def parse(self, html: str) -> list[GameRecord]:
         soup = BeautifulSoup(html, "html.parser")
@@ -193,10 +289,10 @@ class FussballDeProvider(GameDataProvider):
                 if numeric:
                     home_score, away_score = map(int, numeric.groups())
         row_text = clean_name(row.get_text(" ", strip=True)).lower()
-        status = "provisional" if provisional else "cancelled" if "abgesagt" in row_text else "postponed" if "verlegt" in row_text else "scheduled"
+        status = "cancelled" if "abgesagt" in row_text else "postponed" if "verlegt" in row_text else "provisional" if provisional else "scheduled"
         side = "home" if tracked_team and home == tracked_team else "away" if tracked_team and away == tracked_team else None
         if provisional:
-            warnings.append("Vorläufiger Spielplan; automatische Verarbeitung gesperrt")
+            warnings.append("Vorläufiger Spielplan")
         return GameRecord(match.group(1).upper(), home, away, meta["kickoff"], competition=meta.get("competition"), status=status, home_score=home_score, away_score=away_score, game_number=meta.get("game_number"), source_url=source_url, tracked_team=tracked_team, tracked_team_side=side, warnings=tuple(warnings))
 
 
