@@ -25,6 +25,8 @@ from app.media.uploads import (
     MAX_PLAYER_IMAGE_BYTES,
     MAX_PLAYER_IMAGE_FILES,
     PlayerImageUploadError,
+    ValidatedPlayerImage,
+    iter_player_images_from_zip,
     store_player_image,
     validate_player_image,
 )
@@ -701,7 +703,8 @@ async def upload_player_images(
     team_id: str,
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
-    files: list[UploadFile] = File(),
+    files: list[UploadFile] | None = File(default=None),
+    archive: UploadFile | None = File(default=None),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -710,68 +713,82 @@ async def upload_player_images(
     team = db.get(Team, team_id)
     if not team:
         raise HTTPException(404)
-    if not files:
-        raise HTTPException(422, "Mindestens ein Spielerbild auswählen")
-    if len(files) > MAX_PLAYER_IMAGE_FILES:
+    direct_files = files or []
+    has_archive = archive is not None and bool(archive.filename)
+    if not direct_files and not has_archive:
+        raise HTTPException(422, "Mindestens ein Spielerbild oder ZIP-Archiv auswählen")
+    if len(direct_files) > MAX_PLAYER_IMAGE_FILES:
         raise HTTPException(
             422,
             f"Pro Upload sind höchstens {MAX_PLAYER_IMAGE_FILES} Spielerbilder erlaubt",
         )
 
-    validated = []
-    try:
-        for file in files:
-            content = await file.read(MAX_PLAYER_IMAGE_BYTES + 1)
-            validated.append(
-                validate_player_image(file.filename or "", file.content_type, content)
-            )
-    except PlayerImageUploadError as exc:
-        raise HTTPException(422, str(exc)) from exc
-
     created_paths: list[Path] = []
     created_assets: list[MediaAsset] = []
     skipped: list[str] = []
     batch_checksums: set[str] = set()
-    try:
-        for image in validated:
-            if image.checksum in batch_checksums:
-                skipped.append(image.original_filename)
-                continue
-            batch_checksums.add(image.checksum)
-            existing = db.scalar(
-                select(MediaAsset).where(
-                    MediaAsset.team_id == team.id,
-                    MediaAsset.checksum == image.checksum,
-                    MediaAsset.available.is_(True),
-                )
-            )
-            if existing:
-                try:
-                    media_asset_path(existing, settings.media_root, settings.upload_root)
-                except StorageError:
-                    existing.available = False
-                else:
-                    skipped.append(image.original_filename)
-                    continue
+    image_count = 0
 
-            relative, target = store_player_image(settings.upload_root, team.id, image)
-            created_paths.append(target)
-            stat = target.stat()
-            asset = MediaAsset(
-                team_id=team.id,
-                storage_kind="upload",
-                relative_path=relative,
-                filename=image.original_filename,
-                mime_type=image.mime_type,
-                size=stat.st_size,
-                checksum=image.checksum,
-                mtime=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
-                player_name=image.player_name or None,
-                active=True,
-                available=True,
+    def persist(image: ValidatedPlayerImage) -> None:
+        nonlocal image_count
+        image_count += 1
+        if image_count > MAX_PLAYER_IMAGE_FILES:
+            raise PlayerImageUploadError(
+                f"Pro Upload sind höchstens {MAX_PLAYER_IMAGE_FILES} Spielerbilder erlaubt"
             )
-            db.add(asset)
-            created_assets.append(asset)
+        if image.checksum in batch_checksums:
+            skipped.append(image.original_filename)
+            return
+        batch_checksums.add(image.checksum)
+        existing = db.scalar(
+            select(MediaAsset).where(
+                MediaAsset.team_id == team.id,
+                MediaAsset.checksum == image.checksum,
+                MediaAsset.available.is_(True),
+            )
+        )
+        if existing:
+            try:
+                media_asset_path(existing, settings.media_root, settings.upload_root)
+            except StorageError:
+                existing.available = False
+            else:
+                skipped.append(image.original_filename)
+                return
+
+        relative, target = store_player_image(settings.upload_root, team.id, image)
+        created_paths.append(target)
+        stat = target.stat()
+        asset = MediaAsset(
+            team_id=team.id,
+            storage_kind="upload",
+            relative_path=relative,
+            filename=image.original_filename,
+            mime_type=image.mime_type,
+            size=stat.st_size,
+            checksum=image.checksum,
+            mtime=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
+            player_name=image.player_name or None,
+            active=True,
+            available=True,
+        )
+        db.add(asset)
+        created_assets.append(asset)
+
+    try:
+        for file in direct_files:
+            content = await file.read(MAX_PLAYER_IMAGE_BYTES + 1)
+            persist(
+                validate_player_image(file.filename or "", file.content_type, content)
+            )
+        if has_archive:
+            await archive.seek(0)
+            for image in iter_player_images_from_zip(
+                archive.filename or "",
+                archive.content_type,
+                archive.file,
+            ):
+                persist(image)
         db.flush()
         team.last_sync_at = datetime.now(timezone.utc)
         audit(
@@ -791,6 +808,7 @@ async def upload_player_images(
                     for asset in created_assets
                 ],
                 "duplicates_skipped": skipped,
+                "archive": archive.filename if has_archive else None,
             },
         )
         db.commit()
