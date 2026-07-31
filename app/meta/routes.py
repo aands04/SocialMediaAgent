@@ -363,6 +363,16 @@ def _render_attempt(
     job = db.get(PublicationJob, attempt.publication_job_id)
     post = db.get(Post, job.post_id) if job else None
     connection = db.get(InstagramConnection, attempt.connection_id)
+    grant = (
+        db.get(PublicMediaGrant, attempt.public_media_grant_id)
+        if attempt.public_media_grant_id
+        else None
+    )
+    media_grant_active = bool(
+        grant
+        and not grant.revoked_at
+        and attempt.phase not in {"completed", "failed"}
+    )
     response = templates.TemplateResponse(
         request,
         "meta_attempt.html",
@@ -375,6 +385,7 @@ def _render_attempt(
             "post": post,
             "connection": connection,
             "confirmation_code": confirmation_code,
+            "media_grant_active": media_grant_active,
             "settings": settings,
         },
     )

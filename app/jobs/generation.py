@@ -213,10 +213,12 @@ def enqueue_rerender(
     user: User,
     expected_version: int,
     story_job_ids: list[str],
+    media_asset_id: str | None = None,
 ) -> GenerationJob:
     selected = sorted(set(story_job_ids))
     selection_hash = hashlib.sha256(":".join(selected).encode()).hexdigest()[:16]
-    key = f"rerender:{post.id}:v{expected_version}:{selection_hash}"
+    asset_key = media_asset_id or post.media_asset_id or "neutral"
+    key = f"rerender:{post.id}:v{expected_version}:{selection_hash}:{asset_key}"
     active_key = f"rerender:{post.id}"
     existing = db.scalar(
         select(GenerationJob).where(
@@ -243,6 +245,7 @@ def enqueue_rerender(
         parameters={
             "expected_post_version": expected_version,
             "story_job_ids": selected,
+            "media_asset_id": media_asset_id or post.media_asset_id,
             "logos": frozen_logo_set(
                 db, db.get(Game, post.game_id), db.get(Team, post.team_id)
             ),
@@ -584,6 +587,7 @@ def process_generation_job(
                     renderer,
                     list(job.parameters.get("story_job_ids", [])),
                     logos,
+                    job.parameters.get("media_asset_id"),
                 )
             job.result_post_id = post.id
             db.commit()

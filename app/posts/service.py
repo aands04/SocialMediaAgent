@@ -32,7 +32,7 @@ class RerenderConflict(ValueError):
 def reserve_image(db:Session,team_id:str,game_id:str)->MediaAsset|None:
     existing=db.scalar(select(MediaAsset).where(MediaAsset.reserved_game_id==game_id))
     if existing:return existing
-    asset=db.scalar(select(MediaAsset).where(MediaAsset.team_id==team_id,MediaAsset.active.is_(True),MediaAsset.available.is_(True),MediaAsset.reserved_game_id.is_(None)).order_by(MediaAsset.size.desc(),MediaAsset.filename).with_for_update(skip_locked=True))
+    asset=db.scalar(select(MediaAsset).where(MediaAsset.team_id==team_id,MediaAsset.active.is_(True),MediaAsset.available.is_(True),MediaAsset.reserved_game_id.is_(None),MediaAsset.uses==0).order_by(MediaAsset.size.desc(),MediaAsset.filename).with_for_update(skip_locked=True))
     if asset: asset.reserved_game_id=game_id; asset.uses+=1; db.flush()
     return asset
 def story_time(rule:StoryRule,game:Game,approved_at:datetime|None=None)->datetime:
@@ -194,7 +194,7 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
     post.critical_warnings=warnings; post.status=PostStatus.INCOMPLETE if warnings else PostStatus.PENDING; db.commit(); return post
 
 
-def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]|None=None,logo_snapshot:dict|None=None)->Post:
+def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]|None=None,logo_snapshot:dict|None=None,media_asset_id:str|None=None)->Post:
     game=db.get(Game,post.game_id); team=db.get(Team,post.team_id); asset=db.get(MediaAsset,post.media_asset_id) if post.media_asset_id else None
     if not game or not team: raise ValueError("Beitrag hat keine gültigen Spiel- oder Mannschaftsdaten")
     jobs=list(db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id).with_for_update())); selected=set(story_job_ids or [])
@@ -204,6 +204,30 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
         raise RerenderConflict("Der Feed wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
     if any(story_jobs[job_id].status==JobStatus.PUBLISHED for job_id in selected):
         raise RerenderConflict("Eine ausgewählte Story wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
+    if media_asset_id and media_asset_id != post.media_asset_id:
+        target_asset=db.scalar(
+            select(MediaAsset)
+            .where(MediaAsset.id==media_asset_id)
+            .with_for_update()
+        )
+        if not target_asset or target_asset.team_id!=team.id:
+            raise RerenderConflict("Das ausgewählte Spielerbild gehört nicht zu dieser Mannschaft")
+        if not target_asset.active or not target_asset.available:
+            raise RerenderConflict("Das ausgewählte Spielerbild ist nicht mehr verfügbar")
+        if target_asset.reserved_game_id not in {None,game.id} or target_asset.uses>0:
+            raise RerenderConflict("Das ausgewählte Spielerbild wurde inzwischen bereits verwendet")
+        if asset:
+            asset=db.scalar(select(MediaAsset).where(MediaAsset.id==asset.id).with_for_update())
+            asset.reserved_game_id=None
+            # Das bisherige Bild wurde bereits für diesen Spieltag verwendet und
+            # bleibt deshalb über uses > 0 verbraucht. Nur seine Reservierung wird
+            # für das neu ausgewählte Bild freigegeben.
+            db.flush()
+        target_asset.reserved_game_id=game.id
+        target_asset.uses+=1
+        post.media_asset_id=target_asset.id
+        asset=target_asset
+        db.flush()
     logos=logo_snapshot or frozen_logo_set(db,game,team)
     facts=_facts(db,game,team,asset,post.post_type,logos)
     old_snapshot=_normalize_design_snapshot(post.design_snapshot)
@@ -230,7 +254,7 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
     media_snapshot=dict(old_snapshot.get("media") or {})
     if hasattr(renderer,"metadata_for"):
         media_snapshot["feed"]=renderer.metadata_for(post.feed_path)
-    post.design_snapshot={**old_snapshot,"feed":feed_design,"prompts":prompt_snapshot,"stories":list(snapshots.values()),"logos":logos,"media":media_snapshot,"fonts":{"primary":facts["primary_font_asset"] or {"family":team.primary_font,"fallback":True},"secondary":facts["secondary_font_asset"] or {"family":team.secondary_font,"fallback":True}},"colors":team.colors}
+    post.design_snapshot={**old_snapshot,"feed":feed_design,"prompts":prompt_snapshot,"stories":list(snapshots.values()),"logos":logos,"media":media_snapshot,"player_asset":{"id":asset.id,"filename":asset.filename,"checksum":asset.checksum} if asset else None,"fonts":{"primary":facts["primary_font_asset"] or {"family":team.primary_font,"fallback":True},"secondary":facts["secondary_font_asset"] or {"family":team.secondary_font,"fallback":True}},"colors":team.colors}
     if logos.get("team"):
         post.critical_warnings=[
             warning

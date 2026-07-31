@@ -61,6 +61,13 @@
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
   <fieldset><legend>Grafiken neu erzeugen</legend><p>Der Feed wird immer versioniert neu erzeugt. Storys auswählen:</p>
     {% for x in jobs if x.kind=='story' %}<label><input type="checkbox" name="story_job_ids" value="{{x.id}}" checked> Story {{x.scheduled_at|berlin}}</label>{% endfor %}
+    <label>Spielerbild für die Neugenerierung
+      <select name="media_asset_id">
+        {% if current_media_asset %}<option value="{{current_media_asset.id}}" selected>Bisheriges Bild beibehalten: {{current_media_asset.filename}}</option>{% endif %}
+        {% for asset in alternative_media_assets %}<option value="{{asset.id}}">Anderes Bild verwenden: {{asset.filename}}</option>{% endfor %}
+      </select>
+    </label>
+    {% if not alternative_media_assets %}<small>Aktuell ist kein anderes unverbrauchtes Spielerbild verfügbar.</small>{% endif %}
     <button>Grafiken neu erzeugen</button>
   </fieldset>
 </form>

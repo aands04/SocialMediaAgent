@@ -96,7 +96,7 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
         raise SnapshotImportError("Snapshot hat keine gültige Mannschaft")
     if snapshot.error:
         raise SnapshotImportError("Snapshot enthält einen Parserfehler")
-    created = updated = unchanged = 0
+    created = updated = unchanged = suppressed = 0
     ids = []
     for item in preview_snapshot(snapshot):
         kickoff = datetime.fromisoformat(item["kickoff"])
@@ -116,13 +116,14 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
         provider_status = item.get("status") or "scheduled"
         incoming_scores = (item.get("home_score"), item.get("away_score"))
         existing_overrides = dict(game.overrides or {}) if game else {}
+        import_suppressed = bool(existing_overrides.get("import_suppressed"))
         provisional_confirmed = bool(existing_overrides.get("provisional_confirmed_by"))
         allow_provisional = bool((team.rules or {}).get("allow_provisional_games"))
         provisional_allowed = provider_status == "provisional" and (
             provisional_confirmed or allow_provisional
         )
         effective_status = "scheduled" if provisional_allowed else provider_status
-        automation_blocked = (
+        automation_blocked = import_suppressed or (
             provider_status in HARD_BLOCKING_PROVIDER_STATUSES
             or (provider_status == "provisional" and not provisional_allowed)
         )
@@ -181,6 +182,8 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
             db.flush()
             created += 1
         else:
+            if import_suppressed:
+                suppressed += 1
             old_kickoff = _utc(game.kickoff)
             old_scores = (game.home_score, game.away_score)
             relevant_before = (
@@ -234,6 +237,7 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
                 "created": created,
                 "updated": updated,
                 "unchanged": unchanged,
+                "suppressed": suppressed,
                 "game_ids": ids,
                 "posts_created": False,
             },

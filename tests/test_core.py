@@ -120,6 +120,26 @@ def test_controlled_rerender_versions_files_and_revokes_approval(db,tmp_path):
  assert old_feed.is_file() and old_story.is_file() and Path(post.feed_path)!=old_feed and Path(story.media_path)!=old_story
  assert post.status==PostStatus.REAPPROVAL and all(job.status==JobStatus.UNAPPROVED for job in jobs)
 
+def test_rerender_can_switch_to_an_unused_player_image_without_reusing_old_one(db,tmp_path):
+ _,team,game=graph(db,tmp_path)
+ from PIL import Image
+ old_path=tmp_path/"old.jpg"; replacement_path=tmp_path/"new.jpg"
+ Image.new("RGB",(120,160),"blue").save(old_path)
+ Image.new("RGB",(120,160),"green").save(replacement_path)
+ old=MediaAsset(team_id=team.id,relative_path=str(old_path.resolve()),filename="old.jpg",mime_type="image/jpeg",size=2000,checksum="old",mtime=datetime.now(timezone.utc),storage_kind="upload")
+ replacement=MediaAsset(team_id=team.id,relative_path=str(replacement_path.resolve()),filename="new.jpg",mime_type="image/jpeg",size=1000,checksum="new",mtime=datetime.now(timezone.utc),storage_kind="upload")
+ db.add_all([old,replacement]); db.commit()
+ renderer=Renderer(tmp_path/"out",upload_root=tmp_path)
+ post=create_post(db,game,team,FixtureTextGenerator(),renderer)
+ assert post.media_asset_id==old.id and old.reserved_game_id==game.id and old.uses==1
+ rerender_post(db,post,renderer,[],media_asset_id=replacement.id); db.commit()
+ assert post.media_asset_id==replacement.id
+ assert old.reserved_game_id is None and old.uses==1
+ assert replacement.reserved_game_id==game.id and replacement.uses==1
+ other_game=Game(team_id=team.id,external_id="g2",home_team="SV",away_team="FC Zwei",kickoff=game.kickoff+timedelta(days=7),source_url=team.fussball_url)
+ db.add(other_game); db.commit()
+ assert reserve_image(db,team.id,other_game.id) is None
+
 @pytest.mark.parametrize("legacy_format",["whole-snapshot","mixed-list","mapping"])
 def test_rerender_normalizes_legacy_design_snapshots(db,tmp_path,legacy_format):
  _,team,game=graph(db,tmp_path); rule=StoryRule(team_id=team.id,name="S",post_type="announcement",reference="kickoff",direction="before",offset_minutes=60,template="default-story"); db.add(rule); db.commit()

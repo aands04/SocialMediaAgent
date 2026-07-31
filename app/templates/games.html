@@ -66,14 +66,34 @@
         <button class="warning">Manuell bestätigen</button>
       </form>
       {% endif %}
-      {% if x.provider=='mock' and x.source_url=='fixture://dashboard' %}
-      <form method="post" action="/games/{{x.id}}/delete-mock" onsubmit="return confirm('Dieses lokale Mock-Spiel wirklich löschen?');">
+      <form method="post" action="/games/{{x.id}}/delete" onsubmit="return confirm('{% if x.provider == 'mock' %}Dieses lokale Mock-Spiel wirklich löschen?{% else %}Dieses Spiel ausblenden und auch bei späteren FUSSBALL.DE-Importen unterdrücken?{% endif %}');">
         <input type="hidden" name="csrf_token" value="{{csrf}}">
-        <button class="danger">Mock-Spiel löschen</button>
+        <button class="danger">Spiel löschen</button>
       </form>
-      {% endif %}
     </td>
   </tr>
   {% endfor %}
 </table>
+{% if suppressed_items %}
+<section>
+  <h2>Gelöschte Spiele</h2>
+  <p>Spiele mit vorhandenen Beiträgen bleiben aus Nachvollziehbarkeitsgründen gespeichert. Gelöschte Provider-Spiele werden bei einem erneuten FUSSBALL.DE-Import nicht wieder eingeblendet.</p>
+  <table>
+    <tr><th>Spiel</th><th>Anpfiff</th><th>Quelle</th><th>Aktion</th></tr>
+    {% for x in suppressed_items %}
+    <tr>
+      <td>{{x.home_team}} – {{x.away_team}}</td>
+      <td>{{x.kickoff|berlin}}</td>
+      <td>{{x.provider}} / {{x.external_id}}</td>
+      <td>
+        <form method="post" action="/games/{{x.id}}/restore">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <button>Spiel wiederherstellen</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
 {% endblock %}
