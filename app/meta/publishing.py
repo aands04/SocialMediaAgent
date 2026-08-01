@@ -112,7 +112,10 @@ def _assert_publication_gates(
     checks = [
         (settings.publisher_mode == "instagram", "PUBLISHER_MODE ist nicht instagram"),
         (not (stop and stop.value.get("enabled")), "Globaler Not-Aus ist aktiv"),
-        (connection.test_account, "Instagram-Seite ist nicht ausdrücklich als Testseite markiert"),
+        (
+            settings.environment != "meta-test" or connection.test_account,
+            "Instagram-Seite ist nicht ausdrücklich als Testseite markiert",
+        ),
         (connection.status == "connected", "Instagram-Verbindung ist nicht erfolgreich geprüft"),
         (connection.account_type == "BUSINESS", "Zielkonto ist kein Business-Konto"),
         (
@@ -158,6 +161,95 @@ def _assert_publication_gates(
     validate_publication_png(job, settings)
 
 
+def assert_automatic_scheduler_environment(settings: Settings) -> None:
+    checks = [
+        (settings.environment == "production", "ENVIRONMENT ist nicht production"),
+        (settings.publisher_mode == "instagram", "PUBLISHER_MODE ist nicht instagram"),
+        (settings.meta_production_enabled, "META_PRODUCTION_ENABLED ist nicht aktiv"),
+        (settings.global_publish_enabled, "GLOBAL_PUBLISH_ENABLED ist nicht aktiv"),
+        (settings.meta_scheduler_enabled, "META_SCHEDULER_ENABLED ist nicht aktiv"),
+        (
+            settings.meta_automatic_publish_enabled,
+            "META_AUTOMATIC_PUBLISH_ENABLED ist nicht aktiv",
+        ),
+        (not settings.meta_test_enabled, "META_TEST_ENABLED muss in Produktion aus sein"),
+        (
+            not settings.meta_test_publish_enabled,
+            "META_TEST_PUBLISH_ENABLED muss in Produktion aus sein",
+        ),
+        (not settings.meta_access_token, "Globaler META_ACCESS_TOKEN ist nicht zulässig"),
+    ]
+    for ok, message in checks:
+        if not ok:
+            raise MetaPublishingError(message)
+
+
+def _assert_automatic_publication_gates(
+    db: Session,
+    settings: Settings,
+    *,
+    job: PublicationJob,
+    post: Post,
+    game: Game,
+    team: Team,
+    page: InstagramPage,
+    connection: InstagramConnection,
+) -> User:
+    assert_automatic_scheduler_environment(settings)
+    _assert_publication_gates(
+        db,
+        settings,
+        job=job,
+        post=post,
+        game=game,
+        team=team,
+        page=page,
+        connection=connection,
+        external_call=False,
+    )
+    now = datetime.now(timezone.utc)
+    stop = db.get(SystemSetting, "emergency_stop")
+    approver = db.get(User, post.approved_by) if post.approved_by else None
+    last_check = _utc(connection.last_check_at) if connection.last_check_at else None
+    scheduled_at = _utc(job.scheduled_at)
+    retry_at = _utc(job.next_attempt_at) if job.next_attempt_at else None
+    checks = [
+        (
+            stop is not None and stop.value.get("enabled") is False,
+            "Globaler Not-Aus wurde nicht ausdrücklich deaktiviert",
+        ),
+        (
+            page.automatic_publishing_enabled
+            and page.automatic_publishing_confirmed_by
+            and page.automatic_publishing_confirmed_at,
+            "Automatische Veröffentlichung ist für die Instagram-Seite nicht freigegeben",
+        ),
+        (
+            last_check is not None
+            and last_check
+            >= now - timedelta(seconds=settings.meta_connection_max_age_seconds),
+            "Meta-Verbindungsprüfung ist zu alt",
+        ),
+        (
+            bool((page.allowed_types or {}).get(job.kind, False)),
+            "Medienart ist für die Instagram-Seite deaktiviert",
+        ),
+        (not post.critical_warnings, "Beitrag enthält ungeklärte kritische Warnungen"),
+        (approver is not None and approver.active, "Freigebender Benutzer ist nicht aktiv"),
+        (scheduled_at <= now, "Veröffentlichungszeitpunkt ist noch nicht erreicht"),
+        (retry_at is None or retry_at <= now, "Sicherheitswartezeit ist noch nicht abgelaufen"),
+        (job.platform_id is None, "Auftrag besitzt bereits eine Plattform-ID"),
+        (
+            job.attempts < settings.max_publish_attempts,
+            "Maximale Anzahl automatischer Versuche erreicht",
+        ),
+    ]
+    for ok, message in checks:
+        if not ok:
+            raise MetaPublishingError(message)
+    return approver
+
+
 def create_attempt(
     db: Session,
     settings: Settings,
@@ -166,9 +258,12 @@ def create_attempt(
     stage: str,
     user: User,
     media_http_client: httpx.Client,
+    trigger_mode: str = "manual",
 ) -> tuple[MetaPublishingAttempt, str | None]:
     if stage not in {"validate-only", "container-only", "publish"}:
         raise MetaPublishingError("Ungültige Meta-Teststufe")
+    if trigger_mode not in {"manual", "automatic"}:
+        raise MetaPublishingError("Ungültiger Auslöser für Meta-Versuch")
     job, post, game, team, page, connection = _locked_context(db, publication_job_id)
     _assert_publication_gates(
         db,
@@ -181,6 +276,21 @@ def create_attempt(
         connection=connection,
         external_call=False,
     )
+    if trigger_mode == "automatic":
+        automatic_user = _assert_automatic_publication_gates(
+            db,
+            settings,
+            job=job,
+            post=post,
+            game=game,
+            team=team,
+            page=page,
+            connection=connection,
+        )
+        if automatic_user.id != user.id:
+            raise MetaPublishingError(
+                "Automatischer Auftrag muss an die ursprüngliche Freigabe gebunden sein"
+            )
     existing = db.scalar(
         select(MetaPublishingAttempt)
         .where(MetaPublishingAttempt.active_key == job.id)
@@ -207,7 +317,9 @@ def create_attempt(
         media_path=str(report["path"]),
         file_checksum=report["checksum"],
         stage=stage,
+        trigger_mode=trigger_mode,
         phase="validating_public_media",
+        next_action_at=datetime.now(timezone.utc),
         sanitized_response={
             "request_preview": {
                 "endpoint": (
@@ -239,6 +351,12 @@ def create_attempt(
         raise
     grant, raw_token, media_url = create_grant(db, settings, job, user)
     attempt.public_media_grant_id = grant.id
+    if trigger_mode == "automatic":
+        job.status = JobStatus.PUBLISHING
+        job.attempts += 1
+        job.last_attempt_at = datetime.now(timezone.utc)
+        job.next_attempt_at = None
+        job.error = None
     # The public endpoint uses a separate database connection. Commit the
     # hash-only grant and active attempt before checking that exact URL.
     db.commit()
@@ -256,6 +374,17 @@ def create_attempt(
         attempt.active_key = None
         attempt.error_category = "public_media_unreachable"
         attempt.error_message = str(exc)
+        if trigger_mode == "automatic":
+            job = db.get(PublicationJob, publication_job_id)
+            if job:
+                if job.attempts < settings.max_publish_attempts:
+                    job.status = JobStatus.RETRY
+                    job.next_attempt_at = datetime.now(timezone.utc) + timedelta(
+                        minutes=min(30, 2 ** max(1, job.attempts))
+                    )
+                else:
+                    job.status = JobStatus.FAILED
+                job.error = str(exc)
         if grant and not grant.revoked_at:
             revoke_grant(
                 db,
@@ -290,6 +419,7 @@ def create_attempt(
         )
     else:
         attempt.phase = "creating_media_grant"
+        attempt.next_action_at = datetime.now(timezone.utc)
     _audit(
         db,
         user,
@@ -389,6 +519,7 @@ def create_container(
     confirmation_code: str,
     api: MetaApiClient,
     media_http_client: httpx.Client,
+    automatic: bool = False,
 ) -> MetaPublishingAttempt:
     attempt, job, post, game, team, page, connection = _reload_attempt_context(
         db, attempt_id
@@ -422,12 +553,28 @@ def create_container(
         connection=connection,
         external_call=True,
     )
+    if automatic:
+        if attempt.trigger_mode != "automatic":
+            raise MetaPublishingError("Manueller Meta-Versuch darf nicht automatisch laufen")
+        automatic_user = _assert_automatic_publication_gates(
+            db,
+            settings,
+            job=job,
+            post=post,
+            game=game,
+            team=team,
+            page=page,
+            connection=connection,
+        )
+        if automatic_user.id != user.id:
+            raise MetaPublishingError("Freigabebindung des automatischen Auftrags ist ungültig")
     if attempt.local_media_version != job.version:
         raise MetaPublishingError("Lokale Medienversion wurde seit der Prüfung verändert")
     report = validate_publication_png(job, settings)
     if report["checksum"] != attempt.file_checksum:
         raise MetaPublishingError("Mediendatei wurde seit der Prüfung verändert")
-    _consume_confirmation(db, attempt, user, "create_container", confirmation_code)
+    if not automatic:
+        _consume_confirmation(db, attempt, user, "create_container", confirmation_code)
     grant, _, media_url = create_grant(db, settings, job, user)
     attempt.public_media_grant_id = grant.id
     attempt.phase = "validating_public_media"
@@ -447,6 +594,10 @@ def create_container(
         attempt.active_key = None
         attempt.error_category = "public_media_unreachable"
         attempt.error_message = str(exc)
+        if automatic:
+            job = db.get(PublicationJob, job.id)
+            job.status = JobStatus.FAILED
+            job.error = str(exc)
         if grant and not grant.revoked_at:
             revoke_grant(
                 db,
@@ -483,6 +634,19 @@ def create_container(
         connection=connection,
         external_call=True,
     )
+    if automatic:
+        automatic_user = _assert_automatic_publication_gates(
+            db,
+            settings,
+            job=job,
+            post=post,
+            game=game,
+            team=team,
+            page=page,
+            connection=connection,
+        )
+        if automatic_user.id != user.id:
+            raise MetaPublishingError("Freigabebindung des automatischen Auftrags ist ungültig")
     report = validate_publication_png(job, settings)
     if (
         attempt.public_media_grant_id != grant.id
@@ -521,6 +685,9 @@ def create_container(
         attempt.meta_container_id = container_id
         attempt.phase = "waiting_for_container"
         attempt.container_status = "IN_PROGRESS"
+        attempt.next_action_at = datetime.now(timezone.utc) + timedelta(
+            seconds=settings.meta_container_poll_interval_seconds
+        )
         attempt.sanitized_response = sanitize_platform_data(response)
         _audit(
             db,
@@ -544,6 +711,9 @@ def create_container(
         attempt.error_category = "uncertain_response" if exc.uncertain else "meta_api"
         attempt.error_message = str(exc)
         attempt.sanitized_response = exc.response
+        if automatic:
+            job.status = JobStatus.UNCERTAIN if exc.uncertain else JobStatus.FAILED
+            job.error = str(exc)
         if not exc.uncertain and attempt.public_media_grant_id:
             grant = db.get(PublicMediaGrant, attempt.public_media_grant_id)
             if grant and not grant.revoked_at:
@@ -590,6 +760,19 @@ def refresh_container_status(
         connection=connection,
         external_call=True,
     )
+    if attempt.trigger_mode == "automatic":
+        automatic_user = _assert_automatic_publication_gates(
+            db,
+            settings,
+            job=job,
+            post=post,
+            game=game,
+            team=team,
+            page=page,
+            connection=connection,
+        )
+        if automatic_user.id != user.id:
+            raise MetaPublishingError("Freigabebindung des automatischen Auftrags ist ungültig")
     token = TokenCipher(settings.meta_token_encryption_key).decrypt(
         connection.encrypted_token
     )
@@ -604,6 +787,9 @@ def refresh_container_status(
         attempt.active_key = None
         attempt.error_category = "container_error"
         attempt.error_message = str(response.get("status") or "Meta-Container meldet Fehler")
+        if attempt.trigger_mode == "automatic":
+            job.status = JobStatus.FAILED
+            job.error = attempt.error_message
         if attempt.public_media_grant_id:
             grant = db.get(PublicMediaGrant, attempt.public_media_grant_id)
             if grant and not grant.revoked_at:
@@ -615,6 +801,7 @@ def refresh_container_status(
                 )
     elif attempt.container_status == "FINISHED":
         attempt.phase = "ready_to_publish" if attempt.stage == "publish" else "completed"
+        attempt.next_action_at = datetime.now(timezone.utc)
         if attempt.stage == "container-only":
             attempt.completed_at = datetime.now(timezone.utc)
             attempt.active_key = None
@@ -627,6 +814,10 @@ def refresh_container_status(
                         user,
                         reason="Container-only-Test abgeschlossen",
                     )
+    else:
+        attempt.next_action_at = datetime.now(timezone.utc) + timedelta(
+            seconds=settings.meta_container_poll_interval_seconds
+        )
     _audit(
         db,
         user,
@@ -648,6 +839,7 @@ def publish(
     user: User,
     confirmation_code: str,
     api: MetaApiClient,
+    automatic: bool = False,
 ) -> MetaPublishingAttempt:
     attempt, job, post, game, team, page, connection = _reload_attempt_context(
         db, attempt_id
@@ -680,7 +872,23 @@ def publish(
         connection=connection,
         external_call=True,
     )
-    _consume_confirmation(db, attempt, user, "publish", confirmation_code)
+    if automatic:
+        if attempt.trigger_mode != "automatic":
+            raise MetaPublishingError("Manueller Meta-Versuch darf nicht automatisch laufen")
+        automatic_user = _assert_automatic_publication_gates(
+            db,
+            settings,
+            job=job,
+            post=post,
+            game=game,
+            team=team,
+            page=page,
+            connection=connection,
+        )
+        if automatic_user.id != user.id:
+            raise MetaPublishingError("Freigabebindung des automatischen Auftrags ist ungültig")
+    else:
+        _consume_confirmation(db, attempt, user, "publish", confirmation_code)
     attempt.phase = "publishing"
     db.commit()
     token = TokenCipher(settings.meta_token_encryption_key).decrypt(

@@ -9,6 +9,8 @@ from sqlalchemy import select
 from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.jobs.generation import claim_next, process_generation_job
+from app.meta.publishing import MetaPublishingError
+from app.meta.scheduler import run_automatic_publishing_cycle
 from app.models import JobStatus, PublicationJob
 from app.publishing.service import DryRunPublisher, PublishError
 from app.publishing.worker import process_job
@@ -17,26 +19,79 @@ log = structlog.get_logger()
 settings = get_settings()
 
 
+def _automatic_scheduler_enabled(settings: Settings) -> bool:
+    return all(
+        [
+            settings.environment == "production",
+            settings.publisher_mode == "instagram",
+            settings.meta_production_enabled,
+            settings.global_publish_enabled,
+            settings.meta_scheduler_enabled,
+            settings.meta_automatic_publish_enabled,
+            not settings.meta_test_enabled,
+            not settings.meta_test_publish_enabled,
+            not settings.meta_access_token,
+        ]
+    )
+
+
+def _validate_worker_environment(settings: Settings) -> str:
+    if settings.environment == "staging":
+        if (
+            settings.publisher_mode != "dry-run"
+            or settings.global_publish_enabled
+            or settings.meta_access_token
+            or settings.meta_scheduler_enabled
+            or settings.meta_automatic_publish_enabled
+        ):
+            raise RuntimeError("Staging-Worker verweigert Live-Publishing")
+        return "dry-run"
+
+    if settings.environment == "meta-test":
+        if (
+            settings.publisher_mode != "instagram"
+            or settings.global_publish_enabled
+            or settings.meta_scheduler_enabled
+            or settings.meta_automatic_publish_enabled
+        ):
+            raise RuntimeError(
+                "Automatische Instagram-Veröffentlichung ist im Meta-Test verboten"
+            )
+        return "manual-meta-test"
+
+    if settings.environment == "production":
+        if settings.publisher_mode != "instagram" or not settings.meta_production_enabled:
+            raise RuntimeError("Produktions-Worker ist nicht für Instagram freigegeben")
+        automatic_flags = [
+            settings.global_publish_enabled,
+            settings.meta_scheduler_enabled,
+            settings.meta_automatic_publish_enabled,
+        ]
+        if any(automatic_flags) and not all(automatic_flags):
+            raise RuntimeError(
+                "Automatische Veröffentlichung ist nur mit allen drei Gates zulässig"
+            )
+        if settings.meta_test_enabled or settings.meta_test_publish_enabled:
+            raise RuntimeError("Meta-Test-Gates müssen in Produktion aus sein")
+        if settings.meta_access_token:
+            raise RuntimeError("Globaler META_ACCESS_TOKEN ist in Produktion verboten")
+        return "automatic-instagram" if all(automatic_flags) else "production-paused"
+
+    if settings.publisher_mode != "dry-run" or settings.global_publish_enabled:
+        raise RuntimeError("Unbekannte Umgebung verweigert Live-Publishing")
+    return "dry-run"
+
+
 def run():
-    meta_test = settings.environment == "meta-test"
-    if settings.environment == "staging" and (
-        settings.publisher_mode != "dry-run" or settings.meta_access_token
-    ):
-        raise RuntimeError("Staging-Worker verweigert Live-Publishing")
-    if meta_test and settings.meta_scheduler_enabled:
-        raise RuntimeError(
-            "Automatische Instagram-Veröffentlichung ist im Meta-Test verboten"
-        )
-    if not meta_test and settings.publisher_mode != "dry-run":
-        raise RuntimeError(
-            "Dieser Worker-Build ist für Staging ausschließlich im Dry-Run freigegeben"
-        )
-    log.info("worker_started", mode=settings.publisher_mode)
+    worker_mode = _validate_worker_environment(settings)
+    scheduler_enabled = _automatic_scheduler_enabled(settings)
+    scheduler_active = worker_mode == "dry-run" or scheduler_enabled
+    log.info("worker_started", mode=worker_mode, scheduler=scheduler_enabled)
     loops = 0
     processed = 0
     generated = 0
     settings.log_root.mkdir(parents=True, exist_ok=True)
-    effective = Settings(
+    dry_run_settings = Settings(
         **{
             **settings.model_dump(),
             "global_publish_enabled": True,
@@ -44,8 +99,11 @@ def run():
             "meta_access_token": None,
         }
     )
+
     while True:
         loops += 1
+        due_count = 0
+        automatic_result = None
         with SessionLocal() as db:
             generation_ids = []
             for _ in range(5):
@@ -55,10 +113,9 @@ def run():
                 generation_ids.append(generation_id)
                 result = process_generation_job(db, generation_id, settings)
                 generated += int(result.status.value == "succeeded")
-            due = (
-                []
-                if meta_test
-                else list(
+
+            if worker_mode == "dry-run":
+                due = list(
                     db.scalars(
                         select(PublicationJob)
                         .where(
@@ -69,22 +126,38 @@ def run():
                         .limit(20)
                     )
                 )
-            )
-            for job in due:
+                due_count = len(due)
+                for job in due:
+                    try:
+                        process_job(db, job.id, DryRunPublisher(), dry_run_settings)
+                        processed += 1
+                    except PublishError as exc:
+                        log.warning(
+                            "dry_run_job_blocked", job_id=job.id, error=str(exc)
+                        )
+            elif scheduler_enabled:
                 try:
-                    process_job(db, job.id, DryRunPublisher(), effective)
-                    processed += 1
-                except PublishError as exc:
-                    log.warning("dry_run_job_blocked", job_id=job.id, error=str(exc))
+                    automatic_result = run_automatic_publishing_cycle(db, settings)
+                    due_count = automatic_result.queued
+                    processed += automatic_result.published
+                except MetaPublishingError as exc:
+                    db.rollback()
+                    log.error("automatic_scheduler_blocked", error=str(exc))
+
         payload = {
             "at": datetime.now(timezone.utc).isoformat(),
             "loops": loops,
-            "scheduler": not meta_test,
-            "due_jobs": len(due),
+            "scheduler": scheduler_active,
+            "automatic_scheduler": scheduler_enabled,
+            "scheduler_mode": worker_mode,
+            "due_jobs": due_count,
             "generation_jobs": len(generation_ids),
             "generated": generated,
             "processed": processed,
-            "publisher": "manual-meta-test" if meta_test else "dry-run",
+            "publisher": worker_mode,
+            "automatic_cycle": (
+                automatic_result.__dict__ if automatic_result is not None else None
+            ),
         }
         temporary = settings.log_root / "worker-heartbeat.tmp"
         temporary.write_text(json.dumps(payload))

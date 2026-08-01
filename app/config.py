@@ -21,7 +21,13 @@ class Settings(BaseSettings):
     meta_access_token: str | None = None
     meta_test_enabled: bool = False
     meta_test_publish_enabled: bool = False
+    meta_production_enabled: bool = False
     meta_scheduler_enabled: bool = False
+    meta_automatic_publish_enabled: bool = False
+    meta_connection_max_age_seconds: int = 86400
+    meta_container_poll_interval_seconds: int = 30
+    meta_container_max_wait_seconds: int = 900
+    meta_scheduler_batch_size: int = 5
     meta_app_id: str | None = None
     meta_app_secret: str | None = None
     meta_token_encryption_key: str | None = None

@@ -46,10 +46,24 @@ def _oauth_grant_scopes() -> set[str]:
 
 
 def assert_meta_environment(settings: Settings, *, external_call: bool = False) -> None:
-    if settings.environment != "meta-test" or not settings.meta_test_enabled:
-        raise MetaApiError("Instagram-Verbindungen sind nur in der Meta-Testumgebung erlaubt")
-    if external_call and not settings.meta_test_publish_enabled:
-        raise MetaApiError("Externe Meta-Aufrufe sind durch META_TEST_PUBLISH_ENABLED gesperrt")
+    if settings.environment == "meta-test":
+        if not settings.meta_test_enabled:
+            raise MetaApiError("Instagram-Meta-Test ist nicht aktiviert")
+        if external_call and not settings.meta_test_publish_enabled:
+            raise MetaApiError(
+                "Externe Meta-Aufrufe sind durch META_TEST_PUBLISH_ENABLED gesperrt"
+            )
+        return
+    if settings.environment == "production":
+        if (
+            settings.publisher_mode != "instagram"
+            or not settings.meta_production_enabled
+        ):
+            raise MetaApiError("Instagram-Produktion ist nicht ausdrücklich aktiviert")
+        return
+    raise MetaApiError(
+        "Instagram-Verbindungen sind nur in Meta-Test oder Produktion erlaubt"
+    )
 
 
 def start_oauth(

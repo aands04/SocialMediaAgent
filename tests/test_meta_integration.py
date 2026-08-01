@@ -30,6 +30,7 @@ from app.meta.publishing import (
     reconcile_attempt,
     refresh_container_status,
 )
+from app.meta.scheduler import run_automatic_publishing_cycle
 from app.meta.security import TokenCipher, sanitize_platform_data, secret_hash
 from app.models import (
     Game,
@@ -37,10 +38,12 @@ from app.models import (
     InstagramOAuthState,
     InstagramPage,
     JobStatus,
+    MetaPublishingAttempt,
     Post,
     PostStatus,
     PublicationJob,
     Role,
+    SystemSetting,
     Team,
     User,
 )
@@ -462,6 +465,11 @@ class UncertainContainerApi(PublishingApi):
         raise MetaApiError("Timeout nach möglicher Annahme", uncertain=True)
 
 
+class UnavailableStatusApi(PublishingApi):
+    def container_status(self, **kwargs):
+        raise MetaApiError("Containerstatus vorübergehend nicht erreichbar")
+
+
 def test_uncertain_container_is_never_repeated_automatically(db, tmp_path):
     settings = meta_settings(tmp_path)
     user, _, _, _, job = make_context(db, settings)
@@ -654,3 +662,159 @@ def test_expired_oauth_state_is_rejected(db, tmp_path):
     assert db.scalar(select(InstagramOAuthState))
     with pytest.raises(MetaApiError):
         consume_oauth_state(db, "expired-state")
+
+
+def production_settings(tmp_path):
+    generated = tmp_path / "production-generated"
+    generated.mkdir()
+    return Settings(
+        environment="production",
+        publisher_mode="instagram",
+        meta_production_enabled=True,
+        global_publish_enabled=True,
+        meta_scheduler_enabled=True,
+        meta_automatic_publish_enabled=True,
+        meta_test_enabled=False,
+        meta_token_encryption_key=Fernet.generate_key().decode(),
+        meta_public_base_url="https://meta.example.org",
+        generated_root=generated,
+        meta_container_poll_interval_seconds=0,
+        meta_container_max_wait_seconds=60,
+    )
+
+
+def automatic_context(db, settings):
+    user, page, connection, post, job = make_context(db, settings)
+    page.automatic_publishing_enabled = True
+    page.automatic_publishing_confirmed_by = user.id
+    page.automatic_publishing_confirmed_at = datetime.now(timezone.utc)
+    page.allowed_types = {"feed": True, "story": True}
+    connection.test_account = False
+    connection.last_check_at = datetime.now(timezone.utc)
+    post.approved_by = user.id
+    job.status = JobStatus.SCHEDULED
+    job.scheduled_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.add(SystemSetting(key="emergency_stop", value={"enabled": False}))
+    db.commit()
+    return user, page, connection, post, job
+
+
+def test_automatic_scheduler_publishes_once_without_confirmation(db, tmp_path):
+    settings = production_settings(tmp_path)
+    _, _, _, post, job = automatic_context(db, settings)
+    api = PublishingApi()
+    media_client = public_media_client(settings)
+
+    first = run_automatic_publishing_cycle(
+        db, settings, api=api, media_http_client=media_client
+    )
+    second = run_automatic_publishing_cycle(
+        db, settings, api=api, media_http_client=media_client
+    )
+    third = run_automatic_publishing_cycle(
+        db, settings, api=api, media_http_client=media_client
+    )
+    fourth = run_automatic_publishing_cycle(
+        db, settings, api=api, media_http_client=media_client
+    )
+
+    db.refresh(job)
+    db.refresh(post)
+    assert first.queued == 1
+    assert first.containers_created == 1
+    assert second.statuses_checked == 1
+    assert third.published == 1
+    assert fourth.published == 0
+    assert api.container_calls == 1
+    assert api.publish_calls == 1
+    assert job.status == JobStatus.PUBLISHED
+    assert post.status == PostStatus.PUBLISHED
+
+
+def test_automatic_scheduler_ignores_not_due_or_disabled_page(db, tmp_path):
+    settings = production_settings(tmp_path)
+    _, page, _, _, job = automatic_context(db, settings)
+    api = PublishingApi()
+    job.scheduled_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    db.commit()
+
+    result = run_automatic_publishing_cycle(
+        db, settings, api=api, media_http_client=public_media_client(settings)
+    )
+    assert result.queued == 0
+    assert api.container_calls == 0
+
+    job.scheduled_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    page.automatic_publishing_enabled = False
+    db.commit()
+    result = run_automatic_publishing_cycle(
+        db, settings, api=api, media_http_client=public_media_client(settings)
+    )
+    assert result.queued == 0
+    assert api.container_calls == 0
+
+
+def test_automatic_scheduler_never_repeats_uncertain_container(db, tmp_path):
+    settings = production_settings(tmp_path)
+    _, _, _, _, job = automatic_context(db, settings)
+    api = UncertainContainerApi()
+    media_client = public_media_client(settings)
+
+    first = run_automatic_publishing_cycle(
+        db, settings, api=api, media_http_client=media_client
+    )
+    second = run_automatic_publishing_cycle(
+        db, settings, api=api, media_http_client=media_client
+    )
+
+    db.refresh(job)
+    assert first.queued == 1
+    assert api.container_calls == 1
+    assert second.containers_created == 0
+    assert api.container_calls == 1
+    assert job.status == JobStatus.UNCERTAIN
+
+
+def test_automatic_scheduler_releases_timed_out_container_attempt(db, tmp_path):
+    settings = production_settings(tmp_path)
+    settings.meta_container_max_wait_seconds = 0
+    _, _, _, _, job = automatic_context(db, settings)
+    api = UnavailableStatusApi()
+    media_client = public_media_client(settings)
+
+    run_automatic_publishing_cycle(
+        db, settings, api=api, media_http_client=media_client
+    )
+    result = run_automatic_publishing_cycle(
+        db, settings, api=api, media_http_client=media_client
+    )
+
+    attempt = db.scalar(
+        select(MetaPublishingAttempt).where(
+            MetaPublishingAttempt.publication_job_id == job.id
+        )
+    )
+    db.refresh(job)
+    assert result.paused == 1
+    assert attempt.phase == "failed"
+    assert attempt.active_key is None
+    assert job.status == JobStatus.FAILED
+
+
+def test_automatic_scheduler_requires_explicit_disabled_emergency_stop(db, tmp_path):
+    settings = production_settings(tmp_path)
+    _, _, _, _, job = automatic_context(db, settings)
+    stop = db.get(SystemSetting, "emergency_stop")
+    db.delete(stop)
+    db.commit()
+
+    result = run_automatic_publishing_cycle(
+        db,
+        settings,
+        api=PublishingApi(),
+        media_http_client=public_media_client(settings),
+    )
+
+    db.refresh(job)
+    assert result.queued == 0
+    assert job.status == JobStatus.SCHEDULED

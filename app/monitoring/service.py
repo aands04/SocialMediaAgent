@@ -10,6 +10,7 @@ from app.models import (
     GenerationJob,
     GenerationJobStatus,
     InstagramConnection,
+    InstagramPage,
     JobStatus,
     MetaPublishingAttempt,
     Post,
@@ -39,7 +40,19 @@ def system_status(db: Session, settings: Settings) -> dict:
             "ok": worker_ok,
             "detail": f"Heartbeat vor {int(age)}s, Läufe {data.get('loops', 0)}",
         }
-        scheduler_expected = settings.environment != "meta-test"
+        automatic_scheduler_expected = all(
+            [
+                settings.environment == "production",
+                settings.publisher_mode == "instagram",
+                settings.meta_production_enabled,
+                settings.global_publish_enabled,
+                settings.meta_scheduler_enabled,
+                settings.meta_automatic_publish_enabled,
+            ]
+        )
+        scheduler_expected = (
+            settings.publisher_mode == "dry-run" or automatic_scheduler_expected
+        )
         checks["scheduler"] = {
             "ok": worker_ok
             and (
@@ -51,17 +64,35 @@ def system_status(db: Session, settings: Settings) -> dict:
                 "aktiv"
                 if data.get("scheduler")
                 else (
-                    "im Meta-Test absichtlich deaktiviert"
+                    "bewusst deaktiviert"
                     if not scheduler_expected
                     else "inaktiv"
                 )
             ),
         }
+        checks["automatic_scheduler"] = {
+            "ok": worker_ok
+            and bool(data.get("automatic_scheduler"))
+            == automatic_scheduler_expected,
+            "detail": (
+                "kontrolliert aktiv"
+                if data.get("automatic_scheduler")
+                else "deaktiviert"
+            ),
+        }
     except Exception as exc:
         checks["worker"] = {"ok": False, "detail": f"Heartbeat fehlt: {exc}"}
         checks["scheduler"] = {"ok": False, "detail": "kein Worker-Heartbeat"}
+        checks["automatic_scheduler"] = {
+            "ok": False,
+            "detail": "kein Worker-Heartbeat",
+        }
     if not checks["worker"]["ok"]:
         critical.append("Worker")
+    if not checks["scheduler"]["ok"]:
+        critical.append("Scheduler")
+    if not checks["automatic_scheduler"]["ok"]:
+        critical.append("Automatischer Instagram-Scheduler")
     media_ok = settings.media_root.is_dir() and settings.media_root.exists()
     checks["smb"] = {"ok": media_ok, "detail": str(settings.media_root)}
     if not media_ok:
@@ -88,7 +119,8 @@ def system_status(db: Session, settings: Settings) -> dict:
         "detail": f"Text: {settings.text_generator_mode}; Bild: {settings.image_generator_mode}; Bildmodell: {settings.openai_image_model}",
     }
     dry = (
-        settings.publisher_mode == "dry-run"
+        settings.environment not in {"meta-test", "production"}
+        and settings.publisher_mode == "dry-run"
         and not settings.global_publish_enabled
         and not settings.meta_access_token
     )
@@ -98,20 +130,49 @@ def system_status(db: Session, settings: Settings) -> dict:
         and settings.meta_test_enabled
         and not settings.meta_scheduler_enabled
         and not settings.global_publish_enabled
+        and not settings.meta_automatic_publish_enabled
+    )
+    production_paused = (
+        settings.environment == "production"
+        and settings.publisher_mode == "instagram"
+        and settings.meta_production_enabled
+        and not settings.meta_test_enabled
+        and not settings.meta_test_publish_enabled
+        and not settings.global_publish_enabled
+        and not settings.meta_scheduler_enabled
+        and not settings.meta_automatic_publish_enabled
+    )
+    production_automatic = (
+        settings.environment == "production"
+        and settings.publisher_mode == "instagram"
+        and settings.meta_production_enabled
+        and not settings.meta_test_enabled
+        and not settings.meta_test_publish_enabled
+        and settings.global_publish_enabled
+        and settings.meta_scheduler_enabled
+        and settings.meta_automatic_publish_enabled
     )
     checks["publishing"] = {
-        "ok": dry or guarded_meta_test,
+        "ok": dry or guarded_meta_test or production_paused or production_automatic,
         "detail": (
             "DryRun aktiv; Live deaktiviert"
             if dry
             else (
                 "Meta-Test: ausschließlich manueller Assistent"
                 if guarded_meta_test
-                else "UNSICHERE KONFIGURATION"
+                else (
+                    "Produktion vorbereitet; Automatik pausiert"
+                    if production_paused
+                    else (
+                        "Produktion: kontrollierte Automatik aktiv"
+                        if production_automatic
+                        else "UNSICHERE KONFIGURATION"
+                    )
+                )
             )
         ),
     }
-    if not (dry or guarded_meta_test):
+    if not (dry or guarded_meta_test or production_paused or production_automatic):
         critical.append("Publishing")
     marker = settings.backup_root / "last-success.json"
     checks["backup"] = {
@@ -221,9 +282,19 @@ def system_status(db: Session, settings: Settings) -> dict:
         ]
         meta_counts = {
             "mode": settings.environment,
-            "live_gate": settings.meta_test_publish_enabled,
+            "live_gate": (
+                settings.meta_test_publish_enabled
+                if settings.environment == "meta-test"
+                else settings.global_publish_enabled
+            ),
             "scheduler": settings.meta_scheduler_enabled,
+            "automatic_gate": settings.meta_automatic_publish_enabled,
             "connected_pages": sum(item.status == "connected" for item in connections),
+            "automatic_pages": db.scalar(
+                select(func.count())
+                .select_from(InstagramPage)
+                .where(InstagramPage.automatic_publishing_enabled.is_(True))
+            ),
             "expiring_tokens": len(expiring),
             "missing_permissions": sum(
                 not {
@@ -251,6 +322,25 @@ def system_status(db: Session, settings: Settings) -> dict:
                 .select_from(MetaPublishingAttempt)
                 .where(MetaPublishingAttempt.phase == "failed")
             ),
+            "due_automatic_jobs": db.scalar(
+                select(func.count())
+                .select_from(PublicationJob)
+                .join(InstagramPage)
+                .where(
+                    InstagramPage.automatic_publishing_enabled.is_(True),
+                    PublicationJob.status.in_([JobStatus.SCHEDULED, JobStatus.RETRY]),
+                    PublicationJob.approval_status == "approved",
+                    PublicationJob.scheduled_at <= now,
+                )
+            ),
+            "active_automatic_attempts": db.scalar(
+                select(func.count())
+                .select_from(MetaPublishingAttempt)
+                .where(
+                    MetaPublishingAttempt.trigger_mode == "automatic",
+                    MetaPublishingAttempt.active_key.is_not(None),
+                )
+            ),
             "active_media_grants": db.scalar(
                 select(func.count())
                 .select_from(PublicMediaGrant)
@@ -274,11 +364,19 @@ def system_status(db: Session, settings: Settings) -> dict:
         }
         checks["meta_test"] = {
             "ok": (
-                settings.environment != "meta-test"
-                or (
-                    settings.meta_test_enabled
-                    and not settings.meta_scheduler_enabled
-                    and not settings.global_publish_enabled
+                (
+                    settings.environment != "meta-test"
+                    or (
+                        settings.meta_test_enabled
+                        and not settings.meta_scheduler_enabled
+                        and not settings.global_publish_enabled
+                        and not settings.meta_automatic_publish_enabled
+                    )
+                )
+                and (
+                    settings.environment != "production"
+                    or production_paused
+                    or production_automatic
                 )
             ),
             "detail": meta_counts,

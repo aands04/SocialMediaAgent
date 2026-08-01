@@ -1,0 +1,96 @@
+#!/bin/sh
+set -u
+
+failures=0
+ok() { printf '[OK] %s\n' "$1"; }
+fail() { printf '[FEHLER] %s\n' "$1" >&2; failures=$((failures + 1)); }
+check() {
+  label="$1"
+  shift
+  if "$@" >/tmp/production-check.out 2>&1; then
+    ok "$label"
+  else
+    fail "$label: $(tail -n 4 /tmp/production-check.out | tr '\n' ' ')"
+  fi
+}
+
+test -f .env.production || {
+  echo "[KRITISCH] .env.production fehlt" >&2
+  exit 1
+}
+
+set -a
+. ./.env.production
+set +a
+COMPOSE="docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml"
+
+check_alembic_head() {
+  installed="$($COMPOSE exec -T web /app/scripts/entrypoint.sh alembic current 2>/dev/null | awk '/\(head\)/ { print $1 }' | sort)"
+  available="$($COMPOSE exec -T web /app/scripts/entrypoint.sh alembic heads 2>/dev/null | awk '/\(head\)/ { print $1 }' | sort)"
+  test -n "$installed" && test "$installed" = "$available"
+}
+
+check "Compose-Konfiguration" sh -c "$COMPOSE config --quiet"
+
+[ "${ENVIRONMENT:-}" = "production" ] &&
+  [ "${PUBLISHER_MODE:-}" = "instagram" ] &&
+  [ "${META_PRODUCTION_ENABLED:-}" = "true" ] &&
+  [ "${META_TEST_ENABLED:-}" = "false" ] &&
+  [ "${META_TEST_PUBLISH_ENABLED:-}" = "false" ] &&
+  [ -z "${META_ACCESS_TOKEN:-}" ] &&
+  ok "Harte Produktions-Umgebungsgates" ||
+  fail "Produktions-Umgebungsgates sind nicht korrekt"
+
+flags="${GLOBAL_PUBLISH_ENABLED:-false}:${META_SCHEDULER_ENABLED:-false}:${META_AUTOMATIC_PUBLISH_ENABLED:-false}"
+case "$flags" in
+  false:false:false) ok "Automatik vollständig pausiert" ;;
+  true:true:true) ok "Automatik mit allen drei Gates aktiviert" ;;
+  *) fail "Automatik-Gates sind nur gemeinsam true oder gemeinsam false zulässig ($flags)" ;;
+esac
+
+case "${META_OAUTH_REDIRECT_URI:-}" in
+  https://*/public/instagram/oauth/callback) ok "OAuth-Redirect verwendet HTTPS" ;;
+  *) fail "META_OAUTH_REDIRECT_URI ist ungültig" ;;
+esac
+case "${META_PUBLIC_BASE_URL:-}" in
+  https://*) ok "Öffentliche Medienbasis verwendet HTTPS" ;;
+  *) fail "META_PUBLIC_BASE_URL muss mit https:// beginnen" ;;
+esac
+
+for name in db_password session_secret openai_api_key meta_app_id meta_app_secret meta_token_encryption_key; do
+  path="${PRODUCTION_SECRETS_ROOT:-/nonexistent}/$name"
+  if [ -s "$path" ]; then
+    mode="$(stat -c %a "$path" 2>/dev/null || echo 999)"
+    case "$mode" in
+      400|440|600|640) ok "Secret $name vorhanden und eingeschränkt ($mode)" ;;
+      *) fail "Secret $name hat zu offene Rechte ($mode)" ;;
+    esac
+  else
+    fail "Secret $name fehlt oder ist leer"
+  fi
+done
+
+check "Webanwendung erreichbar" curl -fsS "http://127.0.0.1:${HTTP_PORT:-8083}/health"
+check "Anmeldeseite erreichbar" sh -c "curl -fsS http://127.0.0.1:${HTTP_PORT:-8083}/login | grep -q csrf_token"
+check "Aktuelle Alembic-Migration installiert" check_alembic_head
+check "Worker-Modus stimmt mit den Gates überein" sh -c \
+  "$COMPOSE exec -T worker /app/scripts/entrypoint.sh python -c 'import json; from app.config import get_settings; s=get_settings(); d=json.load(open(s.log_root / \"worker-heartbeat.json\")); expected=s.global_publish_enabled and s.meta_scheduler_enabled and s.meta_automatic_publish_enabled; assert d[\"automatic_scheduler\"] is expected'"
+check "Tokenverschlüsselungsschlüssel ist gültig" sh -c \
+  "$COMPOSE exec -T web /app/scripts/entrypoint.sh python -c 'from app.meta.security import TokenCipher; from app.config import get_settings; TokenCipher(get_settings().meta_token_encryption_key)'"
+
+public_status="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${META_PUBLIC_PORT:-8084}/" 2>/dev/null || true)"
+[ "$public_status" = "404" ] &&
+  ok "Öffentlicher Proxy blockiert das Dashboard" ||
+  fail "Öffentlicher Proxy muss / mit 404 blockieren (erhalten: $public_status)"
+callback_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+  "http://127.0.0.1:${META_PUBLIC_PORT:-8084}/public/instagram/oauth/callback" 2>/dev/null || true)"
+[ "$callback_status" = "400" ] &&
+  ok "OAuth-Callback ist ausschließlich am öffentlichen Proxy erreichbar" ||
+  fail "OAuth-Callback muss ohne Parameter kontrolliert 400 liefern (erhalten: $callback_status)"
+
+rm -f /tmp/production-check.out
+if [ "$failures" -gt 0 ]; then
+  printf '[KRITISCH] %s Produktionsprüfungen fehlgeschlagen.\n' "$failures" >&2
+  exit 1
+fi
+ok "Alle kritischen Produktionsprüfungen bestanden"

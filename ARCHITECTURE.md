@@ -42,6 +42,19 @@ verhindern blinde Wiederholungen; unklare externe Antworten wechseln auf
 `uncertain` und erfordern manuellen Abgleich. Scheduler und normaler
 Publishing-Worker dürfen im Meta-Test keine echten Aufträge beanspruchen.
 
+Die getrennte Produktionsumgebung kann ausdrücklich freigegebene und fällige
+Aufträge automatisch verarbeiten. Der Worker startet diese Funktion nur, wenn
+Produktionsmodus und drei globale Automatik-Gates gemeinsam aktiv sind. Jede
+Instagram-Seite benötigt zusätzlich eine versioniert auditierte Freigabe. Vor
+jedem externen Schritt werden Not-Aus, Verbindung, Berechtigungen, Token,
+Seiten- und Medienartfreigabe, Beitragsversion, Spielstatus, Zeitpunkt, Datei
+und Prüfsumme erneut geprüft. `MetaPublishingAttempt.trigger_mode` trennt
+manuelle und automatische Abläufe. `next_action_at` macht die Statusabfrage
+neustartsicher. Pro Durchlauf wird höchstens ein externer Schritt ausgeführt;
+gespeicherte Container- und Media-IDs verhindern Doppelveröffentlichungen.
+Unterbrochene möglicherweise schreibende Aufrufe werden `uncertain` und nie
+automatisch wiederholt.
+
 ## Sicherheit
 Argon2-Passwort-Hashes, serverseitig signierte HttpOnly-Sessions, SameSite-Cookies, Produktions-`Secure`, CSRF-Token, 15-Minuten-Sperre nach fünf Fehlversuchen, Inaktivitätsablauf, keine Registrierung sowie rollen- und mannschaftsbezogene serverseitige Prüfungen bilden die Basis. Pfade werden kanonisiert; absolute Pfade, Traversal, ausbrechende Symlinks und fremde Dateitypen werden verworfen. SMB wird nur vom Host gemountet, Credentials gelangen weder in DB noch Quellcode. Secrets kommen aus Docker Secrets/Environment. Optimistische Versionsfelder verhindern Lost Updates. Sicherheits- und Freigabeaktionen werden auditiert. TOTP-2FA kann am User-Modul ergänzt werden.
 
@@ -54,8 +67,9 @@ Abrufstand und die weiterhin vor jedem echten Test zu kontrollierenden
 Voraussetzungen sind in [`docs/META_TEST.md`](docs/META_TEST.md) aufgeführt.
 Die API-Version ist konfigurierbar und wird nicht als dauerhaft gültig
 betrachtet. Tokenlaufzeiten werden aus den offiziellen API-Antworten
-übernommen, nicht lokal erfunden. Produktion und Scheduler-Live-Publishing
-bleiben deaktiviert.
+übernommen, nicht lokal erfunden. Die Produktionsautomatik wird deaktiviert
+ausgeliefert und ist in
+[`docs/AUTOMATIC_PUBLISHING.md`](docs/AUTOMATIC_PUBLISHING.md) beschrieben.
 
 ## Bedienbare Testversion
 `admin_routes` stellt CSRF-geschützte, serverseitig autorisierte Workflows für Mannschaften, Seiten, Benutzer/Teamzuordnungen, SMB-Scan, Medienstatus, Fonts, versionierte Designs, Ankündigungs-/Ergebnisregeln, Multi-Story-Regeln, Beitragsprüfung/Freigabe/Ablehnung und Auftragsabbruch bereit. Versionsfelder verhindern unbemerkte parallele Statusänderungen. Verstrichene Jobs werden sichtbar markiert und gemäß Teamregel sofort, manuell, übersprungen oder am nächsten Story-Termin behandelt.

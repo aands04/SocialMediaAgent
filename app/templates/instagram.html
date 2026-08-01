@@ -2,15 +2,21 @@
 {% block content %}
 <h1>Instagram-Seiten</h1>
 {% if environment == 'meta-test' %}
-<div class="meta-test-alert">META-TEST – ECHTE INSTAGRAM-VERÖFFENTLICHUNGEN MÖGLICH</div>
-<form method="post" action="/meta-test/emergency-stop" class="button-row">
+<div class="meta-test-alert">META-TEST – ECHTE INSTAGRAM-VERÖFFENTLICHUNGEN MÖGLICH – NUR MANUELL</div>
+{% elif environment == 'production' %}
+<div class="meta-test-alert">PRODUKTION – AUTOMATISCHE INSTAGRAM-VERÖFFENTLICHUNGEN MÖGLICH</div>
+{% else %}
+<p class="warning">Diese Umgebung erlaubt keine echte Meta-Verbindung. Das Staging bleibt im harten Dry-Run.</p>
+{% endif %}
+
+{% if environment in ['meta-test', 'production'] %}
+<form method="post" action="/meta/emergency-stop" class="button-row">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   <button class="danger" name="enabled" value="true">Globalen Not-Aus aktivieren</button>
   <button name="enabled" value="false">Not-Aus nach Prüfung deaktivieren</button>
 </form>
-{% else %}
-<p class="warning">Diese Umgebung erlaubt keine echte Meta-Verbindung. Das Staging bleibt im harten Dry-Run.</p>
 {% endif %}
+
 <section>
   <h2>Seite sicher deaktiviert anlegen</h2>
   <form method="post" class="gridform">
@@ -23,6 +29,7 @@
     <button>Sicher deaktiviert anlegen</button>
   </form>
 </section>
+
 {% for page in items %}
 {% set connection = connections.get(page.id) %}
 {% set summary = attempt_summary.get(page.id, {}) %}
@@ -43,9 +50,14 @@
     <dt>Letzte Prüfung</dt><dd>{{ connection.last_check_at | berlin if connection.last_check_at else 'noch nie' }}</dd>
     <dt>Letzte erfolgreiche Veröffentlichung</dt><dd>{{ summary.last_success.completed_at | berlin if summary.last_success else 'keine' }}</dd>
     <dt>Letzter Fehler</dt><dd>{{ connection.last_error or (summary.last_failure.error_message if summary.last_failure else 'keiner') }}</dd>
+    {% if environment == 'production' %}
+    <dt>Automatik</dt><dd>{{ 'ausdrücklich aktiviert' if page.automatic_publishing_enabled else 'deaktiviert' }}</dd>
+    <dt>Automatik bestätigt</dt><dd>{{ page.automatic_publishing_confirmed_at | berlin if page.automatic_publishing_confirmed_at else 'nein' }}</dd>
+    {% endif %}
   </dl>
   {% endif %}
-  {% if environment == 'meta-test' %}
+
+  {% if environment in ['meta-test', 'production'] %}
   <div class="button-row">
     {% if not connection or connection.status == 'disconnected' %}
     <form method="post" action="/instagram/{{ page.id }}/meta/connect"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Instagram verbinden</button></form>
@@ -53,15 +65,24 @@
     <form method="post" action="/instagram/{{ page.id }}/meta/check"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Verbindung prüfen</button></form>
     <form method="post" action="/instagram/{{ page.id }}/meta/refresh"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Token erneuern</button></form>
     <form method="post" action="/instagram/{{ page.id }}/meta/disconnect"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="danger">Verbindung trennen</button></form>
-    <a class="button" href="/meta-test/{{ page.id }}">Meta-Testassistent öffnen</a>
+    {% if environment == 'meta-test' %}<a class="button" href="/meta-test/{{ page.id }}">Meta-Testassistent öffnen</a>{% endif %}
     {% endif %}
   </div>
+
   {% if connection %}
   <form method="post" action="/instagram/{{ page.id }}/meta/settings" class="gridform">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    {% if environment == 'meta-test' %}
     <label><input type="checkbox" name="test_account" {% if connection.test_account %}checked{% endif %}> Isolierte Testseite ausdrücklich bestätigen</label>
     <label><input type="checkbox" name="publishing_enabled" {% if page.publishing_enabled %}checked{% endif %}> Manuelles Meta-Test-Publishing aktivieren</label>
-    <button>Meta-Testeinstellungen speichern</button>
+    {% else %}
+    <label><input type="checkbox" name="publishing_enabled" {% if page.publishing_enabled %}checked{% endif %}> Publishing für diese Seite aktivieren</label>
+    <label><input type="checkbox" name="automatic_publishing_enabled" {% if page.automatic_publishing_enabled %}checked{% endif %}> Freigegebene fällige Beiträge automatisch veröffentlichen</label>
+    <label>Bestätigung bei Aktivierung<input name="automatic_confirmation" placeholder="AUTOMATISCH VERÖFFENTLICHEN" autocomplete="off"></label>
+    {% endif %}
+    <label><input type="checkbox" name="allow_feed" {% if page.allowed_types.get('feed', false) %}checked{% endif %}> Feed-Beiträge erlauben</label>
+    <label><input type="checkbox" name="allow_story" {% if page.allowed_types.get('story', false) %}checked{% endif %}> Story-Beiträge erlauben</label>
+    <button>Instagram-Einstellungen speichern</button>
   </form>
   {% endif %}
   {% else %}
