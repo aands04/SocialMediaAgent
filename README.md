@@ -1,6 +1,11 @@
 # SocialMediaAgent
 
-Sicherheitsorientiertes, selbst gehostetes MVP für automatisch erzeugte, **immer manuell freizugebende** Fußball-Instagram-Beiträge. UI und Betriebsdokumentation sind deutsch; externe FUSSBALL.DE-, OpenAI-, SMB- und Meta-Zugriffe bleiben standardmäßig Fixture/Mock/Dry-Run.
+Sicherheitsorientierte, selbst gehostete Anwendung für automatisch erzeugte,
+**immer manuell freizugebende** Fußball-Instagram-Beiträge. Freigegebene und
+fällige Beiträge können in einer getrennten Produktionsumgebung kontrolliert
+vom Scheduler veröffentlicht werden. UI und Betriebsdokumentation sind
+deutsch; externe FUSSBALL.DE-, OpenAI-, SMB- und Meta-Zugriffe bleiben
+standardmäßig Fixture/Mock/Dry-Run.
 
 ## Enthalten
 - FastAPI/Jinja2/HTMX-Dashboard, Session-Login, Argon2, CSRF, RBAC und Mannschafts-Scope
@@ -119,6 +124,20 @@ Compose-Umgebung. Das normale Proxmox-Staging bleibt dauerhaft im harten
 `validate-only`, Container-Test, erster Feed-/Story-Test, Tokenpflege,
 Not-Aus und unklare Plattformantworten sind in
 [`docs/META_TEST.md`](docs/META_TEST.md) dokumentiert.
+
+## Kontrollierte automatische Veröffentlichung
+
+Die Scheduler-Automatik ist ausschließlich in der getrennten
+`docker-compose.production.yml`-Umgebung verfügbar und beginnt deaktiviert.
+Staging bleibt Dry-Run, der Meta-Test bleibt ausschließlich manuell. Umgebung,
+drei gemeinsam zu aktivierende globale Gates, explizite Freigabe je
+Instagram-Seite, Beitrags- und Versionsfreigabe, Not-Aus, Verbindung, Token,
+Spielstatus, Zeitpunkt, Datei und Prüfsumme werden vor jedem externen Schritt
+erneut geprüft. Container- und Media-IDs werden persistent gespeichert;
+unklare schreibende Meta-Antworten werden nie automatisch wiederholt.
+
+Einrichtung, Aktivierung, Pause, Not-Aus und Diagnose sind in
+[`docs/AUTOMATIC_PUBLISHING.md`](docs/AUTOMATIC_PUBLISHING.md) beschrieben.
 
 ## FUSSBALL.DE-Mannschaftsspielplan
 Der Provider unterstützt neben dem kompakten Testformat die öffentliche Tabelle `#id-team-matchplan-table`: Eine `.row-competition` liefert Datum, Berliner Uhrzeit, Wettbewerb und Spielnummer für die unmittelbar folgende Spielzeile; Heim/Gast und die stabile externe ID stammen aus `.column-club` beziehungsweise `/spiel/.../spiel/ID`. Für jeden erkannten Termin wird die öffentliche Spiel-Detailseite kontrolliert und mit begrenzter Abrufzahl gelesen. Daraus übernimmt die Anwendung Platzname, Platzart und Anschrift; schlägt eine Detailseite fehl, bleibt der Spielplaneintrag erhalten und wird mit einer Warnung versehen.

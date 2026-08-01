@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -203,6 +205,10 @@ def meta_settings(
     csrf_token_value: str = Form(alias="csrf_token"),
     test_account: bool = Form(default=False),
     publishing_enabled: bool = Form(default=False),
+    automatic_publishing_enabled: bool = Form(default=False),
+    automatic_confirmation: str = Form(default=""),
+    allow_feed: bool = Form(default=False),
+    allow_story: bool = Form(default=False),
     current: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -215,26 +221,55 @@ def meta_settings(
         connection.status != "connected" or connection.account_type != "BUSINESS"
     ):
         raise HTTPException(409, "Nur eine geprüfte Business-Verbindung darf aktiviert werden")
-    connection.test_account = test_account
+    required_scopes = {
+        "instagram_business_basic",
+        "instagram_business_content_publish",
+    }
+    if publishing_enabled and not required_scopes.issubset(set(connection.scopes or [])):
+        raise HTTPException(409, "Erforderliche Instagram-Berechtigungen fehlen")
+    if publishing_enabled and not (allow_feed or allow_story):
+        raise HTTPException(409, "Mindestens eine Medienart muss aktiviert sein")
+    if settings.environment == "meta-test" and automatic_publishing_enabled:
+        raise HTTPException(409, "Automatische Veröffentlichung ist im Meta-Test verboten")
+    if settings.environment == "production" and automatic_publishing_enabled:
+        if not publishing_enabled:
+            raise HTTPException(409, "Zuerst Publishing für die Seite aktivieren")
+        if automatic_confirmation != "AUTOMATISCH VERÖFFENTLICHEN":
+            raise HTTPException(409, "Bestätigung für automatische Veröffentlichung fehlt")
+        if not connection.last_check_at:
+            raise HTTPException(409, "Meta-Verbindung wurde noch nicht aktuell geprüft")
+        page.automatic_publishing_confirmed_by = current.id
+        page.automatic_publishing_confirmed_at = datetime.now(timezone.utc)
+    elif not automatic_publishing_enabled:
+        page.automatic_publishing_confirmed_by = None
+        page.automatic_publishing_confirmed_at = None
+    connection.test_account = test_account if settings.environment == "meta-test" else False
     page.publishing_enabled = publishing_enabled
+    page.allowed_types = {"feed": allow_feed, "story": allow_story}
+    page.automatic_publishing_enabled = (
+        automatic_publishing_enabled if settings.environment == "production" else False
+    )
     page.active = True
     db.add(
         AuditLog(
             user_id=current.id,
-            action="meta.test_settings_changed",
+            action="meta.settings_changed",
             entity_type="instagram_connection",
             entity_id=connection.id,
             details={
                 "test_account": test_account,
                 "publishing_enabled": publishing_enabled,
+                "automatic_publishing_enabled": page.automatic_publishing_enabled,
+                "allowed_types": page.allowed_types,
             },
         )
     )
     db.commit()
-    return _redirect("/instagram", "Meta-Testeinstellungen gespeichert")
+    return _redirect("/instagram", "Instagram-Einstellungen gespeichert")
 
 
 @router.post("/meta-test/emergency-stop")
+@router.post("/meta/emergency-stop")
 def meta_emergency_stop(
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),

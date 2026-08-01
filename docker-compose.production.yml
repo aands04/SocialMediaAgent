@@ -1,0 +1,91 @@
+name: social-media-agent-production
+services:
+  db:
+    volumes:
+      - ${PRODUCTION_DATA_ROOT:?PRODUCTION_DATA_ROOT fehlt}/postgres:/var/lib/postgresql/data
+  migrate:
+    env_file: !override [.env.production]
+    environment:
+      ENVIRONMENT: production
+      PUBLISHER_MODE: instagram
+      META_TEST_ENABLED: "false"
+      META_TEST_PUBLISH_ENABLED: "false"
+      META_PRODUCTION_ENABLED: "true"
+    secrets: !override
+      - db_password
+      - session_secret
+  web:
+    env_file: !override [.env.production]
+    environment:
+      ENVIRONMENT: production
+      PUBLISHER_MODE: instagram
+      META_TEST_ENABLED: "false"
+      META_TEST_PUBLISH_ENABLED: "false"
+      META_PRODUCTION_ENABLED: "true"
+      REQUIRE_MEDIA_MOUNT: "true"
+      LOG_ROOT: /app/data/logs
+    secrets: !override
+      - db_password
+      - session_secret
+      - openai_api_key
+      - meta_app_id
+      - meta_app_secret
+      - meta_token_encryption_key
+    volumes:
+      - ${PRODUCTION_DATA_ROOT}/generated:/app/data/generated
+      - ${PRODUCTION_DATA_ROOT}/uploads:/app/data/uploads
+      - ${PRODUCTION_DATA_ROOT}/provider-snapshots:/app/data/provider-snapshots
+      - ${PRODUCTION_DATA_ROOT}/logs:/app/data/logs
+      - ${PRODUCTION_BACKUP_ROOT}:/app/data/backups
+      - type: bind
+        source: ${MEDIA_HOST_ROOT:?MEDIA_HOST_ROOT fehlt}
+        target: /app/external-media
+        read_only: true
+  worker:
+    env_file: !override [.env.production]
+    environment:
+      ENVIRONMENT: production
+      PUBLISHER_MODE: instagram
+      META_TEST_ENABLED: "false"
+      META_TEST_PUBLISH_ENABLED: "false"
+      META_PRODUCTION_ENABLED: "true"
+      REQUIRE_MEDIA_MOUNT: "true"
+      LOG_ROOT: /app/data/logs
+    secrets: !override
+      - db_password
+      - session_secret
+      - openai_api_key
+      - meta_token_encryption_key
+    volumes:
+      - ${PRODUCTION_DATA_ROOT}/generated:/app/data/generated
+      - ${PRODUCTION_DATA_ROOT}/uploads:/app/data/uploads
+      - ${PRODUCTION_DATA_ROOT}/provider-snapshots:/app/data/provider-snapshots
+      - ${PRODUCTION_DATA_ROOT}/logs:/app/data/logs
+      - ${PRODUCTION_BACKUP_ROOT}:/app/data/backups
+      - type: bind
+        source: ${MEDIA_HOST_ROOT:?MEDIA_HOST_ROOT fehlt}
+        target: /app/external-media
+        read_only: true
+  proxy:
+    ports: !override ["127.0.0.1:${HTTP_PORT:-8083}:80"]
+  public_proxy:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deploy/nginx/meta-public.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "127.0.0.1:${META_PUBLIC_PORT:-8084}:80"
+    depends_on:
+      web: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, nginx, -t]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+secrets:
+  db_password: {file: "${PRODUCTION_SECRETS_ROOT:?PRODUCTION_SECRETS_ROOT fehlt}/db_password"}
+  session_secret: {file: "${PRODUCTION_SECRETS_ROOT}/session_secret"}
+  openai_api_key: {file: "${PRODUCTION_SECRETS_ROOT}/openai_api_key"}
+  meta_app_id: {file: "${PRODUCTION_SECRETS_ROOT}/meta_app_id"}
+  meta_app_secret: {file: "${PRODUCTION_SECRETS_ROOT}/meta_app_secret"}
+  meta_token_encryption_key: {file: "${PRODUCTION_SECRETS_ROOT}/meta_token_encryption_key"}
