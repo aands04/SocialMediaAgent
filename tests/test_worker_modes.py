@@ -26,6 +26,15 @@ def test_staging_remains_hard_dry_run():
     assert _automatic_scheduler_enabled(settings) is False
 
 
+@pytest.mark.parametrize(
+    "gate",
+    ["fussball_automatic_sync_enabled", "automatic_post_generation_enabled"],
+)
+def test_staging_rejects_automatic_fussball_gates(gate):
+    with pytest.raises(RuntimeError):
+        _validate_worker_environment(_settings(**{gate: True}))
+
+
 def test_meta_test_forbids_automatic_scheduler():
     settings = _settings(
         environment="meta-test",
@@ -59,6 +68,18 @@ def test_production_rejects_partially_enabled_gates():
     )
 
     with pytest.raises(RuntimeError, match="allen drei Gates"):
+        _validate_worker_environment(settings)
+
+
+def test_production_rejects_generation_without_fussball_sync():
+    settings = _settings(
+        environment="production",
+        publisher_mode="instagram",
+        meta_production_enabled=True,
+        automatic_post_generation_enabled=True,
+    )
+
+    with pytest.raises(RuntimeError, match="FUSSBALL.DE-Abruf"):
         _validate_worker_environment(settings)
 
 

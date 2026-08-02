@@ -35,6 +35,7 @@ from app.models import (
     AuditLog,
     DesignTemplate,
     FontAsset,
+    FussballSyncState,
     Game,
     GenerationJob,
     GenerationJobStatus,
@@ -1190,6 +1191,11 @@ def save_rules(
     result_enabled: bool = Form(default=False),
     result_wait_minutes: int = Form(),
     allow_provisional_games: bool = Form(default=False),
+    automatic_sync_enabled: bool = Form(default=False),
+    automatic_generation_enabled: bool = Form(default=False),
+    reminder_enabled: bool = Form(default=False),
+    generation_lead_minutes: int = Form(default=120),
+    reminder_feed_before_minutes: int = Form(default=360),
     image_prompt_feed: str = Form(default="default-image-feed"),
     image_prompt_story: str = Form(default="default-image-story"),
     text_prompt: str = Form(default="default-text-announcement"),
@@ -1207,6 +1213,15 @@ def save_rules(
         raise HTTPException(404)
     if late_approval not in {"publish_now", "manual", "skip", "next_story"}:
         raise HTTPException(422)
+    if not 0 <= generation_lead_minutes <= 10080:
+        raise HTTPException(422, "Der Generierungsvorlauf muss zwischen 0 und 10080 Minuten liegen")
+    if not 0 <= reminder_feed_before_minutes <= 10080:
+        raise HTTPException(422, "Der Erinnerungszeitpunkt ist ungültig")
+    if automatic_generation_enabled and not automatic_sync_enabled:
+        raise HTTPException(
+            422,
+            "Automatische Entwürfe erfordern den automatischen FUSSBALL.DE-Abruf",
+        )
     team.rules = {
         **team.rules,
         "announcement_enabled": announcement_enabled,
@@ -1215,6 +1230,11 @@ def save_rules(
         "result_enabled": result_enabled,
         "result_wait_minutes": result_wait_minutes,
         "allow_provisional_games": allow_provisional_games,
+        "automatic_sync_enabled": automatic_sync_enabled,
+        "automatic_generation_enabled": automatic_generation_enabled,
+        "reminder_enabled": reminder_enabled,
+        "generation_lead_minutes": generation_lead_minutes,
+        "reminder_feed_before_minutes": reminder_feed_before_minutes,
         "image_prompt_feed": image_prompt_feed,
         "image_prompt_story": image_prompt_story,
         "text_prompt": text_prompt,
@@ -1224,6 +1244,23 @@ def save_rules(
         "style_direction": style_direction.strip(),
     }
     team.version += 1
+    sync_state = db.get(FussballSyncState, team.id)
+    if automatic_sync_enabled:
+        if sync_state is None:
+            db.add(
+                FussballSyncState(
+                    team_id=team.id,
+                    status="idle",
+                    next_poll_at=datetime.now(timezone.utc),
+                )
+            )
+        elif sync_state.status != "running":
+            sync_state.status = "idle"
+            sync_state.next_poll_at = datetime.now(timezone.utc)
+            sync_state.lease_owner = None
+            sync_state.lease_expires_at = None
+    elif sync_state is not None and sync_state.status != "running":
+        sync_state.status = "disabled"
     audit(db, current, "rules.updated", "team", team.id, team.id, team.rules)
     db.commit()
     return redirect(f"/rules?team_id={team.id}")

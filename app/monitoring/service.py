@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import (
+    FussballSyncState,
     GenerationJob,
     GenerationJobStatus,
     InstagramConnection,
@@ -19,6 +20,7 @@ from app.models import (
     PublicationJob,
     PublicMediaGrant,
     SystemSetting,
+    Team,
 )
 
 
@@ -80,10 +82,32 @@ def system_status(db: Session, settings: Settings) -> dict:
                 else "deaktiviert"
             ),
         }
+        automatic_fussball_expected = (
+            settings.environment == "production"
+            and settings.fussball_automatic_sync_enabled
+        )
+        checks["automatic_fussball_sync"] = {
+            "ok": worker_ok
+            and bool(data.get("automatic_fussball_sync"))
+            == automatic_fussball_expected,
+            "detail": {
+                "sync": "aktiv" if data.get("automatic_fussball_sync") else "deaktiviert",
+                "draft_generation": (
+                    "aktiv"
+                    if data.get("automatic_post_generation")
+                    else "deaktiviert"
+                ),
+                "last_cycle": data.get("fussball_cycle"),
+            },
+        }
     except Exception as exc:
         checks["worker"] = {"ok": False, "detail": f"Heartbeat fehlt: {exc}"}
         checks["scheduler"] = {"ok": False, "detail": "kein Worker-Heartbeat"}
         checks["automatic_scheduler"] = {
+            "ok": False,
+            "detail": "kein Worker-Heartbeat",
+        }
+        checks["automatic_fussball_sync"] = {
             "ok": False,
             "detail": "kein Worker-Heartbeat",
         }
@@ -93,6 +117,8 @@ def system_status(db: Session, settings: Settings) -> dict:
         critical.append("Scheduler")
     if not checks["automatic_scheduler"]["ok"]:
         critical.append("Automatischer Instagram-Scheduler")
+    if not checks["automatic_fussball_sync"]["ok"]:
+        critical.append("Automatischer FUSSBALL.DE-Abruf")
     media_ok = settings.media_root.is_dir() and settings.media_root.exists()
     checks["smb"] = {"ok": media_ok, "detail": str(settings.media_root)}
     if not media_ok:
@@ -381,6 +407,55 @@ def system_status(db: Session, settings: Settings) -> dict:
             ),
             "detail": meta_counts,
         }
+        sync_states = db.scalars(select(FussballSyncState)).all()
+        enabled_team_ids = {
+            team.id
+            for team in db.scalars(select(Team).where(Team.active.is_(True)))
+            if (team.rules or {}).get("automatic_sync_enabled")
+        }
+        enabled_states = [
+            state for state in sync_states if state.team_id in enabled_team_ids
+        ]
+        stale_before = now - timedelta(
+            seconds=max(3600, settings.fussball_sync_interval_seconds * 3)
+        )
+        stale = [
+            state
+            for state in enabled_states
+            if not state.last_success_at
+            or (
+                state.last_success_at
+                if state.last_success_at.tzinfo
+                else state.last_success_at.replace(tzinfo=timezone.utc)
+            )
+            < stale_before
+        ]
+        checks["fussball_automatic"] = {
+            "ok": not settings.fussball_automatic_sync_enabled or not stale,
+            "detail": {
+                "global_sync_gate": settings.fussball_automatic_sync_enabled,
+                "global_generation_gate": settings.automatic_post_generation_enabled,
+                "enabled_teams": len(enabled_team_ids),
+                "running": sum(state.status == "running" for state in enabled_states),
+                "errors": sum(state.status == "error" for state in enabled_states),
+                "stale": len(stale),
+                "last_success": max(
+                    (
+                        state.last_success_at
+                        for state in enabled_states
+                        if state.last_success_at
+                    ),
+                    default=None,
+                ),
+                "last_errors": {
+                    state.team_id: state.last_error
+                    for state in enabled_states
+                    if state.last_error
+                },
+            },
+        }
+        if not checks["fussball_automatic"]["ok"]:
+            critical.append("Automatische FUSSBALL.DE-Synchronisation")
     except Exception as exc:
         db.rollback()
         checks["counts"] = {"ok": False, "detail": f"Schema nicht bereit: {exc}"}

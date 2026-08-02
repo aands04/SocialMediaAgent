@@ -17,6 +17,11 @@
     <label><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Ergebnismeldung aktiv</label>
     <label>Wartezeit nach Ergebnis<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',15)}}"></label>
     <label><input type="checkbox" name="allow_provisional_games" value="true" {% if selected.rules.get('allow_provisional_games') %}checked{% endif %}> Vorläufige FUSSBALL.DE-Spielpläne für Ankündigungen zulassen</label>
+    <label><input type="checkbox" name="automatic_sync_enabled" value="true" {% if selected.rules.get('automatic_sync_enabled') %}checked{% endif %}> FUSSBALL.DE-Spielplan automatisch abrufen</label>
+    <label><input type="checkbox" name="automatic_generation_enabled" value="true" {% if selected.rules.get('automatic_generation_enabled') %}checked{% endif %}> Freigabepflichtige Entwürfe automatisch erzeugen</label>
+    <label>Generierungsvorlauf in Minuten<input type="number" name="generation_lead_minutes" min="0" max="10080" value="{{selected.rules.get('generation_lead_minutes',120)}}"></label>
+    <label><input type="checkbox" name="reminder_enabled" value="true" {% if selected.rules.get('reminder_enabled') %}checked{% endif %}> Separaten Erinnerungsbeitrag automatisch erzeugen</label>
+    <label>Erinnerungs-Feed Minuten vor Anpfiff<input type="number" name="reminder_feed_before_minutes" min="0" max="10080" value="{{selected.rules.get('reminder_feed_before_minutes',360)}}"></label>
     <p class="warning">Der vorläufige Providerstatus bleibt sichtbar. Absagen und Verlegungen bleiben immer gesperrt. Nach einer Änderung den Diagnose-Snapshot erneut importieren.</p>
     <label>KI-Bildprompt Feed
       <select name="image_prompt_feed">

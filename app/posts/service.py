@@ -36,7 +36,9 @@ def reserve_image(db:Session,team_id:str,game_id:str)->MediaAsset|None:
     if asset: asset.reserved_game_id=game_id; asset.uses+=1; db.flush()
     return asset
 def story_time(rule:StoryRule,game:Game,approved_at:datetime|None=None)->datetime:
-    refs={"kickoff":game.kickoff,"planned_end":game.kickoff+timedelta(minutes=120),"approval":approved_at}
+    detected=(game.overrides or {}).get("result_detected_at")
+    result_detected=datetime.fromisoformat(detected) if detected else game.checked_at
+    refs={"kickoff":game.kickoff,"planned_end":game.kickoff+timedelta(minutes=120),"result_detected":result_detected,"approval":approved_at}
     base=refs.get(rule.reference) or game.checked_at
     delta=timedelta(minutes=rule.offset_minutes)*(1 if rule.direction=="after" else -1)
     result=base+delta
@@ -170,7 +172,14 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
     post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v1.png",{**facts,"template":feed_design,"image_prompt":feed_prompt}))
     if hasattr(renderer,"metadata_for"):
         post.design_snapshot={**post.design_snapshot,"media":{"feed":renderer.metadata_for(post.feed_path)}}
-    feed_at=game.kickoff-timedelta(minutes=int(team.rules.get("feed_before_minutes",1440)))
+    if post_type=="result":
+        detected=(game.overrides or {}).get("result_detected_at")
+        result_detected=datetime.fromisoformat(detected) if detected else game.checked_at
+        feed_at=result_detected+timedelta(minutes=int(team.rules.get("result_wait_minutes",15)))
+    elif post_type=="reminder":
+        feed_at=game.kickoff-timedelta(minutes=int(team.rules.get("reminder_feed_before_minutes",360)))
+    else:
+        feed_at=game.kickoff-timedelta(minutes=int(team.rules.get("feed_before_minutes",1440)))
     db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=page.id,kind="feed",media_path=post.feed_path,text_snapshot=post.text,scheduled_at=feed_at,idempotency_key=f"{post.id}:feed:v1"))
     rules=db.scalars(select(StoryRule).where(StoryRule.team_id==team.id,StoryRule.post_type==post_type,StoryRule.active.is_(True)).order_by(StoryRule.sort_order)).all(); seen=set()
     story_snapshots=[]
