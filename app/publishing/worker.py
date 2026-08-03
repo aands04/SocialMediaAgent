@@ -12,6 +12,7 @@ from app.models import (
     Post,
     PostStatus,
     PublicationJob,
+    PublicationMediaItem,
     SystemSetting,
     Team,
 )
@@ -22,7 +23,9 @@ def process_job(db:Session,job_id:str,publisher:SocialMediaPublisher,settings:Se
     job=db.scalar(select(PublicationJob).where(PublicationJob.id==job_id).with_for_update())
     if not job or job.status in {JobStatus.PUBLISHED,JobStatus.PUBLISHING}:return job
     post=db.get(Post,job.post_id); game=db.get(Game,job.game_id) if job.game_id else None; team=db.get(Team,job.team_id); page=db.get(InstagramPage,job.instagram_page_id); stop=db.get(SystemSetting,"emergency_stop")
-    checks=[(settings.global_publish_enabled,"Globales Publishing ist nicht aktiviert"),(not(stop and stop.value.get("enabled")),"Not-Aus aktiv"),(post.status in {PostStatus.APPROVED,PostStatus.SCHEDULED,PostStatus.PARTIAL},"Beitrag nicht freigegeben"),(post.version==job.approved_post_version,"Freigegebene Version verändert"),(game is None or game.status not in {"cancelled","postponed","provisional"},"Spielstatus sperrt Veröffentlichung"),(game is None or not game.overrides.get("automation_blocked"),"Spiel ist für Automatisierung gesperrt"),(not job.stale_time,"Veröffentlichungszeit ist möglicherweise veraltet"),(post.publishing_enabled and team.publishing_enabled and page.publishing_enabled,"Publishing deaktiviert"),(page.active and page.connection_status=="connected","Instagram-Seite gestört"),(Path(job.media_path).is_file(),"Mediendatei fehlt"),((job.scheduled_at.replace(tzinfo=timezone.utc) if job.scheduled_at.tzinfo is None else job.scheduled_at)<=datetime.now(timezone.utc),"Zeitpunkt nicht erreicht")]
+    media_items=list(db.scalars(select(PublicationMediaItem).where(PublicationMediaItem.publication_job_id==job.id).order_by(PublicationMediaItem.position)))
+    carousel_ok=job.kind!="carousel" or (2<=len(media_items)<=10 and [item.position for item in media_items]==list(range(1,len(media_items)+1)) and all(Path(item.media_path).is_file() for item in media_items))
+    checks=[(settings.global_publish_enabled,"Globales Publishing ist nicht aktiviert"),(not(stop and stop.value.get("enabled")),"Not-Aus aktiv"),(post.status in {PostStatus.APPROVED,PostStatus.SCHEDULED,PostStatus.PARTIAL},"Beitrag nicht freigegeben"),(post.version==job.approved_post_version,"Freigegebene Version verändert"),(game is None or game.status not in {"cancelled","postponed","provisional"},"Spielstatus sperrt Veröffentlichung"),(game is None or not game.overrides.get("automation_blocked"),"Spiel ist für Automatisierung gesperrt"),(not job.stale_time,"Veröffentlichungszeit ist möglicherweise veraltet"),(post.publishing_enabled and team.publishing_enabled and page.publishing_enabled,"Publishing deaktiviert"),(page.active and page.connection_status=="connected","Instagram-Seite gestört"),(Path(job.media_path).is_file(),"Mediendatei fehlt"),(carousel_ok,"Karussellbilder fehlen oder Reihenfolge ist ungültig"),((job.scheduled_at.replace(tzinfo=timezone.utc) if job.scheduled_at.tzinfo is None else job.scheduled_at)<=datetime.now(timezone.utc),"Zeitpunkt nicht erreicht")]
     for ok,message in checks:
         if not ok:
             if "Version" in message: post.status=PostStatus.REAPPROVAL; job.status=JobStatus.UNAPPROVED

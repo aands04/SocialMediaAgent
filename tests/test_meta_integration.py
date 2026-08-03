@@ -38,10 +38,12 @@ from app.models import (
     InstagramOAuthState,
     InstagramPage,
     JobStatus,
+    MetaCarouselItem,
     MetaPublishingAttempt,
     Post,
     PostStatus,
     PublicationJob,
+    PublicationMediaItem,
     Role,
     SystemSetting,
     Team,
@@ -339,6 +341,41 @@ def test_meta_api_uses_instagram_host_and_story_has_no_caption(tmp_path):
     assert request.headers["Authorization"] == "Bearer token"
 
 
+def test_meta_api_builds_carousel_child_and_ordered_parent_payloads(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"id": f"container-{len(calls)}"})
+
+    api = MetaApiClient(
+        meta_settings(tmp_path),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    api.create_carousel_item(
+        access_token="token",
+        account_id="ig-user",
+        image_url="https://meta.example/item-1.png",
+    )
+    api.create_carousel_container(
+        access_token="token",
+        account_id="ig-user",
+        child_ids=["child-1", "child-2"],
+        caption="Gemeinsamer Text",
+    )
+    child_payload = parse_qs(calls[0].content.decode())
+    parent_payload = parse_qs(calls[1].content.decode())
+    assert child_payload == {
+        "image_url": ["https://meta.example/item-1.png"],
+        "is_carousel_item": ["true"],
+    }
+    assert parent_payload == {
+        "media_type": ["CAROUSEL"],
+        "children": ["child-1,child-2"],
+        "caption": ["Gemeinsamer Text"],
+    }
+
+
 def test_hashed_media_grant_allows_multiple_fetches(db, tmp_path):
     settings = meta_settings(tmp_path)
     user, _, _, _, job = make_context(db, settings)
@@ -393,6 +430,23 @@ class PublishingApi:
             "id": "media-456",
             "permalink": "https://www.instagram.com/p/test/",
         }
+
+
+class CarouselPublishingApi(PublishingApi):
+    def __init__(self):
+        super().__init__()
+        self.child_urls = []
+        self.parent_children = []
+
+    def create_carousel_item(self, **kwargs):
+        self.child_urls.append(kwargs["image_url"])
+        return {"id": f"child-{len(self.child_urls)}"}
+
+    def create_carousel_container(self, **kwargs):
+        self.container_calls += 1
+        self.parent_children = list(kwargs["child_ids"])
+        assert kwargs["caption"] == "SV Ehlen gegen Testgegner."
+        return {"id": "carousel-parent-123"}
 
 
 def test_manual_container_and_publish_flow_is_idempotent(db, tmp_path):
@@ -727,6 +781,77 @@ def test_automatic_scheduler_publishes_once_without_confirmation(db, tmp_path):
     assert fourth.published == 0
     assert api.container_calls == 1
     assert api.publish_calls == 1
+    assert job.status == JobStatus.PUBLISHED
+    assert post.status == PostStatus.PUBLISHED
+
+
+def test_carousel_creates_ordered_children_then_one_parent_and_publishes(db, tmp_path):
+    settings = meta_settings(tmp_path)
+    user, _, _, post, job = make_context(db, settings)
+    job.kind = "carousel"
+    job.idempotency_key = "meta-test-carousel-v1"
+    source = settings.generated_root / "feed.png"
+    for position in range(1, 4):
+        target = settings.generated_root / f"carousel-{position}.png"
+        target.write_bytes(source.read_bytes())
+        db.add(
+            PublicationMediaItem(
+                publication_job_id=job.id,
+                position=position,
+                media_path=str(target),
+                checksum="will-be-validated-from-file",
+                mime_type="image/png",
+                file_size=target.stat().st_size,
+                width=1080,
+                height=1350,
+            )
+        )
+    db.commit()
+
+    attempt, _ = create_attempt(
+        db,
+        settings,
+        publication_job_id=job.id,
+        stage="publish",
+        user=user,
+        media_http_client=public_media_client(settings),
+    )
+    api = CarouselPublishingApi()
+    code = issue_confirmation(db, settings, attempt, user, "create_container")
+    create_container(
+        db,
+        settings,
+        attempt_id=attempt.id,
+        user=user,
+        confirmation_code=code,
+        api=api,
+        media_http_client=public_media_client(settings),
+    )
+    assert len(api.child_urls) == 3
+    assert api.parent_children == ["child-1", "child-2", "child-3"]
+    assert api.container_calls == 1
+    children = list(
+        db.scalars(
+            select(MetaCarouselItem)
+            .where(MetaCarouselItem.attempt_id == attempt.id)
+            .order_by(MetaCarouselItem.position)
+        )
+    )
+    assert [child.meta_container_id for child in children] == api.parent_children
+
+    refresh_container_status(db, settings, attempt_id=attempt.id, user=user, api=api)
+    publish_code = issue_confirmation(db, settings, attempt, user, "publish")
+    publish(
+        db,
+        settings,
+        attempt_id=attempt.id,
+        user=user,
+        confirmation_code=publish_code,
+        api=api,
+    )
+    assert api.publish_calls == 1
+    db.refresh(job)
+    db.refresh(post)
     assert job.status == JobStatus.PUBLISHED
     assert post.status == PostStatus.PUBLISHED
 

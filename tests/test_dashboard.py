@@ -33,6 +33,7 @@ from app.models import (
     PromptTemplate,
     ProviderSnapshot,
     PublicationJob,
+    PublicationMediaItem,
     Role,
     Team,
     User,
@@ -238,14 +239,14 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
     blocked = client.post(
         "/posts/manual/new",
         data={**data, "csrf_token": "wrong"},
-        files={"image": ("beitrag.png", manual_post_image(), "image/png")},
+        files={"images": ("beitrag.png", manual_post_image(), "image/png")},
     )
     assert blocked.status_code == 403
 
     response = client.post(
         "/posts/manual/new",
         data=data,
-        files={"image": ("beitrag.png", manual_post_image(), "image/png")},
+        files={"images": ("beitrag.png", manual_post_image(), "image/png")},
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -272,6 +273,54 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
         data={"csrf_token": csrf_token, "version": 1},
     )
     assert rerender.status_code == 422
+
+    carousel_form = client.get("/posts/manual/new")
+    carousel_csrf = re.search(
+        r'name="csrf_token" value="([^"]+)', carousel_form.text
+    ).group(1)
+    carousel_submission = re.search(
+        r'name="submission_id" value="([^"]+)', carousel_form.text
+    ).group(1)
+    carousel = client.post(
+        "/posts/manual/new",
+        data={
+            "csrf_token": carousel_csrf,
+            "submission_id": carousel_submission,
+            "team_id": team_id,
+            "kind": "carousel",
+            "text": "Ein gemeinsamer Text für alle drei Bilder.",
+            "scheduled_at": local_publish_at,
+        },
+        files=[
+            ("images", ("drittes.png", manual_post_image(), "image/png")),
+            ("images", ("erstes.png", manual_post_image(), "image/png")),
+            ("images", ("zweites.png", manual_post_image(), "image/png")),
+        ],
+        follow_redirects=False,
+    )
+    assert carousel.status_code == 303
+    with factory() as db:
+        carousel_post = db.query(Post).filter_by(
+            manual_submission_id=carousel_submission
+        ).one()
+        carousel_job = db.query(PublicationJob).filter_by(
+            post_id=carousel_post.id
+        ).one()
+        media = db.query(PublicationMediaItem).filter_by(
+            publication_job_id=carousel_job.id
+        ).order_by(PublicationMediaItem.position).all()
+        assert carousel_job.kind == "carousel"
+        assert carousel_job.text_snapshot == carousel_post.text
+        assert [item.position for item in media] == [1, 2, 3]
+        assert [
+            image["original_filename"]
+            for image in carousel_post.design_snapshot["manual_upload"]["images"]
+        ] == ["drittes.png", "erstes.png", "zweites.png"]
+        carousel_post_id = carousel_post.id
+    carousel_detail = client.get(f"/posts/{carousel_post_id}")
+    assert carousel_detail.status_code == 200
+    assert "KARUSSELL 1/3" in carousel_detail.text
+    assert "KARUSSELL 3/3" in carousel_detail.text
 
 
 def player_image_archive(entries: dict[str, bytes]):

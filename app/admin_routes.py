@@ -51,6 +51,7 @@ from app.models import (
     PostStatus,
     PromptTemplate,
     PublicationJob,
+    PublicationMediaItem,
     Role,
     StoryRule,
     Team,
@@ -1387,7 +1388,7 @@ async def create_manual_post_route(
     kind: str = Form(),
     text_value: str = Form(alias="text"),
     scheduled_at_value: str = Form(alias="scheduled_at"),
-    image: UploadFile = File(),
+    images: list[UploadFile] = File(),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -1396,11 +1397,19 @@ async def create_manual_post_route(
     if not team:
         raise HTTPException(404, "Mannschaft nicht gefunden")
     require(current, db, "edit_post", team.id)
-    content = await image.read(MAX_MANUAL_IMAGE_BYTES + 1)
     try:
-        validated = validate_manual_image(
-            image.filename or "", image.content_type, content, kind
-        )
+        if kind == "carousel" and not 2 <= len(images) <= 10:
+            raise ManualPostError("Ein Karussell benötigt 2 bis 10 Bilder")
+        if kind != "carousel" and len(images) != 1:
+            raise ManualPostError("Feed und Story benötigen genau ein Bild")
+        validated = []
+        for image in images:
+            content = await image.read(MAX_MANUAL_IMAGE_BYTES + 1)
+            validated.append(
+                validate_manual_image(
+                    image.filename or "", image.content_type, content, kind
+                )
+            )
         scheduled_at = parse_manual_publication_time(
             scheduled_at_value, team.timezone or settings.timezone
         )
@@ -1413,7 +1422,7 @@ async def create_manual_post_route(
             kind=kind,
             text=text_value,
             scheduled_at=scheduled_at,
-            image=validated,
+            images=validated,
         )
     except ManualPostError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -1452,6 +1461,7 @@ def post_detail(
     from app.rendering.service import Renderer
 
     checks = {}
+    carousel_items = {}
     now = datetime.now(timezone.utc)
     late_jobs = {}
     renderer = Renderer(settings.generated_root, settings.media_root, Path("data/uploads"))
@@ -1460,9 +1470,26 @@ def post_detail(
         if scheduled_at.tzinfo is None:
             scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
         late_jobs[job.id] = scheduled_at < now
+        media_items = list(
+            db.scalars(
+                select(PublicationMediaItem)
+                .where(PublicationMediaItem.publication_job_id == job.id)
+                .order_by(PublicationMediaItem.position)
+            )
+        )
+        carousel_items[job.id] = media_items
         try:
-            report = renderer.validate(Path(job.media_path), job.kind)
-            checks[job.id] = f"PNG geprüft – {report['width']} × {report['height']}"
+            if job.kind == "carousel":
+                if not 2 <= len(media_items) <= 10:
+                    raise ValueError("Karussell benötigt 2 bis 10 geordnete Bilder")
+                reports = [renderer.validate(Path(media.media_path), "feed") for media in media_items]
+                checks[job.id] = (
+                    f"{len(reports)} PNGs geprüft – jeweils "
+                    f"{reports[0]['width']} × {reports[0]['height']}"
+                )
+            else:
+                report = renderer.validate(Path(job.media_path), job.kind)
+                checks[job.id] = f"PNG geprüft – {report['width']} × {report['height']}"
         except ValueError as exc:
             checks[job.id] = f"Prüfung fehlgeschlagen – {exc}"
     return render(
@@ -1473,6 +1500,7 @@ def post_detail(
         jobs=jobs,
         pages=pages,
         checks=checks,
+        carousel_items=carousel_items,
         late_jobs=late_jobs,
         logo_recompose=logo_recompose_availability(item, jobs),
         current_media_asset=current_media_asset,
@@ -2545,6 +2573,33 @@ def post_media(
     root = settings.generated_root.resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(404, "Grafik fehlt")
+    return FileResponse(path, media_type="image/png")
+
+
+@router.get("/posts/{post_id}/media/{job_id}/items/{item_id}")
+def post_carousel_media(
+    post_id: str,
+    job_id: str,
+    item_id: str,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    post = db.get(Post, post_id)
+    job = db.get(PublicationJob, job_id)
+    media = db.get(PublicationMediaItem, item_id)
+    if (
+        not post
+        or not job
+        or not media
+        or job.post_id != post.id
+        or media.publication_job_id != job.id
+    ):
+        raise HTTPException(404)
+    require(current, db, "view", post.team_id)
+    path = Path(media.media_path).resolve()
+    root = settings.generated_root.resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPException(404, "Karussellbild fehlt")
     return FileResponse(path, media_type="image/png")
 
 

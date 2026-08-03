@@ -32,6 +32,7 @@ from app.models import (
     AuditLog,
     InstagramConnection,
     InstagramPage,
+    MetaCarouselItem,
     MetaPublishingAttempt,
     Post,
     PublicationJob,
@@ -398,14 +399,19 @@ def _render_attempt(
     job = db.get(PublicationJob, attempt.publication_job_id)
     post = db.get(Post, job.post_id) if job else None
     connection = db.get(InstagramConnection, attempt.connection_id)
-    grant = (
-        db.get(PublicMediaGrant, attempt.public_media_grant_id)
-        if attempt.public_media_grant_id
-        else None
+    grant_ids = list(
+        db.scalars(
+            select(MetaCarouselItem.public_media_grant_id).where(
+                MetaCarouselItem.attempt_id == attempt.id,
+                MetaCarouselItem.public_media_grant_id.is_not(None),
+            )
+        )
     )
+    if attempt.public_media_grant_id:
+        grant_ids.append(attempt.public_media_grant_id)
+    grants = [db.get(PublicMediaGrant, grant_id) for grant_id in set(grant_ids)]
     media_grant_active = bool(
-        grant
-        and not grant.revoked_at
+        any(grant and not grant.revoked_at for grant in grants)
         and attempt.phase not in {"completed", "failed"}
     )
     response = templates.TemplateResponse(
@@ -576,14 +582,25 @@ def meta_attempt_revoke_grant(
     check_csrf(request, csrf_token_value)
     _admin(current)
     attempt = db.get(MetaPublishingAttempt, attempt_id)
-    if not attempt or not attempt.public_media_grant_id:
+    if not attempt:
+        raise HTTPException(404, "Meta-Versuch nicht gefunden")
+    grant_ids = list(
+        db.scalars(
+            select(MetaCarouselItem.public_media_grant_id).where(
+                MetaCarouselItem.attempt_id == attempt.id,
+                MetaCarouselItem.public_media_grant_id.is_not(None),
+            )
+        )
+    )
+    if attempt.public_media_grant_id:
+        grant_ids.append(attempt.public_media_grant_id)
+    if not grant_ids:
         raise HTTPException(404, "Keine Medienfreigabe vorhanden")
-    grant = db.get(PublicMediaGrant, attempt.public_media_grant_id)
-    if not grant:
-        raise HTTPException(404, "Medienfreigabe nicht gefunden")
-    if not grant.revoked_at:
-        revoke_grant(db, grant, current, reason="durch Administrator widerrufen")
-        db.commit()
+    for grant_id in set(grant_ids):
+        grant = db.get(PublicMediaGrant, grant_id)
+        if grant and not grant.revoked_at:
+            revoke_grant(db, grant, current, reason="durch Administrator widerrufen")
+    db.commit()
     return _redirect(f"/meta-attempts/{attempt_id}", "Öffentliche Medienfreigabe widerrufen")
 
 

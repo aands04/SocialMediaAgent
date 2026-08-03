@@ -49,14 +49,16 @@ PUBLISHER_MODE=dry-run GLOBAL_PUBLISH_ENABLED=false docker compose -f docker-com
 ### Manuell erstellte Beiträge
 
 Unter **Beitrag manuell erstellen** können berechtigte Benutzer einen bereits
-gestalteten Feed (1080 × 1350) oder eine Story (1080 × 1920) als JPG, PNG
-oder WebP hochladen, den Text erfassen und einen Veröffentlichungszeitpunkt in
-der Mannschaftszeitzone wählen. Die Anwendung verändert das Motiv nicht und
-legt genau einen unfreigegebenen Veröffentlichungsauftrag an. Er durchläuft
-denselben versionsgebundenen Prüf-, Freigabe- und Scheduler-Ablauf wie ein
-automatisch erzeugter Beitrag. Bei Bild-Storys wird der Text nur intern
-dokumentiert, weil Instagram dafür keinen separaten Caption-Parameter
-unterstützt.
+gestalteten Feed (1080 × 1350), ein Karussell aus 2 bis 10 geordneten Bildern
+(je 1080 × 1350) oder eine Story (1080 × 1920) als JPG, PNG oder WebP
+hochladen. Die Karussell-Reihenfolge lässt sich vor dem Absenden mit den
+Pfeiltasten festlegen; ein gemeinsamer Text und ein Veröffentlichungszeitpunkt
+in der Mannschaftszeitzone gelten für das gesamte Karussell. Die Anwendung
+verändert die Motive nicht und legt genau einen unfreigegebenen
+Veröffentlichungsauftrag an. Er durchläuft denselben versionsgebundenen Prüf-,
+Freigabe- und Scheduler-Ablauf wie ein automatisch erzeugter Beitrag. Bei
+Bild-Storys wird der Text nur intern dokumentiert, weil Instagram dafür keinen
+separaten Caption-Parameter unterstützt.
 
 ## SMB
 Auf Linux z. B. `/etc/fstab` mit einer nur für root lesbaren Credentials-Datei verwenden:

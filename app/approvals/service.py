@@ -12,6 +12,7 @@ from app.models import (
     Post,
     PostStatus,
     PublicationJob,
+    PublicationMediaItem,
     Team,
     User,
 )
@@ -26,8 +27,24 @@ def approve(db:Session,post:Post,user:User,selected_jobs:list[str]|None=None)->P
     jobs=list(db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id)))
     selected=[j for j in jobs if selected_jobs is None or j.id in selected_jobs]; problems=[]
     if not post.text: problems.append("Text fehlt")
-    if any(j.kind=="feed" for j in selected) and not post.feed_path: problems.append("Feed fehlt")
+    if any(j.kind in {"feed", "carousel"} for j in selected) and not post.feed_path: problems.append("Feed fehlt")
     if not selected or any(not Path(j.media_path).is_file() for j in selected): problems.append("Veröffentlichungsdateien fehlen")
+    for job in selected:
+        if job.kind != "carousel":
+            continue
+        media = list(
+            db.scalars(
+                select(PublicationMediaItem)
+                .where(PublicationMediaItem.publication_job_id == job.id)
+                .order_by(PublicationMediaItem.position)
+            )
+        )
+        if not 2 <= len(media) <= 10:
+            problems.append("Karussell benötigt 2 bis 10 Bilder")
+        elif [item.position for item in media] != list(range(1, len(media) + 1)):
+            problems.append("Karussell-Reihenfolge ist nicht lückenlos")
+        elif any(not Path(item.media_path).is_file() for item in media):
+            problems.append("Karussellbilder fehlen")
     if post.critical_warnings: problems.extend(post.critical_warnings)
     logos=(post.design_snapshot or {}).get("logos")
     team_logo=(logos or {}).get("team")
@@ -63,5 +80,5 @@ def edit_text(db:Session,post:Post,user:User,text:str,expected_version:int):
     if post.status in {PostStatus.APPROVED,PostStatus.SCHEDULED}: post.status=PostStatus.REAPPROVAL
     for job in db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id,PublicationJob.status!=JobStatus.PUBLISHED)):
         job.status=JobStatus.UNAPPROVED; job.approval_status="reapproval_required"
-        if job.kind=="feed": job.text_snapshot=post.text
+        if job.kind in {"feed", "carousel"}: job.text_snapshot=post.text
     db.commit()

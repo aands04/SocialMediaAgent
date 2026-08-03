@@ -85,6 +85,18 @@ class Post(Base,Timestamped):
     __tablename__="posts"; __table_args__=(UniqueConstraint("game_id","post_type","active_key"),UniqueConstraint("manual_submission_id",name="uq_posts_manual_submission_id"),); id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); game_id:Mapped[str|None]=mapped_column(ForeignKey("games.id"),nullable=True); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id")); instagram_page_id:Mapped[str]=mapped_column(ForeignKey("instagram_pages.id")); post_type:Mapped[str]=mapped_column(String(30)); active_key:Mapped[str]=mapped_column(String(20),default="active"); manual_submission_id:Mapped[str|None]=mapped_column(String(120)); status:Mapped[PostStatus]=mapped_column(Enum(PostStatus),default=PostStatus.DETECTED); text:Mapped[str|None]=mapped_column(Text); text_version:Mapped[int]=mapped_column(Integer,default=1); feed_path:Mapped[str|None]=mapped_column(String(800)); feed_version:Mapped[int]=mapped_column(Integer,default=1); media_asset_id:Mapped[str|None]=mapped_column(ForeignKey("media_assets.id")); design_snapshot:Mapped[dict]=mapped_column(JSON,default=dict); critical_warnings:Mapped[list]=mapped_column(JSON,default=list); publishing_enabled:Mapped[bool]=mapped_column(Boolean,default=True); approved_version:Mapped[int|None]=mapped_column(Integer); approved_by:Mapped[str|None]=mapped_column(ForeignKey("users.id")); approved_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_edited_by:Mapped[str|None]=mapped_column(ForeignKey("users.id"))
 class PublicationJob(Base,Timestamped):
     __tablename__="publication_jobs"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); post_id:Mapped[str]=mapped_column(ForeignKey("posts.id")); game_id:Mapped[str|None]=mapped_column(ForeignKey("games.id"),nullable=True); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id")); instagram_page_id:Mapped[str]=mapped_column(ForeignKey("instagram_pages.id")); story_rule_id:Mapped[str|None]=mapped_column(ForeignKey("story_rules.id")); kind:Mapped[str]=mapped_column(String(10)); media_path:Mapped[str]=mapped_column(String(800)); text_snapshot:Mapped[str|None]=mapped_column(Text); scheduled_at:Mapped[datetime]=mapped_column(DateTime(timezone=True)); next_attempt_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True),index=True); absolute_time:Mapped[bool]=mapped_column(Boolean,default=False); stale_time:Mapped[bool]=mapped_column(Boolean,default=False); approval_status:Mapped[str]=mapped_column(String(30),default="unapproved"); status:Mapped[JobStatus]=mapped_column(Enum(JobStatus),default=JobStatus.UNAPPROVED); attempts:Mapped[int]=mapped_column(Integer,default=0); last_attempt_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); published_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); platform_id:Mapped[str|None]=mapped_column(String(200)); permalink:Mapped[str|None]=mapped_column(String(1000)); error:Mapped[str|None]=mapped_column(Text); idempotency_key:Mapped[str]=mapped_column(String(100),unique=True); locked_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); approved_post_version:Mapped[int|None]=mapped_column(Integer)
+class PublicationMediaItem(Base,Timestamped):
+    __tablename__="publication_media_items"
+    __table_args__=(UniqueConstraint("publication_job_id","position",name="uq_publication_media_position"),)
+    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
+    publication_job_id:Mapped[str]=mapped_column(ForeignKey("publication_jobs.id",ondelete="CASCADE"),index=True)
+    position:Mapped[int]=mapped_column(Integer)
+    media_path:Mapped[str]=mapped_column(String(800))
+    checksum:Mapped[str]=mapped_column(String(64))
+    mime_type:Mapped[str]=mapped_column(String(80),default="image/png")
+    file_size:Mapped[int]=mapped_column(Integer)
+    width:Mapped[int]=mapped_column(Integer)
+    height:Mapped[int]=mapped_column(Integer)
 class GenerationJob(Base,Timestamped):
     __tablename__="generation_jobs"
     __table_args__=(UniqueConstraint("active_key"),UniqueConstraint("idempotency_key"),)
@@ -162,6 +174,9 @@ class PublicMediaGrant(Base):
     publication_job_id: Mapped[str] = mapped_column(
         ForeignKey("publication_jobs.id", ondelete="CASCADE"), index=True
     )
+    publication_media_item_id: Mapped[str | None] = mapped_column(
+        ForeignKey("publication_media_items.id", ondelete="CASCADE"), index=True
+    )
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     active_key: Mapped[str | None] = mapped_column(String(120))
     media_path: Mapped[str] = mapped_column(String(800))
@@ -213,6 +228,34 @@ class MetaPublishingAttempt(Base, Timestamped):
     error_message: Mapped[str | None] = mapped_column(Text)
     started_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MetaCarouselItem(Base, Timestamped):
+    __tablename__ = "meta_carousel_items"
+    __table_args__ = (
+        UniqueConstraint("attempt_id", "position", name="uq_meta_carousel_position"),
+        UniqueConstraint(
+            "attempt_id",
+            "publication_media_item_id",
+            name="uq_meta_carousel_media_item",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("meta_publishing_attempts.id", ondelete="CASCADE"), index=True
+    )
+    publication_media_item_id: Mapped[str] = mapped_column(
+        ForeignKey("publication_media_items.id", ondelete="RESTRICT"), index=True
+    )
+    public_media_grant_id: Mapped[str | None] = mapped_column(
+        ForeignKey("public_media_grants.id", ondelete="SET NULL")
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    meta_container_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    container_status: Mapped[str | None] = mapped_column(String(80))
+    sanitized_response: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_category: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
 
 
 class MetaPublishConfirmation(Base):
