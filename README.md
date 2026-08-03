@@ -46,6 +46,18 @@ PUBLISHER_MODE=dry-run GLOBAL_PUBLISH_ENABLED=false docker compose -f docker-com
 6. **Workflow:** Worker synchronisiert Spiele, erzeugt Beiträge automatisch, rendert alle Dateien und Text. Freigeber prüft Version, Ziel und abgelaufene Zeiten. Jede relevante Änderung setzt offene Jobs auf erneute Freigabe.
 7. **Fehler:** Transiente Fehler werden begrenzt wiederholt. Token-/Rechtefehler stoppen. Timeout/unklare Antwort wird `uncertain`; Status muss bei Meta geprüft werden, bevor jemand erneut startet.
 
+### Manuell erstellte Beiträge
+
+Unter **Beitrag manuell erstellen** können berechtigte Benutzer einen bereits
+gestalteten Feed (1080 × 1350) oder eine Story (1080 × 1920) als JPG, PNG
+oder WebP hochladen, den Text erfassen und einen Veröffentlichungszeitpunkt in
+der Mannschaftszeitzone wählen. Die Anwendung verändert das Motiv nicht und
+legt genau einen unfreigegebenen Veröffentlichungsauftrag an. Er durchläuft
+denselben versionsgebundenen Prüf-, Freigabe- und Scheduler-Ablauf wie ein
+automatisch erzeugter Beitrag. Bei Bild-Storys wird der Text nur intern
+dokumentiert, weil Instagram dafür keinen separaten Caption-Parameter
+unterstützt.
+
 ## SMB
 Auf Linux z. B. `/etc/fstab` mit einer nur für root lesbaren Credentials-Datei verwenden:
 ```text

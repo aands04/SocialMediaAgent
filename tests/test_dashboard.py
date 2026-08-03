@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,6 +26,7 @@ from app.models import (
     GenerationJobType,
     InstagramConnection,
     InstagramPage,
+    JobStatus,
     LogoAsset,
     MediaAsset,
     Post,
@@ -170,6 +172,106 @@ def player_image(image_format="JPEG", color=(20, 90, 200)):
     ImageDraw.Draw(image).rectangle((250, 120, 650, 1100), fill=(240, 240, 240))
     image.save(buffer, image_format)
     return buffer.getvalue()
+
+
+def manual_post_image(size=(1080, 1350)):
+    buffer = BytesIO()
+    image = Image.new("RGB", size, (16, 48, 112))
+    ImageDraw.Draw(image).rectangle((120, 160, 960, 1120), fill=(235, 210, 40))
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
+    browser, tmp_path, monkeypatch
+):
+    client, factory = browser
+    import app.admin_routes as admin_routes
+
+    monkeypatch.setattr(admin_routes.settings, "generated_root", tmp_path / "generated")
+    monkeypatch.setattr(admin_routes.settings, "media_root", tmp_path / "media")
+    monkeypatch.setattr(admin_routes.settings, "upload_root", tmp_path / "uploads")
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="manual-dashboard-page",
+            display_name="Manuelle Beiträge",
+            username="manualdashboard",
+            club="SV Ehlen",
+            active=True,
+            connection_status="connected",
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="manual-dashboard-team",
+            display_name="SV Ehlen I",
+            short_name="SVE",
+            slug="manual-dashboard-team",
+            club="SV Ehlen",
+            fussball_url="https://www.fussball.de/manual-dashboard",
+            instagram_page_id=page.id,
+            media_subdir="erste_mannschaft/spieler",
+            timezone="Europe/Berlin",
+        )
+        db.add(team)
+        db.commit()
+        team_id = team.id
+
+    form = client.get("/posts/manual/new")
+    assert form.status_code == 200
+    assert "Beitrag manuell erstellen" in form.text
+    csrf_token = re.search(r'name="csrf_token" value="([^"]+)', form.text).group(1)
+    submission_id = re.search(
+        r'name="submission_id" value="([^"]+)', form.text
+    ).group(1)
+    local_publish_at = (
+        datetime.now(ZoneInfo("Europe/Berlin")) + timedelta(hours=2)
+    ).strftime("%Y-%m-%dT%H:%M")
+    data = {
+        "csrf_token": csrf_token,
+        "submission_id": submission_id,
+        "team_id": team_id,
+        "kind": "feed",
+        "text": "Heute gibt es Neuigkeiten direkt aus dem Verein.",
+        "scheduled_at": local_publish_at,
+    }
+    blocked = client.post(
+        "/posts/manual/new",
+        data={**data, "csrf_token": "wrong"},
+        files={"image": ("beitrag.png", manual_post_image(), "image/png")},
+    )
+    assert blocked.status_code == 403
+
+    response = client.post(
+        "/posts/manual/new",
+        data=data,
+        files={"image": ("beitrag.png", manual_post_image(), "image/png")},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with factory() as db:
+        post = db.query(Post).filter_by(manual_submission_id=submission_id).one()
+        job = db.query(PublicationJob).filter_by(post_id=post.id).one()
+        assert post.game_id is None
+        assert post.post_type == "manual"
+        assert post.text == data["text"]
+        assert post.design_snapshot["source"] == "manual_upload"
+        assert job.game_id is None
+        assert job.kind == "feed"
+        assert job.status == JobStatus.UNAPPROVED
+        assert Path(job.media_path).is_file()
+        assert db.query(AuditLog).filter_by(action="manual_post.created").count() == 1
+        post_id = post.id
+
+    detail = client.get(f"/posts/{post_id}")
+    assert detail.status_code == 200
+    assert "Manuell erstellter Beitrag" in detail.text
+    assert "Grafiken neu erzeugen" not in detail.text
+    rerender = client.post(
+        f"/posts/{post_id}/rerender",
+        data={"csrf_token": csrf_token, "version": 1},
+    )
+    assert rerender.status_code == 422
 
 
 def player_image_archive(entries: dict[str, bytes]):

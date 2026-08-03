@@ -51,7 +51,7 @@ def _candidate_ids(db: Session, settings: Settings) -> list[str]:
     query = (
         select(PublicationJob.id)
         .join(Post, Post.id == PublicationJob.post_id)
-        .join(Game, Game.id == PublicationJob.game_id)
+        .outerjoin(Game, Game.id == PublicationJob.game_id)
         .join(InstagramPage, InstagramPage.id == PublicationJob.instagram_page_id)
         .join(
             InstagramConnection,
@@ -76,7 +76,10 @@ def _candidate_ids(db: Session, settings: Settings) -> list[str]:
             InstagramPage.publishing_enabled.is_(True),
             InstagramPage.automatic_publishing_enabled.is_(True),
             InstagramConnection.status == "connected",
-            Game.status.notin_(["cancelled", "postponed", "provisional"]),
+            or_(
+                PublicationJob.game_id.is_(None),
+                Game.status.notin_(["cancelled", "postponed", "provisional"]),
+            ),
         )
         .order_by(PublicationJob.scheduled_at, PublicationJob.kind, PublicationJob.id)
         .limit(settings.meta_scheduler_batch_size)

@@ -1,0 +1,65 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Beitrag manuell erstellen</h1>
+<div class="warning">
+  Das Bild wird nicht durch KI verändert. Der Beitrag wird zunächst nur als
+  Entwurf zur Prüfung angelegt und erst nach ausdrücklicher Freigabe veröffentlicht.
+</div>
+{% if teams %}
+<form method="post" action="/posts/manual/new" enctype="multipart/form-data">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <input type="hidden" name="submission_id" value="{{ submission_id }}">
+  <section>
+    <div class="columns">
+      <label>Mannschaft
+        <select name="team_id" required>
+          {% for team in teams %}
+          <option value="{{ team.id }}">{{ team.display_name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Format
+        <select name="kind" id="manual-kind" required>
+          <option value="feed">Feed – 1080 × 1350 Pixel</option>
+          <option value="story">Story – 1080 × 1920 Pixel</option>
+        </select>
+      </label>
+    </div>
+    <label>Veröffentlichungszeitpunkt (lokale Mannschaftszeit)
+      <input type="datetime-local" name="scheduled_at" value="{{ default_publish_at }}" required>
+    </label>
+    <label>Bild
+      <input
+        type="file"
+        name="image"
+        accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+        required
+      >
+    </label>
+    <small id="manual-size-hint">
+      Das Bild muss für einen Feed exakt 1080 × 1350 Pixel groß sein. Erlaubt sind JPG, PNG und WebP bis 20 MiB.
+    </small>
+    <label>Text
+      <textarea name="text" rows="10" maxlength="2200" required></textarea>
+    </label>
+    <small>
+      Beim Feed wird der Text als Instagram-Begleittext veröffentlicht. Bei einer
+      Story wird er als interne Dokumentation gespeichert; Instagram unterstützt
+      für Bild-Storys keinen separaten Begleittext.
+    </small>
+    <button>Zur Prüfung anlegen</button>
+  </section>
+</form>
+<script>
+  const kind = document.getElementById('manual-kind');
+  const hint = document.getElementById('manual-size-hint');
+  kind.addEventListener('change', () => {
+    hint.textContent = kind.value === 'story'
+      ? 'Das Bild muss für eine Story exakt 1080 × 1920 Pixel groß sein. Erlaubt sind JPG, PNG und WebP bis 20 MiB.'
+      : 'Das Bild muss für einen Feed exakt 1080 × 1350 Pixel groß sein. Erlaubt sind JPG, PNG und WebP bis 20 MiB.';
+  });
+</script>
+{% else %}
+<div class="alert">Für dieses Benutzerkonto ist keine bearbeitbare aktive Mannschaft verfügbar.</div>
+{% endif %}
+{% endblock %}
