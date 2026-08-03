@@ -44,6 +44,17 @@ class Settings(BaseSettings):
     session_max_age: int = 3600
     max_publish_attempts: int = 5
     fussball_live_test_enabled: bool = False
+    fussball_automatic_sync_enabled: bool = False
+    automatic_post_generation_enabled: bool = False
+    fussball_sync_interval_seconds: int = 1800
+    fussball_result_poll_interval_seconds: int = 300
+    fussball_sync_error_backoff_seconds: int = 300
+    fussball_sync_batch_size: int = 2
+    fussball_sync_lease_seconds: int = 1800
+    fussball_result_min_age_minutes: int = 120
+    fussball_result_stability_seconds: int = 600
+    fussball_result_max_age_hours: int = 48
+    fussball_decode_obfuscated_results: bool = True
     provider_snapshot_root: Path = Path("data/provider-snapshots")
     log_root: Path = Path("data/logs")
     backup_root: Path = Path("data/backups")

@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.config import Settings, get_settings
 from app.db import SessionLocal
+from app.games.automatic import run_automatic_fussball_cycle
 from app.jobs.generation import claim_next, process_generation_job
 from app.meta.publishing import MetaPublishingError
 from app.meta.scheduler import run_automatic_publishing_cycle
@@ -35,6 +36,10 @@ def _automatic_scheduler_enabled(settings: Settings) -> bool:
     )
 
 
+def _automatic_fussball_enabled(settings: Settings) -> bool:
+    return settings.environment == "production" and settings.fussball_automatic_sync_enabled
+
+
 def _validate_worker_environment(settings: Settings) -> str:
     if settings.environment == "staging":
         if (
@@ -43,6 +48,8 @@ def _validate_worker_environment(settings: Settings) -> str:
             or settings.meta_access_token
             or settings.meta_scheduler_enabled
             or settings.meta_automatic_publish_enabled
+            or settings.fussball_automatic_sync_enabled
+            or settings.automatic_post_generation_enabled
         ):
             raise RuntimeError("Staging-Worker verweigert Live-Publishing")
         return "dry-run"
@@ -53,6 +60,8 @@ def _validate_worker_environment(settings: Settings) -> str:
             or settings.global_publish_enabled
             or settings.meta_scheduler_enabled
             or settings.meta_automatic_publish_enabled
+            or settings.fussball_automatic_sync_enabled
+            or settings.automatic_post_generation_enabled
         ):
             raise RuntimeError(
                 "Automatische Instagram-Veröffentlichung ist im Meta-Test verboten"
@@ -75,6 +84,14 @@ def _validate_worker_environment(settings: Settings) -> str:
             raise RuntimeError("Meta-Test-Gates müssen in Produktion aus sein")
         if settings.meta_access_token:
             raise RuntimeError("Globaler META_ACCESS_TOKEN ist in Produktion verboten")
+        if (
+            settings.automatic_post_generation_enabled
+            and not settings.fussball_automatic_sync_enabled
+        ):
+            raise RuntimeError(
+                "Automatische Beitragserstellung erfordert den automatischen "
+                "FUSSBALL.DE-Abruf"
+            )
         return "automatic-instagram" if all(automatic_flags) else "production-paused"
 
     if settings.publisher_mode != "dry-run" or settings.global_publish_enabled:
@@ -85,8 +102,14 @@ def _validate_worker_environment(settings: Settings) -> str:
 def run():
     worker_mode = _validate_worker_environment(settings)
     scheduler_enabled = _automatic_scheduler_enabled(settings)
+    fussball_enabled = _automatic_fussball_enabled(settings)
     scheduler_active = worker_mode == "dry-run" or scheduler_enabled
-    log.info("worker_started", mode=worker_mode, scheduler=scheduler_enabled)
+    log.info(
+        "worker_started",
+        mode=worker_mode,
+        scheduler=scheduler_enabled,
+        fussball_sync=fussball_enabled,
+    )
     loops = 0
     processed = 0
     generated = 0
@@ -104,7 +127,10 @@ def run():
         loops += 1
         due_count = 0
         automatic_result = None
+        fussball_result = None
         with SessionLocal() as db:
+            if fussball_enabled:
+                fussball_result = run_automatic_fussball_cycle(db, settings)
             generation_ids = []
             for _ in range(5):
                 generation_id = claim_next(db)
@@ -149,6 +175,10 @@ def run():
             "loops": loops,
             "scheduler": scheduler_active,
             "automatic_scheduler": scheduler_enabled,
+            "automatic_fussball_sync": fussball_enabled,
+            "automatic_post_generation": (
+                fussball_enabled and settings.automatic_post_generation_enabled
+            ),
             "scheduler_mode": worker_mode,
             "due_jobs": due_count,
             "generation_jobs": len(generation_ids),
@@ -157,6 +187,9 @@ def run():
             "publisher": worker_mode,
             "automatic_cycle": (
                 automatic_result.__dict__ if automatic_result is not None else None
+            ),
+            "fussball_cycle": (
+                fussball_result.__dict__ if fussball_result is not None else None
             ),
         }
         temporary = settings.log_root / "worker-heartbeat.tmp"

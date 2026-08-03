@@ -90,7 +90,9 @@ def _invalidate_publications(db: Session, game: Game, kickoff_delta) -> None:
         job.error = "Spieldaten wurden geändert; erneute Freigabe erforderlich"
 
 
-def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict:
+def import_snapshot(
+    db: Session, snapshot: ProviderSnapshot, user: User | None = None
+) -> dict:
     team = db.get(Team, snapshot.team_id)
     if not team:
         raise SnapshotImportError("Snapshot hat keine gültige Mannschaft")
@@ -115,6 +117,12 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
         )
         provider_status = item.get("status") or "scheduled"
         incoming_scores = (item.get("home_score"), item.get("away_score"))
+        # A temporarily unavailable or structurally rejected symbol font must
+        # never erase a score that was read safely during an earlier poll.
+        if game and incoming_scores == (None, None) and (
+            game.home_score is not None and game.away_score is not None
+        ):
+            incoming_scores = (game.home_score, game.away_score)
         existing_overrides = dict(game.overrides or {}) if game else {}
         import_suppressed = bool(existing_overrides.get("import_suppressed"))
         provisional_confirmed = bool(existing_overrides.get("provisional_confirmed_by"))
@@ -123,6 +131,14 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
             provisional_confirmed or allow_provisional
         )
         effective_status = "scheduled" if provisional_allowed else provider_status
+        if (
+            game
+            and game.result_confirmed
+            and game.status == "finished"
+            and incoming_scores == (game.home_score, game.away_score)
+            and effective_status == "scheduled"
+        ):
+            effective_status = "finished"
         automation_blocked = import_suppressed or (
             provider_status in HARD_BLOCKING_PROVIDER_STATUSES
             or (provider_status == "provisional" and not provisional_allowed)
@@ -228,7 +244,7 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
         raise SnapshotImportError("Snapshot enthält keine vollständig parsebaren Spiele")
     db.add(
         AuditLog(
-            user_id=user.id,
+            user_id=user.id if user else None,
             team_id=team.id,
             action="provider_snapshot.games_imported",
             entity_type="provider_snapshot",
@@ -240,6 +256,7 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User) -> dict
                 "suppressed": suppressed,
                 "game_ids": ids,
                 "posts_created": False,
+                "trigger_mode": "manual" if user else "automatic",
             },
         )
     )

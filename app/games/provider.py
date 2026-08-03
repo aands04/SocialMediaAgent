@@ -1,5 +1,6 @@
 import hashlib
 import re
+import struct
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
@@ -19,6 +20,8 @@ ALLOWED_AJAX_PREFIXES = (
 )
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 MAX_DETAIL_FETCHES = 25
+MAX_FONT_BYTES = 128 * 1024
+FONT_ID_RE = re.compile(r"^[A-Za-z0-9]{4,32}$")
 GAME_ID_RE = re.compile(r"/spiel/(?:[^/?#]+/)*spiel/([A-Z0-9]+)(?:[/?#]|$)", re.I)
 DATE_RE = re.compile(r"(\d{2}\.\d{2}\.(?:\d{2}|\d{4})).*?(\d{1,2}:\d{2})")
 SCORE_RE = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*$", re.ASCII)
@@ -63,9 +66,17 @@ class GameDataProvider(ABC):
 
 
 class FussballDeProvider(GameDataProvider):
-    def __init__(self, timeout: float = 10, max_attempts: int = 2):
+    def __init__(
+        self,
+        timeout: float = 10,
+        max_attempts: int = 2,
+        *,
+        decode_obfuscated_results: bool = False,
+    ):
         self.timeout = timeout
         self.max_attempts = max_attempts
+        self.decode_obfuscated_results = decode_obfuscated_results
+        self._font_cache: dict[str, dict[int, int]] = {}
 
     @staticmethod
     def validate_public_url(url: str, *, ajax_only: bool = False) -> str:
@@ -93,12 +104,12 @@ class FussballDeProvider(GameDataProvider):
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
             try:
-                with httpx.Client(timeout=self.timeout, follow_redirects=False, headers={"User-Agent": "Vereins-SocialMediaBot/1.0 (read-only diagnostic)"}) as client:
+                with httpx.Client(timeout=self.timeout, follow_redirects=False, headers={"User-Agent": "Vereins-SocialMediaBot/1.0 (read-only synchronization)"}) as client:
                     response = client.get(url)
                 if response.is_redirect:
                     target = urljoin(url, response.headers.get("location", ""))
                     self.validate_public_url(target, ajax_only=ajax_only)
-                    with httpx.Client(timeout=self.timeout, follow_redirects=False, headers={"User-Agent": "Vereins-SocialMediaBot/1.0 (read-only diagnostic)"}) as client:
+                    with httpx.Client(timeout=self.timeout, follow_redirects=False, headers={"User-Agent": "Vereins-SocialMediaBot/1.0 (read-only synchronization)"}) as client:
                         response = client.get(target)
                 response.raise_for_status()
                 if len(response.content) > MAX_RESPONSE_BYTES:
@@ -110,6 +121,40 @@ class FussballDeProvider(GameDataProvider):
                     time.sleep(0.25 * (2**attempt))
         raise ProviderError(f"FUSSBALL.DE nicht erreichbar: {last_error}") from last_error
 
+    def _get_bytes(self, url: str, *, maximum: int) -> bytes:
+        self.validate_public_url(url)
+        last_error: Exception | None = None
+        for attempt in range(self.max_attempts):
+            try:
+                with httpx.Client(
+                    timeout=self.timeout,
+                    follow_redirects=False,
+                    headers={
+                        "User-Agent": "Vereins-SocialMediaBot/1.0 (read-only synchronization)"
+                    },
+                ) as client:
+                    response = client.get(url)
+                if response.is_redirect:
+                    target = urljoin(url, response.headers.get("location", ""))
+                    self.validate_public_url(target)
+                    with httpx.Client(
+                        timeout=self.timeout,
+                        follow_redirects=False,
+                        headers={
+                            "User-Agent": "Vereins-SocialMediaBot/1.0 (read-only synchronization)"
+                        },
+                    ) as client:
+                        response = client.get(target)
+                response.raise_for_status()
+                if len(response.content) > maximum:
+                    raise ProviderError("FUSSBALL.DE-Schriftdatei ist unerwartet groß")
+                return response.content
+            except (httpx.HTTPError, ProviderError) as exc:
+                last_error = exc
+                if attempt + 1 < self.max_attempts:
+                    time.sleep(0.25 * (2**attempt))
+        raise ProviderError(f"FUSSBALL.DE-Schrift nicht erreichbar: {last_error}") from last_error
+
     def fetch_html(self, url: str, *, ajax_only: bool = False) -> str:
         return self._get(url, ajax_only=ajax_only)
 
@@ -119,6 +164,20 @@ class FussballDeProvider(GameDataProvider):
     def fetch_ajax(self, url: str) -> list[GameRecord]:
         """Optionaler read-only Abruf ausschließlich erlaubter öffentlicher AJAX-Ressourcen."""
         return self.parse(self._get(url, ajax_only=True))
+
+    @classmethod
+    def ajax_resource(cls, html: str, resource: str) -> str | None:
+        allowed = {"next", "prev", "matchplan"}
+        if resource not in allowed:
+            raise ProviderError("Unbekannte FUSSBALL.DE-AJAX-Ressource")
+        soup = BeautifulSoup(html, "html.parser")
+        prefix = f"/ajax.team.{resource}.games/" if resource != "matchplan" else "/ajax.team.matchplan/"
+        for node in soup.select("[data-ajax-resource]"):
+            raw = str(node.get("data-ajax-resource") or "")
+            candidate = urljoin("https://www.fussball.de/", raw)
+            if urlparse(candidate).path.startswith(prefix):
+                return cls.validate_public_url(candidate, ajax_only=True)
+        return None
 
     def fetch_game_detail(self, url: str, expected_external_id: str) -> GameVenueDetail:
         self.validate_game_detail_url(url, expected_external_id)
@@ -267,8 +326,31 @@ class FussballDeProvider(GameDataProvider):
         number_match = re.search(r"(?:ME\s*\|\s*)?(\d{6,})", detail_text)
         return {"kickoff": local.astimezone(timezone.utc), "competition": clean_name(competition_node.get_text(" ", strip=True)) if competition_node else None, "game_number": number_match.group(1) if number_match else None}
 
-    @staticmethod
-    def _parse_game_row(row: Tag, meta: dict[str, object], provisional: bool, tracked_team: str | None) -> GameRecord | None:
+    def _decode_obfuscated_number(self, node: Tag) -> int:
+        font_id = str(node.get("data-obfuscation") or "")
+        if not FONT_ID_RE.fullmatch(font_id):
+            raise ProviderError("Ungültige Kennung der FUSSBALL.DE-Symbolschrift")
+        cmap = self._font_cache.get(font_id)
+        if cmap is None:
+            url = (
+                "https://www.fussball.de/export.fontface/-/format/ttf/id/"
+                f"{font_id}/type/font"
+            )
+            cmap = _validated_digit_cmap(self._get_bytes(url, maximum=MAX_FONT_BYTES))
+            self._font_cache[font_id] = cmap
+        decoded: list[str] = []
+        for character in node.get_text("", strip=True):
+            if character.isspace():
+                continue
+            glyph_id = cmap.get(ord(character))
+            if glyph_id is None or not 1 <= glyph_id <= 10:
+                raise ProviderError("Symbolschrift enthält kein eindeutig lesbares Torergebnis")
+            decoded.append(str(glyph_id - 1))
+        if not decoded:
+            raise ProviderError("Leeres Torergebnis in der Symbolschrift")
+        return int("".join(decoded))
+
+    def _parse_game_row(self, row: Tag, meta: dict[str, object], provisional: bool, tracked_team: str | None) -> GameRecord | None:
         clubs = row.select(".column-club .club-name")
         home, away = (clean_name(club.get_text(" ", strip=True)) for club in clubs[:2])
         link = next((node.get("href") for node in row.select('a[href*="/spiel/"]') if GAME_ID_RE.search(node.get("href", ""))), None)
@@ -283,7 +365,30 @@ class FussballDeProvider(GameDataProvider):
         warnings: list[str] = []
         if score:
             if score.select_one("[data-obfuscation]"):
-                warnings.append("Ergebnis ist durch Symbolschrift verschleiert und wurde nicht übernommen")
+                left = score.select_one(".score-left[data-obfuscation]")
+                right = score.select_one(".score-right[data-obfuscation]")
+                if not left or not right:
+                    symbols = score.select("[data-obfuscation]")
+                    if len(symbols) == 2:
+                        left, right = symbols
+                if self.decode_obfuscated_results and left and right:
+                    try:
+                        home_score = self._decode_obfuscated_number(left)
+                        away_score = self._decode_obfuscated_number(right)
+                    except ProviderError as exc:
+                        warnings.append(
+                            "Ergebnis-Symbolschrift konnte nicht sicher gelesen werden: "
+                            f"{exc}"
+                        )
+                    else:
+                        warnings.append(
+                            "Ergebnis deterministisch aus der offiziellen Symbolschrift "
+                            "gelesen; Bestätigung steht aus"
+                        )
+                else:
+                    warnings.append(
+                        "Ergebnis ist durch Symbolschrift verschleiert und wurde nicht übernommen"
+                    )
             else:
                 numeric = SCORE_RE.fullmatch(score.get_text(" ", strip=True))
                 if numeric:
@@ -298,3 +403,92 @@ class FussballDeProvider(GameDataProvider):
 
 def clean_name(value: str | None) -> str:
     return re.sub(r"\s+", " ", ZERO_WIDTH_RE.sub("", value or "")).strip()
+
+
+def _validated_digit_cmap(font: bytes) -> dict[int, int]:
+    """Read the Unicode cmap of FUSSBALL.DE's small digit font.
+
+    The downloaded font contains exactly the ten digits in glyph IDs 1..10 and
+    a dash in glyph 11. The server randomizes only the private Unicode mapping.
+    We validate that compact structure before using it and never use OCR or
+    visual guessing.
+    """
+    try:
+        if len(font) < 12 or font[:4] not in {b"\x00\x01\x00\x00", b"true"}:
+            raise ValueError("kein TrueType-Header")
+        table_count = struct.unpack_from(">H", font, 4)[0]
+        if not 1 <= table_count <= 64 or len(font) < 12 + table_count * 16:
+            raise ValueError("ungültiges Tabellenverzeichnis")
+        tables: dict[bytes, tuple[int, int]] = {}
+        for index in range(table_count):
+            tag, _, offset, length = struct.unpack_from(
+                ">4sIII", font, 12 + index * 16
+            )
+            if offset + length > len(font):
+                raise ValueError("Tabelle liegt außerhalb der Datei")
+            tables[tag] = (offset, length)
+        maxp_offset, _ = tables[b"maxp"]
+        glyph_count = struct.unpack_from(">H", font, maxp_offset + 4)[0]
+        if glyph_count != 12:
+            raise ValueError("unerwartete Anzahl von Schriftzeichen")
+        cmap_offset, cmap_length = tables[b"cmap"]
+        _, subtable_count = struct.unpack_from(">HH", font, cmap_offset)
+        result: dict[int, int] = {}
+        for index in range(subtable_count):
+            _, _, relative = struct.unpack_from(
+                ">HHI", font, cmap_offset + 4 + index * 8
+            )
+            subtable = cmap_offset + relative
+            if not cmap_offset <= subtable < cmap_offset + cmap_length:
+                continue
+            if struct.unpack_from(">H", font, subtable)[0] != 4:
+                continue
+            _, _, segment_count_x2 = struct.unpack_from(">HHH", font, subtable + 2)
+            segment_count = segment_count_x2 // 2
+            if not 1 <= segment_count <= 256:
+                raise ValueError("ungültige Zeichensegmente")
+            end_offset = subtable + 14
+            ends = struct.unpack_from(
+                ">" + "H" * segment_count, font, end_offset
+            )
+            start_offset = end_offset + 2 * segment_count + 2
+            starts = struct.unpack_from(
+                ">" + "H" * segment_count, font, start_offset
+            )
+            delta_offset = start_offset + 2 * segment_count
+            deltas = struct.unpack_from(
+                ">" + "h" * segment_count, font, delta_offset
+            )
+            range_offset = delta_offset + 2 * segment_count
+            ranges = struct.unpack_from(
+                ">" + "H" * segment_count, font, range_offset
+            )
+            for segment, (start, end, delta, offset) in enumerate(
+                zip(starts, ends, deltas, ranges, strict=True)
+            ):
+                if end < start or end - start > 8192:
+                    raise ValueError("ungültiger Zeichenbereich")
+                for codepoint in range(start, end + 1):
+                    if codepoint == 0xFFFF:
+                        continue
+                    if offset == 0:
+                        glyph = (codepoint + delta) & 0xFFFF
+                    else:
+                        position = (
+                            range_offset
+                            + 2 * segment
+                            + offset
+                            + 2 * (codepoint - start)
+                        )
+                        if position + 2 > len(font):
+                            raise ValueError("Zeichenzuordnung außerhalb der Datei")
+                        glyph = struct.unpack_from(">H", font, position)[0]
+                        if glyph:
+                            glyph = (glyph + delta) & 0xFFFF
+                    if glyph:
+                        result[codepoint] = glyph
+        if not result or not set(range(1, 12)).issubset(set(result.values())):
+            raise ValueError("Ziffernbelegung ist unvollständig")
+        return result
+    except (KeyError, struct.error, ValueError) as exc:
+        raise ProviderError(f"Ungültige FUSSBALL.DE-Symbolschrift: {exc}") from exc

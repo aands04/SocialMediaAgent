@@ -296,3 +296,31 @@ class ProviderSnapshot(Base):
     relative_path: Mapped[str] = mapped_column(String(800), unique=True)
     parser_result: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
+
+
+class FussballSyncState(Base):
+    __tablename__ = "fussball_sync_states"
+    team_id: Mapped[str] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="idle", index=True)
+    next_poll_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(160))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_snapshot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("provider_snapshots.id", ondelete="SET NULL")
+    )
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_result_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, onupdate=now
+    )

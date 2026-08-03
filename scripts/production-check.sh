@@ -48,6 +48,14 @@ case "$flags" in
   *) fail "Automatik-Gates sind nur gemeinsam true oder gemeinsam false zulässig ($flags)" ;;
 esac
 
+fussball_flags="${FUSSBALL_AUTOMATIC_SYNC_ENABLED:-false}:${AUTOMATIC_POST_GENERATION_ENABLED:-false}"
+case "$fussball_flags" in
+  false:false) ok "FUSSBALL.DE-Automatik vollständig pausiert" ;;
+  true:false) ok "FUSSBALL.DE-Sync aktiv; automatische Entwürfe pausiert" ;;
+  true:true) ok "FUSSBALL.DE-Sync und automatische Entwürfe aktiviert" ;;
+  *) fail "Automatische Entwürfe benötigen den FUSSBALL.DE-Sync ($fussball_flags)" ;;
+esac
+
 case "${META_OAUTH_REDIRECT_URI:-}" in
   https://*/public/instagram/oauth/callback) ok "OAuth-Redirect verwendet HTTPS" ;;
   *) fail "META_OAUTH_REDIRECT_URI ist ungültig" ;;
@@ -75,6 +83,8 @@ check "Anmeldeseite erreichbar" sh -c "curl -fsS http://127.0.0.1:${HTTP_PORT:-8
 check "Aktuelle Alembic-Migration installiert" check_alembic_head
 check "Worker-Modus stimmt mit den Gates überein" sh -c \
   "$COMPOSE exec -T worker /app/scripts/entrypoint.sh python -c 'import json; from app.config import get_settings; s=get_settings(); d=json.load(open(s.log_root / \"worker-heartbeat.json\")); expected=s.global_publish_enabled and s.meta_scheduler_enabled and s.meta_automatic_publish_enabled; assert d[\"automatic_scheduler\"] is expected'"
+check "FUSSBALL.DE-Worker-Gates stimmen überein" sh -c \
+  "$COMPOSE exec -T worker /app/scripts/entrypoint.sh python -c 'import json; from app.config import get_settings; s=get_settings(); d=json.load(open(s.log_root / \"worker-heartbeat.json\")); assert d[\"automatic_fussball_sync\"] is s.fussball_automatic_sync_enabled; assert d[\"automatic_post_generation\"] is (s.fussball_automatic_sync_enabled and s.automatic_post_generation_enabled)'"
 check "Tokenverschlüsselungsschlüssel ist gültig" sh -c \
   "$COMPOSE exec -T web /app/scripts/entrypoint.sh python -c 'from app.meta.security import TokenCipher; from app.config import get_settings; TokenCipher(get_settings().meta_token_encryption_key)'"
 
