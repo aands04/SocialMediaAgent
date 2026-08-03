@@ -1,7 +1,9 @@
 import hashlib
 import mimetypes
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -54,6 +56,13 @@ from app.models import (
     Team,
     User,
     UserTeam,
+)
+from app.posts.manual import (
+    MAX_MANUAL_IMAGE_BYTES,
+    ManualPostError,
+    create_manual_post,
+    parse_manual_publication_time,
+    validate_manual_image,
 )
 from app.posts.service import logo_recompose_availability
 from app.web import berlin_datetime, check_csrf, csrf_token, current_user, require, require_admin
@@ -1331,6 +1340,91 @@ def posts(request: Request, current=Depends(current_user), db: Session = Depends
     )
 
 
+def _manual_post_teams(db: Session, current: User) -> list[Team]:
+    teams = db.scalars(
+        select(Team)
+        .where(Team.active.is_(True), Team.archived_at.is_(None))
+        .order_by(Team.display_name)
+    ).all()
+    visible = []
+    for team in teams:
+        try:
+            require(current, db, "edit_post", team.id)
+        except HTTPException:
+            continue
+        visible.append(team)
+    return visible
+
+
+@router.get("/posts/manual/new", response_class=HTMLResponse)
+def manual_post_form(
+    request: Request,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    teams = _manual_post_teams(db, current)
+    default_zone = ZoneInfo(teams[0].timezone if teams else settings.timezone)
+    default_publish_at = (
+        datetime.now(timezone.utc).astimezone(default_zone) + timedelta(minutes=15)
+    ).strftime("%Y-%m-%dT%H:%M")
+    return render(
+        request,
+        "manual_post.html",
+        current,
+        teams=teams,
+        submission_id=secrets.token_urlsafe(32),
+        default_publish_at=default_publish_at,
+        title="Beitrag manuell erstellen",
+    )
+
+
+@router.post("/posts/manual/new")
+async def create_manual_post_route(
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    submission_id: str = Form(),
+    team_id: str = Form(),
+    kind: str = Form(),
+    text_value: str = Form(alias="text"),
+    scheduled_at_value: str = Form(alias="scheduled_at"),
+    image: UploadFile = File(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    team = db.get(Team, team_id)
+    if not team:
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    require(current, db, "edit_post", team.id)
+    content = await image.read(MAX_MANUAL_IMAGE_BYTES + 1)
+    try:
+        validated = validate_manual_image(
+            image.filename or "", image.content_type, content, kind
+        )
+        scheduled_at = parse_manual_publication_time(
+            scheduled_at_value, team.timezone or settings.timezone
+        )
+        post, created = create_manual_post(
+            db,
+            settings,
+            team=team,
+            user=current,
+            submission_id=submission_id,
+            kind=kind,
+            text=text_value,
+            scheduled_at=scheduled_at,
+            image=validated,
+        )
+    except ManualPostError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    message = (
+        "Manueller Beitrag zur Prüfung angelegt"
+        if created
+        else "Dieser manuelle Beitrag war bereits angelegt"
+    )
+    return redirect(f"/posts/{post.id}", message)
+
+
 @router.get("/posts/{post_id}", response_class=HTMLResponse)
 def post_detail(
     post_id: str, request: Request, current=Depends(current_user), db: Session = Depends(get_db)
@@ -1430,6 +1524,11 @@ def rerender_post_media(
     if not item:
         raise HTTPException(404)
     require(current, db, "generate", item.team_id)
+    if (item.design_snapshot or {}).get("source") == "manual_upload":
+        raise HTTPException(
+            422,
+            "Manuell hochgeladene Grafiken werden nicht durch KI neu erzeugt",
+        )
     if item.version != version:
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
     allowed_story_ids = set(
@@ -1481,6 +1580,11 @@ def recompose_post_media_logos(
     if not item:
         raise HTTPException(404)
     require(current, db, "generate", item.team_id)
+    if (item.design_snapshot or {}).get("source") == "manual_upload":
+        raise HTTPException(
+            422,
+            "Manuell hochgeladene Grafiken besitzen keine Logo-Komposition",
+        )
     if item.version != version:
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
     allowed_story_ids = set(

@@ -2,7 +2,14 @@
 {% block content %}
 <h1>Beitrag prüfen</h1>
 <p>Status: <span class="badge">{{item.status.value}}</span> · Beitragsversion {{item.version}}</p>
+{% set is_manual=item.design_snapshot.get('source') == 'manual_upload' %}
 {% if item.critical_warnings %}<div class="alert"><strong>Kritische Hinweise:</strong> {{item.critical_warnings|join('; ')}}</div>{% endif %}
+{% if is_manual %}
+<div class="notice">
+  <strong>Manuell erstellter Beitrag:</strong> Bild und Text wurden unverändert durch einen Benutzer bereitgestellt.
+  Für diesen Beitrag wurden keine KI- oder Designvorlagen verwendet.
+</div>
+{% else %}
 {% if item.design_snapshot.get('mode') %}
 <div class="warning">
   <strong>Generierung:</strong> Bild {{item.design_snapshot.get('mode',{}).get('image')}} · Text {{item.design_snapshot.get('mode',{}).get('text')}}.
@@ -14,7 +21,9 @@
   Bitte Spieler, Trikot und beide Logos sorgfältig mit den unten angezeigten Originalen vergleichen.
   Die Anwendung kann weder eine pixelgenaue Logo-Wiedergabe noch das Fehlen zusätzlicher erfundener Wappen automatisch garantieren.
 </div>
+{% endif %}
 {% set logos=item.design_snapshot.get('logos') %}
+{% if not is_manual %}
 {% if logos %}
 <section>
   <h2>Verifizierte Logo-Assets</h2>
@@ -40,6 +49,7 @@
 {% else %}
 <div class="warning">Legacy-Beitrag ohne eingefrorene Logoversion. Logos zuordnen und anschließend kontrolliert neu zusammensetzen.</div>
 {% endif %}
+{% endif %}
 {% if item.design_snapshot.get('prompts') %}
 <details>
   <summary>Verwendete Promptversionen anzeigen</summary>
@@ -57,6 +67,7 @@
   <figure><figcaption>{{x.kind|upper}} · {{x.scheduled_at|berlin}}</figcaption><img src="/posts/{{item.id}}/media/{{x.id}}" alt="Vorschau {{x.kind}}"><div class="media-check">{{checks[x.id]}}</div></figure>
   {% endfor %}
 </div>
+{% if not is_manual %}
 <form method="post" action="/posts/{{item.id}}/rerender">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
   <fieldset><legend>Grafiken neu erzeugen</legend><p>Der Feed wird immer versioniert neu erzeugt. Storys auswählen:</p>
@@ -98,6 +109,7 @@
   {{logo_recompose.feed.reason}} Verwende stattdessen „Grafiken neu erzeugen“.
   {% endif %}
 </div>
+{% endif %}
 {% endif %}
 <form method="post" action="/posts/{{item.id}}/text">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">

@@ -25,16 +25,20 @@ def approve(db:Session,post:Post,user:User,selected_jobs:list[str]|None=None)->P
     page=db.get(InstagramPage,post.instagram_page_id); team=db.get(Team,post.team_id)
     jobs=list(db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id)))
     selected=[j for j in jobs if selected_jobs is None or j.id in selected_jobs]; problems=[]
-    if not post.text or not post.feed_path: problems.append("Text oder Feed fehlt")
+    if not post.text: problems.append("Text fehlt")
+    if any(j.kind=="feed" for j in selected) and not post.feed_path: problems.append("Feed fehlt")
     if not selected or any(not Path(j.media_path).is_file() for j in selected): problems.append("Veröffentlichungsdateien fehlen")
     if post.critical_warnings: problems.extend(post.critical_warnings)
     logos=(post.design_snapshot or {}).get("logos")
     team_logo=(logos or {}).get("team")
     if (
-        not team_logo
-        or not team_logo.get("verified")
-        or not team_logo.get("id")
-        or not team_logo.get("checksum")
+        (post.design_snapshot or {}).get("source") != "manual_upload"
+        and (
+            not team_logo
+            or not team_logo.get("verified")
+            or not team_logo.get("id")
+            or not team_logo.get("checksum")
+        )
     ):
         problems.append("Kein eingefrorenes verifiziertes Mannschaftslogo vorhanden")
     if not page or not page.active or page.connection_status!="connected": problems.append("Instagram-Seite nicht aktiv verbunden")
@@ -57,5 +61,7 @@ def edit_text(db:Session,post:Post,user:User,text:str,expected_version:int):
     if post.version!=expected_version: raise ApprovalError("Bearbeitungskonflikt: Beitrag wurde zwischenzeitlich geändert")
     post.text=text.strip(); post.text_version+=1; post.version+=1; post.last_edited_by=user.id
     if post.status in {PostStatus.APPROVED,PostStatus.SCHEDULED}: post.status=PostStatus.REAPPROVAL
-    for job in db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id,PublicationJob.status!=JobStatus.PUBLISHED)): job.status=JobStatus.UNAPPROVED; job.approval_status="reapproval_required"
+    for job in db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id,PublicationJob.status!=JobStatus.PUBLISHED)):
+        job.status=JobStatus.UNAPPROVED; job.approval_status="reapproval_required"
+        if job.kind=="feed": job.text_snapshot=post.text
     db.commit()

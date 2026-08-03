@@ -81,7 +81,7 @@ def _locked_context(db: Session, job_id: str):
             )
         raise MetaPublishingError("Veröffentlichungsauftrag nicht gefunden")
     post = db.get(Post, job.post_id)
-    game = db.get(Game, job.game_id)
+    game = db.get(Game, job.game_id) if job.game_id else None
     team = db.get(Team, job.team_id)
     page = db.get(InstagramPage, job.instagram_page_id)
     connection = db.scalar(
@@ -89,8 +89,10 @@ def _locked_context(db: Session, job_id: str):
         .where(InstagramConnection.instagram_page_id == job.instagram_page_id)
         .with_for_update(skip_locked=True)
     )
-    if not all((post, game, team, page, connection)):
-        raise MetaPublishingError("Beitrag, Spiel, Seite oder Meta-Verbindung fehlt")
+    if not all((post, team, page, connection)):
+        raise MetaPublishingError("Beitrag, Seite oder Meta-Verbindung fehlt")
+    if job.game_id is not None and game is None:
+        raise MetaPublishingError("Zugeordnetes Spiel fehlt")
     return job, post, game, team, page, connection
 
 
@@ -100,7 +102,7 @@ def _assert_publication_gates(
     *,
     job: PublicationJob,
     post: Post,
-    game: Game,
+    game: Game | None,
     team: Team,
     page: InstagramPage,
     connection: InstagramConnection,
@@ -147,10 +149,14 @@ def _assert_publication_gates(
             "Auftrag ist nicht freigegeben oder bereits abgeschlossen",
         ),
         (
-            game.status not in {"cancelled", "postponed", "provisional"},
+            game is None
+            or game.status not in {"cancelled", "postponed", "provisional"},
             "Spielstatus sperrt die Veröffentlichung",
         ),
-        (not game.overrides.get("automation_blocked"), "Spiel ist für Automatisierung gesperrt"),
+        (
+            game is None or not game.overrides.get("automation_blocked"),
+            "Spiel ist für Automatisierung gesperrt",
+        ),
         (not job.stale_time, "Veröffentlichungszeit ist als veraltet markiert"),
         (post.publishing_enabled and team.publishing_enabled, "Publishing wurde deaktiviert"),
         (job.kind in {"feed", "story"}, "Nicht unterstützte Medienart"),
@@ -190,7 +196,7 @@ def _assert_automatic_publication_gates(
     *,
     job: PublicationJob,
     post: Post,
-    game: Game,
+    game: Game | None,
     team: Team,
     page: InstagramPage,
     connection: InstagramConnection,
