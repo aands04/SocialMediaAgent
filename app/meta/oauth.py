@@ -320,10 +320,22 @@ def disconnect(
             )
         )
     )
+    from app.models import MetaCarouselItem
+
     revoked_grants = 0
     for attempt in attempts:
+        grant_ids = list(
+            db.scalars(
+                select(MetaCarouselItem.public_media_grant_id).where(
+                    MetaCarouselItem.attempt_id == attempt.id,
+                    MetaCarouselItem.public_media_grant_id.is_not(None),
+                )
+            )
+        )
         if attempt.public_media_grant_id:
-            grant = db.get(PublicMediaGrant, attempt.public_media_grant_id)
+            grant_ids.append(attempt.public_media_grant_id)
+        for grant_id in set(grant_ids):
+            grant = db.get(PublicMediaGrant, grant_id)
             if grant and not grant.revoked_at:
                 grant.revoked_at = datetime.now(timezone.utc)
                 grant.active_key = None

@@ -28,7 +28,8 @@ müssen `ENVIRONMENT=production`, `PUBLISHER_MODE=instagram`,
 Das Freischalten der Umgebung allein reicht nicht. Jede Instagram-Seite muss
 im Dashboard separat für Publishing und anschließend mit der Bestätigung
 `AUTOMATISCH VERÖFFENTLICHEN` für die Automatik aktiviert werden. Feed und
-Story können je Seite einzeln zugelassen werden.
+Story können je Seite einzeln zugelassen werden. Manuelle Bildkarussells gelten
+als Feed-Typ und benötigen deshalb die Feed-Freigabe der Seite.
 
 ## Voraussetzungen pro Auftrag
 
@@ -47,7 +48,9 @@ Unmittelbar vor jedem externen Schritt prüft der Worker erneut:
 - Spiel und Beitrag besitzen keine Automatisierungssperre oder kritische
   Warnung,
 - der geplante Zeitpunkt ist erreicht und nicht als veraltet markiert,
-- Datei, PNG-Validierung und Prüfsumme stimmen,
+- bei einem Karussell sind 2 bis 10 geordnete Dateien vollständig vorhanden;
+  für jede Datei stimmen PNG-Validierung und Prüfsumme,
+- bei Feed und Story stimmen Datei, PNG-Validierung und Prüfsumme,
 - es gibt weder eine bestehende Plattform-ID noch einen konkurrierenden
   aktiven Versuch.
 
@@ -62,6 +65,12 @@ dass mehrere Worker für denselben Veröffentlichungsauftrag parallel einen
 Meta-Versuch anlegen.
 
 Jeder Durchlauf führt pro Versuch höchstens einen externen Schritt aus:
+
+Bei einem Karussell werden zunächst die Child-Container in der eingefrorenen
+Reihenfolge erzeugt und ihre IDs einzeln gespeichert. Erst danach wird ein
+Parent-Container erstellt. Bereits gespeicherte Child-IDs werden nach einem
+Neustart wiederverwendet; ein Timeout mit unklarer Annahme wird nicht durch
+einen kosten- beziehungsweise duplikatenträchtigen Neuversuch übergangen.
 
 ```text
 scheduled/retry

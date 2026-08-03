@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
+from sqlalchemy import select
 
 from app.approvals.service import approve
 from app.config import Settings
@@ -13,6 +15,7 @@ from app.models import (
     JobStatus,
     PostStatus,
     PublicationJob,
+    PublicationMediaItem,
     Role,
     Team,
     User,
@@ -93,7 +96,7 @@ def test_manual_feed_uses_normal_approval_and_dry_run_publishing(db, tmp_path):
         kind="feed",
         text="Unser selbst erstellter Beitrag",
         scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
-        image=image,
+        images=[image],
     )
     assert created is True
     assert post.game_id is None
@@ -113,7 +116,7 @@ def test_manual_feed_uses_normal_approval_and_dry_run_publishing(db, tmp_path):
         kind="feed",
         text="Wird wegen Idempotenz ignoriert",
         scheduled_at=datetime.now(timezone.utc) + timedelta(hours=2),
-        image=image,
+        images=[image],
     )
     assert created_again is False
     assert duplicate.id == post.id
@@ -151,7 +154,7 @@ def test_manual_story_has_no_platform_caption_and_needs_exact_dimensions(db, tmp
         kind="story",
         text="Interne Story-Dokumentation",
         scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
-        image=story_image,
+        images=[story_image],
     )
     job = db.query(PublicationJob).filter_by(post_id=post.id).one()
     assert post.feed_path is None
@@ -197,9 +200,11 @@ def test_automatic_scheduler_selects_due_manual_post(db, tmp_path):
         kind="feed",
         text="Automatisch nach Freigabe",
         scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
-        image=validate_manual_image(
-            "feed.png", "image/png", image_bytes(), "feed"
-        ),
+        images=[
+            validate_manual_image(
+                "feed.png", "image/png", image_bytes(), "feed"
+            )
+        ],
     )
     approve(db, post, user)
     job = db.query(PublicationJob).filter_by(post_id=post.id).one()
@@ -207,3 +212,67 @@ def test_automatic_scheduler_selects_due_manual_post(db, tmp_path):
     db.commit()
     ids = _candidate_ids(db, Settings(meta_scheduler_batch_size=5))
     assert ids == [job.id]
+
+
+def test_manual_carousel_persists_selected_order_and_shared_caption(db, tmp_path):
+    user, _page, team = setup_manual_context(db)
+    first = validate_manual_image(
+        "zuerst.png", "image/png", image_bytes(), "carousel"
+    )
+    second_payload = image_bytes()
+    second = validate_manual_image(
+        "danach.png", "image/png", second_payload, "carousel"
+    )
+    post, created = create_manual_post(
+        db,
+        Settings(
+            generated_root=tmp_path / "generated",
+            media_root=tmp_path / "media",
+            upload_root=tmp_path / "uploads",
+        ),
+        team=team,
+        user=user,
+        submission_id="manual-carousel-submission-123456789",
+        kind="carousel",
+        text="Eine gemeinsame Karussell-Bildunterschrift",
+        scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        images=[first, second],
+    )
+    assert created is True
+    job = db.query(PublicationJob).filter_by(post_id=post.id).one()
+    media = list(
+        db.scalars(
+            select(PublicationMediaItem)
+            .where(PublicationMediaItem.publication_job_id == job.id)
+            .order_by(PublicationMediaItem.position)
+        )
+    )
+    assert job.kind == "carousel"
+    assert job.text_snapshot == post.text
+    assert [item.position for item in media] == [1, 2]
+    assert [Path(item.media_path).name for item in media] == [
+        "carousel-01-v1.png",
+        "carousel-02-v1.png",
+    ]
+    assert post.design_snapshot["manual_upload"]["images"][0]["original_filename"] == "zuerst.png"
+    approve(db, post, user)
+    assert job.status == JobStatus.SCHEDULED
+
+
+def test_manual_carousel_requires_two_to_ten_images(db, tmp_path):
+    user, _page, team = setup_manual_context(db)
+    image = validate_manual_image(
+        "single.png", "image/png", image_bytes(), "carousel"
+    )
+    with pytest.raises(ManualPostError, match="2 bis 10"):
+        create_manual_post(
+            db,
+            Settings(generated_root=tmp_path / "generated"),
+            team=team,
+            user=user,
+            submission_id="manual-carousel-too-small-123456",
+            kind="carousel",
+            text="Zu klein",
+            scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            images=[image],
+        )

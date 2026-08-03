@@ -64,7 +64,17 @@
 <h2>Visuelle Prüfübersicht</h2>
 <div class="media-grid">
   {% for x in jobs %}
+  {% if x.kind == 'carousel' %}
+    {% for media in carousel_items.get(x.id, []) %}
+    <figure>
+      <figcaption>KARUSSELL {{media.position}}/{{carousel_items[x.id]|length}} · {{x.scheduled_at|berlin}}</figcaption>
+      <img src="/posts/{{item.id}}/media/{{x.id}}/items/{{media.id}}" alt="Karussellbild {{media.position}}">
+      {% if loop.first %}<div class="media-check">{{checks[x.id]}}</div>{% endif %}
+    </figure>
+    {% endfor %}
+  {% else %}
   <figure><figcaption>{{x.kind|upper}} · {{x.scheduled_at|berlin}}</figcaption><img src="/posts/{{item.id}}/media/{{x.id}}" alt="Vorschau {{x.kind}}"><div class="media-check">{{checks[x.id]}}</div></figure>
+  {% endif %}
   {% endfor %}
 </div>
 {% if not is_manual %}

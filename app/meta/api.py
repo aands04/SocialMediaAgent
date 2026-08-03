@@ -208,6 +208,48 @@ class MetaApiClient:
             headers={"Authorization": f"Bearer {access_token}"},
         )
 
+    def create_carousel_item(
+        self,
+        *,
+        access_token: str,
+        account_id: str,
+        image_url: str,
+    ) -> dict:
+        if not image_url.startswith("https://"):
+            raise MetaApiError("Meta akzeptiert ausschließlich freigegebene HTTPS-Medien-URLs")
+        return self._request_json(
+            "POST",
+            f"{self.base}/{account_id}/media",
+            "Karussell-Element erstellen",
+            uncertain_on_transport_error=True,
+            data={"image_url": image_url, "is_carousel_item": "true"},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    def create_carousel_container(
+        self,
+        *,
+        access_token: str,
+        account_id: str,
+        child_ids: list[str],
+        caption: str | None,
+    ) -> dict:
+        if not 2 <= len(child_ids) <= 10 or any(not child_id for child_id in child_ids):
+            raise MetaApiError("Karussell benötigt 2 bis 10 gültige Child-Container")
+        if len(set(child_ids)) != len(child_ids):
+            raise MetaApiError("Karussell enthält doppelte Child-Container")
+        payload = {"media_type": "CAROUSEL", "children": ",".join(child_ids)}
+        if caption:
+            payload["caption"] = caption
+        return self._request_json(
+            "POST",
+            f"{self.base}/{account_id}/media",
+            "Karussell-Container erstellen",
+            uncertain_on_transport_error=True,
+            data=payload,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
     def publish_container(
         self, *, access_token: str, account_id: str, container_id: str
     ) -> dict:

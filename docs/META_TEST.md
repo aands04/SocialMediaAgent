@@ -44,12 +44,18 @@ verwendet. Effektiv entzogene Rechte werden außerdem von jedem konkreten
 Instagram-Endpunkt abgewiesen und niemals durch einen automatischen Retry
 umgangen.
 
-Feed und Story verwenden eine öffentlich erreichbare `image_url`. Für eine
-Bild-Story sendet die Anwendung `media_type=STORIES` und keine erfundene
-Caption. Die Container-ID wird vor jedem weiteren Schritt persistent
-gespeichert. Der Containerstatus muss `FINISHED` sein, bevor
-`media_publish` bewusst ausgelöst wird. Tokenlaufzeiten und Ablaufzeitpunkte
-werden aus den API-Antworten gespeichert; sie werden nicht hartcodiert.
+Feed, Karussell und Story verwenden zeitlich begrenzte, öffentlich erreichbare
+`image_url`-Freigaben. Für ein Karussell werden 2 bis 10 Child-Container in der
+vom Benutzer gespeicherten Reihenfolge mit `is_carousel_item=true` angelegt;
+anschließend referenziert genau ein Parent-Container mit
+`media_type=CAROUSEL` diese IDs und trägt den gemeinsamen Begleittext. Jede
+Child-ID wird unmittelbar persistent gespeichert und bei einer unklaren
+Antwort nicht automatisch neu erzeugt. Für eine Bild-Story sendet die
+Anwendung `media_type=STORIES` und keine erfundene Caption. Die Parent-
+Container-ID wird vor jedem weiteren Schritt persistent gespeichert. Der
+Containerstatus muss `FINISHED` sein, bevor `media_publish` bewusst ausgelöst
+wird. Tokenlaufzeiten und Ablaufzeitpunkte werden aus den API-Antworten
+gespeichert; sie werden nicht hartcodiert.
 
 App-Modus, Rollen, Testnutzer, App Review, Publishing-Limits und aktuell
 zulässige Medienanforderungen müssen in der Meta-App unmittelbar vor dem

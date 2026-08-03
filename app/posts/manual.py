@@ -19,6 +19,7 @@ from app.models import (
     Post,
     PostStatus,
     PublicationJob,
+    PublicationMediaItem,
     Team,
     User,
 )
@@ -32,7 +33,12 @@ MANUAL_IMAGE_TYPES = {
     ".png": ("PNG", "image/png"),
     ".webp": ("WEBP", "image/webp"),
 }
-MANUAL_IMAGE_SIZES = {"feed": (1080, 1350), "story": (1080, 1920)}
+MANUAL_IMAGE_SIZES = {
+    "feed": (1080, 1350),
+    "carousel": (1080, 1350),
+    "story": (1080, 1920),
+}
+MAX_CAROUSEL_IMAGES = 10
 _SUBMISSION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{20,120}$")
 
 
@@ -58,7 +64,7 @@ def validate_manual_image(
     kind: str,
 ) -> ValidatedManualImage:
     if kind not in MANUAL_IMAGE_SIZES:
-        raise ManualPostError("Medienart muss Feed oder Story sein")
+        raise ManualPostError("Medienart muss Feed, Karussell oder Story sein")
     if not content:
         raise ManualPostError("Bilddatei ist leer")
     if len(content) > MAX_MANUAL_IMAGE_BYTES:
@@ -148,7 +154,7 @@ def create_manual_post(
     kind: str,
     text: str,
     scheduled_at: datetime,
-    image: ValidatedManualImage,
+    images: list[ValidatedManualImage],
 ) -> tuple[Post, bool]:
     if not _SUBMISSION_PATTERN.fullmatch(submission_id or ""):
         raise ManualPostError("Ungültige Formular-ID; Seite bitte neu laden")
@@ -160,7 +166,11 @@ def create_manual_post(
             f"Text darf höchstens {MAX_MANUAL_TEXT_CHARS} Zeichen enthalten"
         )
     if kind not in MANUAL_IMAGE_SIZES:
-        raise ManualPostError("Medienart muss Feed oder Story sein")
+        raise ManualPostError("Medienart muss Feed, Karussell oder Story sein")
+    if kind == "carousel" and not 2 <= len(images) <= MAX_CAROUSEL_IMAGES:
+        raise ManualPostError("Ein Karussell benötigt 2 bis 10 Bilder")
+    if kind != "carousel" and len(images) != 1:
+        raise ManualPostError("Feed und Story benötigen genau ein Bild")
     existing = db.scalar(
         select(Post).where(Post.manual_submission_id == submission_id)
     )
@@ -198,35 +208,50 @@ def create_manual_post(
         raise ManualPostError("Beitrag konnte nicht eindeutig angelegt werden") from exc
 
     root = settings.generated_root.resolve()
-    target = (root / "manual" / post.id / f"{kind}-v1.png").resolve()
-    if root not in target.parents:
-        db.rollback()
-        raise ManualPostError("Unsicherer Zielpfad wurde blockiert")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(".tmp")
+    targets: list[Path] = []
     try:
-        temporary.write_bytes(image.png)
-        temporary.replace(target)
-        Renderer(root, settings.media_root, settings.upload_root).validate(target, kind)
+        renderer = Renderer(root, settings.media_root, settings.upload_root)
+        for position, image in enumerate(images, start=1):
+            filename = (
+                f"carousel-{position:02d}-v1.png"
+                if kind == "carousel"
+                else f"{kind}-v1.png"
+            )
+            target = (root / "manual" / post.id / filename).resolve()
+            if root not in target.parents:
+                raise ManualPostError("Unsicherer Zielpfad wurde blockiert")
+            targets.append(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(".tmp")
+            temporary.write_bytes(image.png)
+            temporary.replace(target)
+            renderer.validate(target, "feed" if kind == "carousel" else kind)
     except (OSError, RenderValidationError, ValueError) as exc:
-        temporary.unlink(missing_ok=True)
-        target.unlink(missing_ok=True)
+        for target in targets:
+            target.unlink(missing_ok=True)
+            target.with_suffix(".tmp").unlink(missing_ok=True)
         db.rollback()
         raise ManualPostError(f"Bild konnte nicht sicher gespeichert werden: {exc}") from exc
 
-    post.feed_path = str(target) if kind == "feed" else None
+    post.feed_path = str(targets[0]) if kind in {"feed", "carousel"} else None
     post.design_snapshot = {
         "source": "manual_upload",
         "mode": {"image": "manual", "text": "manual"},
         "manual_upload": {
             "kind": kind,
             "submission_id": submission_id,
-            "original_filename": image.original_filename,
-            "original_mime_type": image.original_mime_type,
-            "original_checksum": image.original_checksum,
-            "final_checksum": image.png_checksum,
-            "width": image.width,
-            "height": image.height,
+            "images": [
+                {
+                    "position": position,
+                    "original_filename": image.original_filename,
+                    "original_mime_type": image.original_mime_type,
+                    "original_checksum": image.original_checksum,
+                    "final_checksum": image.png_checksum,
+                    "width": image.width,
+                    "height": image.height,
+                }
+                for position, image in enumerate(images, start=1)
+            ],
             "scheduled_at": scheduled_at.isoformat(),
             "uploaded_by": user.id,
         },
@@ -238,8 +263,8 @@ def create_manual_post(
         instagram_page_id=page.id,
         story_rule_id=None,
         kind=kind,
-        media_path=str(target),
-        text_snapshot=body if kind == "feed" else None,
+        media_path=str(targets[0]),
+        text_snapshot=body if kind in {"feed", "carousel"} else None,
         scheduled_at=scheduled_at,
         absolute_time=True,
         approval_status="unapproved",
@@ -247,6 +272,22 @@ def create_manual_post(
         idempotency_key=f"{post.id}:manual:{kind}:v1",
     )
     db.add(publication)
+    db.flush()
+    for position, (image, target) in enumerate(
+        zip(images, targets, strict=True), start=1
+    ):
+        db.add(
+            PublicationMediaItem(
+                publication_job_id=publication.id,
+                position=position,
+                media_path=str(target),
+                checksum=image.png_checksum,
+                mime_type="image/png",
+                file_size=len(image.png),
+                width=image.width,
+                height=image.height,
+            )
+        )
     db.add(
         AuditLog(
             user_id=user.id,
@@ -257,8 +298,9 @@ def create_manual_post(
             details={
                 "kind": kind,
                 "scheduled_at": scheduled_at.isoformat(),
-                "checksum": image.png_checksum,
-                "original_filename": image.original_filename,
+                "checksums": [image.png_checksum for image in images],
+                "original_filenames": [image.original_filename for image in images],
+                "image_count": len(images),
             },
         )
     )
@@ -266,6 +308,7 @@ def create_manual_post(
         db.commit()
     except Exception:
         db.rollback()
-        target.unlink(missing_ok=True)
+        for target in targets:
+            target.unlink(missing_ok=True)
         raise
     return post, True

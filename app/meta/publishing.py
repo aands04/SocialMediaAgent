@@ -10,6 +10,7 @@ from app.meta.api import REQUIRED_SCOPES, MetaApiClient, MetaApiError
 from app.meta.media import (
     MediaGrantError,
     create_grant,
+    publication_media_items,
     revoke_grant,
     validate_publication_png,
     verify_public_media_url,
@@ -27,11 +28,13 @@ from app.models import (
     InstagramConnection,
     InstagramPage,
     JobStatus,
+    MetaCarouselItem,
     MetaPublishConfirmation,
     MetaPublishingAttempt,
     Post,
     PostStatus,
     PublicationJob,
+    PublicationMediaItem,
     PublicMediaGrant,
     SystemSetting,
     Team,
@@ -41,6 +44,85 @@ from app.models import (
 
 class MetaPublishingError(RuntimeError):
     pass
+
+
+def _job_media_reports(
+    db: Session, settings: Settings, job: PublicationJob
+) -> list[tuple[PublicationMediaItem | None, dict]]:
+    if job.kind == "carousel":
+        return [
+            (item, validate_publication_png(job, settings, item))
+            for item in publication_media_items(db, job)
+        ]
+    return [(None, validate_publication_png(job, settings))]
+
+
+def _attempt_carousel_items(db: Session, attempt_id: str) -> list[MetaCarouselItem]:
+    return list(
+        db.scalars(
+            select(MetaCarouselItem)
+            .where(MetaCarouselItem.attempt_id == attempt_id)
+            .order_by(MetaCarouselItem.position)
+        )
+    )
+
+
+def _revoke_attempt_grants(
+    db: Session,
+    attempt: MetaPublishingAttempt,
+    user: User | None,
+    *,
+    reason: str,
+) -> None:
+    grant_ids = {
+        item.public_media_grant_id
+        for item in _attempt_carousel_items(db, attempt.id)
+        if item.public_media_grant_id
+    }
+    if attempt.public_media_grant_id:
+        grant_ids.add(attempt.public_media_grant_id)
+    for grant_id in grant_ids:
+        grant = db.get(PublicMediaGrant, grant_id)
+        if grant and not grant.revoked_at:
+            revoke_grant(db, grant, user, reason=reason)
+
+
+def _create_attempt_grants(
+    db: Session,
+    settings: Settings,
+    attempt: MetaPublishingAttempt,
+    job: PublicationJob,
+    user: User,
+) -> list[tuple[PublicMediaGrant, str, str, MetaCarouselItem | None]]:
+    reports = _job_media_reports(db, settings, job)
+    if job.kind != "carousel":
+        grant, raw_token, url = create_grant(db, settings, job, user)
+        attempt.public_media_grant_id = grant.id
+        return [(grant, raw_token, url, None)]
+
+    persisted = {
+        item.publication_media_item_id: item
+        for item in _attempt_carousel_items(db, attempt.id)
+    }
+    result = []
+    for media_item, _ in reports:
+        assert media_item is not None
+        child = persisted.get(media_item.id)
+        if child is None:
+            child = MetaCarouselItem(
+                attempt_id=attempt.id,
+                publication_media_item_id=media_item.id,
+                position=media_item.position,
+                sanitized_response={},
+            )
+            db.add(child)
+            db.flush()
+        grant, raw_token, url = create_grant(db, settings, job, user, media_item)
+        child.public_media_grant_id = grant.id
+        if not result:
+            attempt.public_media_grant_id = grant.id
+        result.append((grant, raw_token, url, child))
+    return result
 
 
 def _utc(value: datetime) -> datetime:
@@ -159,12 +241,12 @@ def _assert_publication_gates(
         ),
         (not job.stale_time, "Veröffentlichungszeit ist als veraltet markiert"),
         (post.publishing_enabled and team.publishing_enabled, "Publishing wurde deaktiviert"),
-        (job.kind in {"feed", "story"}, "Nicht unterstützte Medienart"),
+        (job.kind in {"feed", "carousel", "story"}, "Nicht unterstützte Medienart"),
     ]
     for ok, message in checks:
         if not ok:
             raise MetaPublishingError(message)
-    validate_publication_png(job, settings)
+    _job_media_reports(db, settings, job)
 
 
 def assert_automatic_scheduler_environment(settings: Settings) -> None:
@@ -237,7 +319,11 @@ def _assert_automatic_publication_gates(
             "Meta-Verbindungsprüfung ist zu alt",
         ),
         (
-            bool((page.allowed_types or {}).get(job.kind, False)),
+            bool(
+                (page.allowed_types or {}).get(
+                    "feed" if job.kind == "carousel" else job.kind, False
+                )
+            ),
             "Medienart ist für die Instagram-Seite deaktiviert",
         ),
         (not post.critical_warnings, "Beitrag enthält ungeklärte kritische Warnungen"),
@@ -312,7 +398,8 @@ def create_attempt(
         raise MetaPublishingError(
             "Für diesen Auftrag wird bereits ein Meta-Versuch bearbeitet"
         )
-    report = validate_publication_png(job, settings)
+    media_reports = _job_media_reports(db, settings, job)
+    _, report = media_reports[0]
     attempt = MetaPublishingAttempt(
         publication_job_id=job.id,
         connection_id=connection.id,
@@ -337,7 +424,10 @@ def create_attempt(
                     "public/meta-media/[temporäres-token]"
                 ),
                 "kind": job.kind,
-                "caption_included": job.kind == "feed" and bool(job.text_snapshot),
+                "caption_included": job.kind in {"feed", "carousel"}
+                and bool(job.text_snapshot),
+                "image_count": len(media_reports),
+                "ordered_checksums": [entry[1]["checksum"] for entry in media_reports],
             },
         },
         started_by=user.id,
@@ -355,8 +445,7 @@ def create_attempt(
         if duplicate:
             return duplicate, None
         raise
-    grant, raw_token, media_url = create_grant(db, settings, job, user)
-    attempt.public_media_grant_id = grant.id
+    grant_rows = _create_attempt_grants(db, settings, attempt, job, user)
     if trigger_mode == "automatic":
         job.status = JobStatus.PUBLISHING
         job.attempts += 1
@@ -367,15 +456,12 @@ def create_attempt(
     # hash-only grant and active attempt before checking that exact URL.
     db.commit()
     try:
-        public_check = verify_public_media_url(
-            settings,
-            grant,
-            media_url,
-            media_http_client,
-        )
+        public_checks = [
+            verify_public_media_url(settings, grant, media_url, media_http_client)
+            for grant, _, media_url, _ in grant_rows
+        ]
     except MediaGrantError as exc:
         attempt = db.get(MetaPublishingAttempt, attempt.id)
-        grant = db.get(PublicMediaGrant, grant.id)
         attempt.phase = "failed"
         attempt.active_key = None
         attempt.error_category = "public_media_unreachable"
@@ -391,13 +477,9 @@ def create_attempt(
                 else:
                     job.status = JobStatus.FAILED
                 job.error = str(exc)
-        if grant and not grant.revoked_at:
-            revoke_grant(
-                db,
-                grant,
-                user,
-                reason="Öffentliche Medienprüfung fehlgeschlagen",
-            )
+        _revoke_attempt_grants(
+            db, attempt, user, reason="Öffentliche Medienprüfung fehlgeschlagen"
+        )
         _audit(
             db,
             user,
@@ -411,17 +493,14 @@ def create_attempt(
         raise
     attempt.sanitized_response = {
         **(attempt.sanitized_response or {}),
-        "public_media_check": public_check,
+        "public_media_checks": public_checks,
     }
     if stage == "validate-only":
         attempt.phase = "completed"
         attempt.completed_at = datetime.now(timezone.utc)
         attempt.active_key = None
-        revoke_grant(
-            db,
-            grant,
-            user,
-            reason="Validate-only-Prüfung abgeschlossen",
+        _revoke_attempt_grants(
+            db, attempt, user, reason="Validate-only-Prüfung abgeschlossen"
         )
     else:
         attempt.phase = "creating_media_grant"
@@ -440,7 +519,7 @@ def create_attempt(
         job.team_id,
     )
     db.commit()
-    return attempt, raw_token
+    return attempt, grant_rows[0][1]
 
 
 def issue_confirmation(
@@ -576,26 +655,25 @@ def create_container(
             raise MetaPublishingError("Freigabebindung des automatischen Auftrags ist ungültig")
     if attempt.local_media_version != job.version:
         raise MetaPublishingError("Lokale Medienversion wurde seit der Prüfung verändert")
-    report = validate_publication_png(job, settings)
-    if report["checksum"] != attempt.file_checksum:
-        raise MetaPublishingError("Mediendatei wurde seit der Prüfung verändert")
+    media_reports = _job_media_reports(db, settings, job)
+    expected_checksums = (attempt.sanitized_response or {}).get(
+        "request_preview", {}
+    ).get("ordered_checksums") or [attempt.file_checksum]
+    if [entry[1]["checksum"] for entry in media_reports] != expected_checksums:
+        raise MetaPublishingError("Mediendateien oder Reihenfolge wurden seit der Prüfung verändert")
     if not automatic:
         _consume_confirmation(db, attempt, user, "create_container", confirmation_code)
-    grant, _, media_url = create_grant(db, settings, job, user)
-    attempt.public_media_grant_id = grant.id
+    grant_rows = _create_attempt_grants(db, settings, attempt, job, user)
     attempt.phase = "validating_public_media"
     attempt.attempts += 1
     db.commit()
     try:
-        public_check = verify_public_media_url(
-            settings,
-            grant,
-            media_url,
-            media_http_client,
-        )
+        public_checks = [
+            verify_public_media_url(settings, grant, media_url, media_http_client)
+            for grant, _, media_url, _ in grant_rows
+        ]
     except MediaGrantError as exc:
         attempt = db.get(MetaPublishingAttempt, attempt.id)
-        grant = db.get(PublicMediaGrant, grant.id)
         attempt.phase = "failed"
         attempt.active_key = None
         attempt.error_category = "public_media_unreachable"
@@ -604,13 +682,12 @@ def create_container(
             job = db.get(PublicationJob, job.id)
             job.status = JobStatus.FAILED
             job.error = str(exc)
-        if grant and not grant.revoked_at:
-            revoke_grant(
-                db,
-                grant,
-                user,
-                reason="Öffentliche Medienprüfung vor Containererstellung fehlgeschlagen",
-            )
+        _revoke_attempt_grants(
+            db,
+            attempt,
+            user,
+            reason="Öffentliche Medienprüfung vor Containererstellung fehlgeschlagen",
+        )
         _audit(
             db,
             user,
@@ -653,11 +730,10 @@ def create_container(
         )
         if automatic_user.id != user.id:
             raise MetaPublishingError("Freigabebindung des automatischen Auftrags ist ungültig")
-    report = validate_publication_png(job, settings)
+    media_reports = _job_media_reports(db, settings, job)
     if (
-        attempt.public_media_grant_id != grant.id
-        or attempt.local_media_version != job.version
-        or report["checksum"] != attempt.file_checksum
+        attempt.local_media_version != job.version
+        or [entry[1]["checksum"] for entry in media_reports] != expected_checksums
     ):
         raise MetaPublishingError(
             "Medium oder Medienfreigabe wurde während der Prüfung verändert"
@@ -665,20 +741,48 @@ def create_container(
     attempt.phase = "creating_container"
     attempt.sanitized_response = {
         **(attempt.sanitized_response or {}),
-        "public_media_check": public_check,
+        "public_media_checks": public_checks,
     }
     db.commit()
     token = TokenCipher(settings.meta_token_encryption_key).decrypt(
         connection.encrypted_token
     )
     try:
-        response = api.create_container(
-            access_token=token,
-            account_id=attempt.target_account_id,
-            kind=attempt.media_kind,
-            image_url=media_url,
-            caption=job.text_snapshot if attempt.media_kind == "feed" else None,
-        )
+        if attempt.media_kind == "carousel":
+            child_ids = []
+            for _, _, media_url, child in grant_rows:
+                assert child is not None
+                if not child.meta_container_id:
+                    child_response = api.create_carousel_item(
+                        access_token=token,
+                        account_id=attempt.target_account_id,
+                        image_url=media_url,
+                    )
+                    child_id = str(child_response.get("id") or "")
+                    if not child_id:
+                        raise MetaApiError(
+                            "Meta lieferte keine Child-Container-ID",
+                            response=child_response,
+                        )
+                    child.meta_container_id = child_id
+                    child.container_status = "IN_PROGRESS"
+                    child.sanitized_response = sanitize_platform_data(child_response)
+                    db.commit()
+                child_ids.append(child.meta_container_id)
+            response = api.create_carousel_container(
+                access_token=token,
+                account_id=attempt.target_account_id,
+                child_ids=child_ids,
+                caption=job.text_snapshot,
+            )
+        else:
+            response = api.create_container(
+                access_token=token,
+                account_id=attempt.target_account_id,
+                kind=attempt.media_kind,
+                image_url=grant_rows[0][2],
+                caption=job.text_snapshot if attempt.media_kind == "feed" else None,
+            )
         container_id = str(response.get("id") or "")
         if not container_id:
             raise MetaApiError("Meta lieferte keine Container-ID", response=response)
@@ -720,15 +824,10 @@ def create_container(
         if automatic:
             job.status = JobStatus.UNCERTAIN if exc.uncertain else JobStatus.FAILED
             job.error = str(exc)
-        if not exc.uncertain and attempt.public_media_grant_id:
-            grant = db.get(PublicMediaGrant, attempt.public_media_grant_id)
-            if grant and not grant.revoked_at:
-                revoke_grant(
-                    db,
-                    grant,
-                    user,
-                    reason="Meta-Container wurde nicht angenommen",
-                )
+        if not exc.uncertain:
+            _revoke_attempt_grants(
+                db, attempt, user, reason="Meta-Container wurde nicht angenommen"
+            )
         _audit(
             db,
             user,
@@ -796,30 +895,21 @@ def refresh_container_status(
         if attempt.trigger_mode == "automatic":
             job.status = JobStatus.FAILED
             job.error = attempt.error_message
-        if attempt.public_media_grant_id:
-            grant = db.get(PublicMediaGrant, attempt.public_media_grant_id)
-            if grant and not grant.revoked_at:
-                revoke_grant(
-                    db,
-                    grant,
-                    user,
-                    reason="Meta-Container meldet einen endgültigen Fehler",
-                )
+        _revoke_attempt_grants(
+            db,
+            attempt,
+            user,
+            reason="Meta-Container meldet einen endgültigen Fehler",
+        )
     elif attempt.container_status == "FINISHED":
         attempt.phase = "ready_to_publish" if attempt.stage == "publish" else "completed"
         attempt.next_action_at = datetime.now(timezone.utc)
         if attempt.stage == "container-only":
             attempt.completed_at = datetime.now(timezone.utc)
             attempt.active_key = None
-            if attempt.public_media_grant_id:
-                grant = db.get(PublicMediaGrant, attempt.public_media_grant_id)
-                if grant and not grant.revoked_at:
-                    revoke_grant(
-                        db,
-                        grant,
-                        user,
-                        reason="Container-only-Test abgeschlossen",
-                    )
+            _revoke_attempt_grants(
+                db, attempt, user, reason="Container-only-Test abgeschlossen"
+            )
     else:
         attempt.next_action_at = datetime.now(timezone.utc) + timedelta(
             seconds=settings.meta_container_poll_interval_seconds
@@ -947,15 +1037,9 @@ def publish(
         attempt.phase = "completed"
         attempt.completed_at = datetime.now(timezone.utc)
         attempt.active_key = None
-        if attempt.public_media_grant_id:
-            grant = db.get(PublicMediaGrant, attempt.public_media_grant_id)
-            if grant and not grant.revoked_at:
-                revoke_grant(
-                    db,
-                    grant,
-                    user,
-                    reason="Instagram-Veröffentlichung abgeschlossen",
-                )
+        _revoke_attempt_grants(
+            db, attempt, user, reason="Instagram-Veröffentlichung abgeschlossen"
+        )
         _audit(
             db,
             user,
@@ -1061,10 +1145,9 @@ def reconcile_attempt(
         attempt.active_key = None
         job.status = JobStatus.FAILED
         job.error = "Manuell geprüft: nicht veröffentlicht"
-    if attempt.public_media_grant_id:
-        grant = db.get(PublicMediaGrant, attempt.public_media_grant_id)
-        if grant and not grant.revoked_at:
-            revoke_grant(db, grant, user, reason="manueller Meta-Abgleich abgeschlossen")
+    _revoke_attempt_grants(
+        db, attempt, user, reason="manueller Meta-Abgleich abgeschlossen"
+    )
     _audit(
         db,
         user,
