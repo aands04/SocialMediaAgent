@@ -137,7 +137,17 @@ def _candidate_games(
     ]
     if len({item.team_id for item in games}) < 2:
         return [], teams
-    games.sort(key=lambda item: (_utc(item.kickoff), teams[item.team_id].display_name, item.id))
+    preferred_team_id = str(
+        (team.rules or {}).get("club_matchday_primary_team_id") or ""
+    )
+    games.sort(
+        key=lambda item: (
+            0 if item.team_id == preferred_team_id else 1,
+            _utc(item.kickoff),
+            teams[item.team_id].display_name,
+            item.id,
+        )
+    )
     return games, teams
 
 

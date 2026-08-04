@@ -282,6 +282,45 @@ def test_same_club_same_day_builds_one_feed_carousel_and_separate_stories(db, tm
     assert all(job.status != JobStatus.CANCELLED for job in stories)
 
 
+def test_preferred_team_image_is_first_even_when_it_plays_later(db, tmp_path):
+    page = _page(db)
+    first = _team(db, page, number=1, mode="announcements")
+    second = _team(db, page, number=2, mode="announcements")
+    first.rules = {
+        **first.rules,
+        "club_matchday_primary_team_id": first.id,
+    }
+    second.rules = {
+        **second.rules,
+        "club_matchday_primary_team_id": first.id,
+    }
+    second_game = _game(db, second, hour=13, number=2)
+    first_game = _game(db, first, hour=15, number=1)
+    second_post = _feed_post(db, tmp_path, second, second_game, number=2)
+    first_post = _feed_post(db, tmp_path, first, first_game, number=1)
+    db.commit()
+
+    completed = coordinate_club_matchday_feed(db, first_post, requested_by=None)
+    db.commit()
+
+    assert completed.complete is True
+    assert completed.primary_post_id == first_post.id
+    carousel = db.query(PublicationJob).filter_by(
+        post_id=first_post.id,
+        kind="carousel",
+    ).one()
+    media = (
+        db.query(PublicationMediaItem)
+        .filter_by(publication_job_id=carousel.id)
+        .order_by(PublicationMediaItem.position)
+        .all()
+    )
+    assert [item.media_path for item in media] == [
+        first_post.feed_path,
+        second_post.feed_path,
+    ]
+
+
 def test_shared_result_feed_waits_for_every_club_result(db, tmp_path):
     page = _page(db)
     first = _team(db, page, number=1, mode="announcements_and_results")
