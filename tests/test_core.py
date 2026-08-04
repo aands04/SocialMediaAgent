@@ -120,6 +120,25 @@ def test_controlled_rerender_versions_files_and_revokes_approval(db,tmp_path):
  assert old_feed.is_file() and old_story.is_file() and Path(post.feed_path)!=old_feed and Path(story.media_path)!=old_story
  assert post.status==PostStatus.REAPPROVAL and all(job.status==JobStatus.UNAPPROVED for job in jobs)
 
+def test_rerender_can_target_exactly_one_story_without_changing_feed(db,tmp_path):
+ _,team,game=graph(db,tmp_path)
+ rules=[StoryRule(team_id=team.id,name=name,post_type="announcement",reference="kickoff",direction="before",offset_minutes=offset,template="default-story") for name,offset in (("A",120),("B",60))]
+ db.add_all(rules); db.commit()
+ post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"out"))
+ jobs=db.query(PublicationJob).filter_by(post_id=post.id).all()
+ feed=next(job for job in jobs if job.kind=="feed")
+ selected,untouched=[job for job in jobs if job.kind=="story"]
+ old_feed=(post.feed_path,post.feed_version,feed.media_path,feed.version)
+ old_selected=selected.media_path; old_untouched=(untouched.media_path,untouched.version)
+
+ rerender_post(
+  db,post,Renderer(tmp_path/"out"),[selected.id],rerender_feed=False
+ ); db.commit()
+
+ assert (post.feed_path,post.feed_version,feed.media_path,feed.version)==old_feed
+ assert selected.media_path!=old_selected
+ assert (untouched.media_path,untouched.version)==old_untouched
+
 def test_rerender_can_switch_to_an_unused_player_image_without_reusing_old_one(db,tmp_path):
  _,team,game=graph(db,tmp_path)
  from PIL import Image

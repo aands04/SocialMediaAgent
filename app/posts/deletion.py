@@ -83,11 +83,9 @@ def delete_unpublished_post(
     user: User,
     *,
     expected_version: int,
-    reason: str,
+    reason: str = "",
 ) -> PostDeletionResult:
     reason = reason.strip()
-    if not reason:
-        raise ValueError("Eine Löschbegründung ist erforderlich")
     locked = db.scalar(select(Post).where(Post.id == post.id).with_for_update())
     if not locked:
         raise PostDeletionConflict("Der Beitrag wurde bereits gelöscht")
@@ -236,7 +234,7 @@ def delete_unpublished_post(
             entity_type="post",
             entity_id=locked.id,
             details={
-                "reason": reason,
+                "reason": reason or None,
                 "post_type": locked.post_type,
                 "version": locked.version,
                 "publication_jobs": len(publications),

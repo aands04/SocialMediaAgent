@@ -4,7 +4,7 @@
   {% set post = calendar_posts.get(job.post_id) %}
   {% set game = games.get(job.game_id) if job.game_id else none %}
   {% set media = carousel_items.get(job.id, []) %}
-  <tr class="publication-row{% if job.approval_status != 'approved' or job.error or job.stale_time %} publication-attention{% endif %}">
+  <tr class="publication-row{% if job.approval_status != 'approved' or job.error or job.stale_time %} publication-attention{% endif %}" data-publication-kind="{{ job.kind }}">
     <td class="publication-preview-cell">
       {% if post and job.kind == 'carousel' and media %}
         <div class="publication-carousel-preview" aria-label="Karussell mit {{ media|length }} Bildern">
@@ -72,6 +72,12 @@
       <div>
         <input id="publication-days" type="number" name="days" value="{{ future_days }}" min="1" max="90" required>
         <span>Tage</span>
+        <label class="publication-format-label" for="publication-format">Format</label>
+        <select id="publication-format" name="format">
+          <option value="all" {% if publication_format == 'all' %}selected{% endif %}>Alle</option>
+          <option value="feed" {% if publication_format == 'feed' %}selected{% endif %}>Feed &amp; Karussell</option>
+          <option value="story" {% if publication_format == 'story' %}selected{% endif %}>Nur Storys</option>
+        </select>
         <button type="submit">Anzeigen</button>
       </div>
     </form>

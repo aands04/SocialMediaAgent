@@ -1334,39 +1334,49 @@ def create_story_rule(
 def posts(
     request: Request,
     days: int = Query(default=7, ge=1, le=90),
+    media_format: str = Query(default="all", alias="format"),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
+    if media_format not in {"all", "feed", "story"}:
+        raise HTTPException(422, "Ungültiger Formatfilter")
+    selected_kinds = {
+        "all": None,
+        "feed": ["feed", "carousel"],
+        "story": ["story"],
+    }[media_format]
     now = datetime.now(timezone.utc)
     published_since = now - timedelta(days=2)
     planned_until = now + timedelta(days=days)
 
+    published_query = select(PublicationJob).where(
+        PublicationJob.status == JobStatus.PUBLISHED,
+        PublicationJob.published_at.is_not(None),
+        PublicationJob.published_at >= published_since,
+        PublicationJob.published_at <= now,
+    )
+    planned_query = select(PublicationJob).where(
+        PublicationJob.scheduled_at >= now,
+        PublicationJob.scheduled_at <= planned_until,
+        PublicationJob.status.notin_(
+            [JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED]
+        ),
+    )
+    if selected_kinds:
+        published_query = published_query.where(PublicationJob.kind.in_(selected_kinds))
+        planned_query = planned_query.where(PublicationJob.kind.in_(selected_kinds))
+
     published_jobs = [
         job
         for job in db.scalars(
-            select(PublicationJob)
-            .where(
-                PublicationJob.status == JobStatus.PUBLISHED,
-                PublicationJob.published_at.is_not(None),
-                PublicationJob.published_at >= published_since,
-                PublicationJob.published_at <= now,
-            )
-            .order_by(PublicationJob.published_at.desc())
+            published_query.order_by(PublicationJob.published_at.desc())
         )
         if require_visible(db, current, job.team_id)
     ]
     planned_jobs = [
         job
         for job in db.scalars(
-            select(PublicationJob)
-            .where(
-                PublicationJob.scheduled_at >= now,
-                PublicationJob.scheduled_at <= planned_until,
-                PublicationJob.status.notin_(
-                    [JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED]
-                ),
-            )
-            .order_by(PublicationJob.scheduled_at)
+            planned_query.order_by(PublicationJob.scheduled_at)
         )
         if require_visible(db, current, job.team_id)
     ]
@@ -1446,6 +1456,7 @@ def posts(
         pages=pages,
         carousel_items=carousel_items,
         future_days=days,
+        publication_format=media_format,
         published_since=published_since,
         planned_until=planned_until,
         attention_count=attention_count,
@@ -1674,6 +1685,7 @@ def rerender_post_media(
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
     version: int = Form(),
+    rerender_feed: bool = Form(default=False),
     story_job_ids: list[str] = Form(default=[]),
     media_asset_id: str = Form(default=""),
     current=Depends(current_user),
@@ -1693,6 +1705,8 @@ def rerender_post_media(
         )
     if item.version != version:
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    if not rerender_feed and not story_job_ids:
+        raise HTTPException(422, "Bitte mindestens Feed oder eine Story auswählen")
     allowed_story_ids = set(
         db.scalars(
             select(PublicationJob.id).where(
@@ -1721,6 +1735,7 @@ def rerender_post_media(
         version,
         story_job_ids,
         selected_media_asset_id,
+        rerender_feed=rerender_feed,
     )
     return redirect(f"/generation-jobs/{job.id}", "Neurendern wurde eingereiht")
 
@@ -1733,6 +1748,7 @@ def revise_post_with_ai(
     version: int = Form(),
     instruction: str = Form(),
     revise_text: bool = Form(default=False),
+    revise_feed: bool = Form(default=False),
     revise_graphics: bool = Form(default=False),
     story_job_ids: list[str] = Form(default=[]),
     media_asset_id: str = Form(default=""),
@@ -1757,8 +1773,14 @@ def revise_post_with_ai(
         raise HTTPException(
             422, "Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein"
         )
-    if not revise_text and not revise_graphics:
-        raise HTTPException(422, "Bitte mindestens Begleittext oder Grafiken auswählen")
+    # Keep accepting ``revise_graphics`` for already open legacy forms. New
+    # forms select the feed and each story explicitly.
+    revise_feed = revise_feed or revise_graphics
+    has_graphics = revise_feed or bool(story_job_ids)
+    if not revise_text and not has_graphics:
+        raise HTTPException(
+            422, "Bitte Begleittext, Feed oder mindestens eine Story auswählen"
+        )
     allowed_story_ids = set(
         db.scalars(
             select(PublicationJob.id).where(
@@ -1768,10 +1790,10 @@ def revise_post_with_ai(
             )
         )
     )
-    if revise_graphics and not set(story_job_ids).issubset(allowed_story_ids):
+    if story_job_ids and not set(story_job_ids).issubset(allowed_story_ids):
         raise HTTPException(422, "Ungültige oder bereits veröffentlichte Story-Auswahl")
     selected_media_asset_id = media_asset_id or item.media_asset_id
-    if revise_graphics and selected_media_asset_id != item.media_asset_id:
+    if has_graphics and selected_media_asset_id != item.media_asset_id:
         selected_asset = db.get(MediaAsset, selected_media_asset_id)
         if not selected_asset or selected_asset.team_id != item.team_id:
             raise HTTPException(422, "Ungültiges Spielerbild")
@@ -1790,7 +1812,8 @@ def revise_post_with_ai(
             version,
             instruction,
             revise_text=revise_text,
-            revise_graphics=revise_graphics,
+            revise_graphics=has_graphics,
+            revise_feed=revise_feed,
             story_job_ids=story_job_ids,
             media_asset_id=selected_media_asset_id,
         )
@@ -1874,7 +1897,7 @@ def reject_post(
     post_id: str,
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
-    reason: str = Form(),
+    reason: str = Form(default=""),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -1885,8 +1908,7 @@ def reject_post(
     if not item:
         raise HTTPException(404)
     require(current, db, "approve", item.team_id)
-    if not reason.strip():
-        raise HTTPException(422, "Eine Begründung ist erforderlich")
+    reason = reason.strip()
     item.status = PostStatus.REJECTED
     for job in db.scalars(
         select(PublicationJob).where(
@@ -1895,7 +1917,15 @@ def reject_post(
     ):
         job.status = JobStatus.UNAPPROVED
         job.approval_status = "rejected"
-    audit(db, current, "post.rejected", "post", item.id, item.team_id, {"reason": reason})
+    audit(
+        db,
+        current,
+        "post.rejected",
+        "post",
+        item.id,
+        item.team_id,
+        {"reason": reason or None},
+    )
     db.commit()
     return redirect(f"/posts/{item.id}", "Beitrag abgelehnt")
 
@@ -1907,7 +1937,7 @@ def delete_post(
     csrf_token_value: str = Form(alias="csrf_token"),
     version: int = Form(),
     confirmation: str = Form(),
-    reason: str = Form(),
+    reason: str = Form(default=""),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):

@@ -221,9 +221,15 @@ def enqueue_rerender(
     expected_version: int,
     story_job_ids: list[str],
     media_asset_id: str | None = None,
+    *,
+    rerender_feed: bool = True,
 ) -> GenerationJob:
     selected = sorted(set(story_job_ids))
-    selection_hash = hashlib.sha256(":".join(selected).encode()).hexdigest()[:16]
+    if not rerender_feed and not selected:
+        raise ValueError("Bitte mindestens Feed oder eine Story auswählen")
+    selection_hash = hashlib.sha256(
+        repr((rerender_feed, selected)).encode()
+    ).hexdigest()[:16]
     asset_key = media_asset_id or post.media_asset_id or "neutral"
     key = f"rerender:{post.id}:v{expected_version}:{selection_hash}:{asset_key}"
     active_key = f"rerender:{post.id}"
@@ -246,11 +252,12 @@ def enqueue_rerender(
         requested_by=user.id,
         status=GenerationJobStatus.QUEUED,
         phase="preparing",
-        planned_outputs=1 + len(selected),
+        planned_outputs=int(rerender_feed) + len(selected),
         idempotency_key=key,
         active_key=active_key,
         parameters={
             "expected_post_version": expected_version,
+            "rerender_feed": rerender_feed,
             "story_job_ids": selected,
             "media_asset_id": media_asset_id or post.media_asset_id,
             "logos": frozen_logo_set(
@@ -290,15 +297,19 @@ def enqueue_ai_revision(
     revise_graphics: bool,
     story_job_ids: list[str],
     media_asset_id: str | None = None,
+    revise_feed: bool | None = None,
 ) -> GenerationJob:
     instruction = instruction.strip()
     if not 10 <= len(instruction) <= 2000:
         raise ValueError("Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein")
-    if not revise_text and not revise_graphics:
-        raise ValueError("Bitte mindestens Begleittext oder Grafiken auswählen")
+    if revise_feed is None:
+        revise_feed = revise_graphics
     if not post.game_id:
         raise ValueError("Nur spielbezogene KI-Beiträge können durch KI geändert werden")
-    selected = sorted(set(story_job_ids)) if revise_graphics else []
+    selected = sorted(set(story_job_ids))
+    revise_graphics = bool(revise_feed or selected)
+    if not revise_text and not revise_graphics:
+        raise ValueError("Bitte Begleittext, Feed oder mindestens eine Story auswählen")
     digest = hashlib.sha256(
         repr(
             (
@@ -306,6 +317,7 @@ def enqueue_ai_revision(
                 instruction,
                 revise_text,
                 revise_graphics,
+                revise_feed,
                 selected,
                 media_asset_id or post.media_asset_id,
             )
@@ -336,7 +348,9 @@ def enqueue_ai_revision(
         requested_by=user.id,
         status=GenerationJobStatus.QUEUED,
         phase="preparing",
-        planned_outputs=(1 + len(selected)) if revise_graphics else 1,
+        planned_outputs=(
+            int(revise_text) + int(revise_feed) + len(selected)
+        ),
         idempotency_key=key,
         active_key=active_key,
         parameters={
@@ -345,6 +359,7 @@ def enqueue_ai_revision(
             "instruction": instruction,
             "revise_text": revise_text,
             "revise_graphics": revise_graphics,
+            "revise_feed": revise_feed,
             "story_job_ids": selected,
             "media_asset_id": media_asset_id or post.media_asset_id,
             "logos": frozen_logo_set(db, game, team),
@@ -374,6 +389,7 @@ def enqueue_ai_revision(
             "post_id": post.id,
             "revise_text": revise_text,
             "revise_graphics": revise_graphics,
+            "revise_feed": revise_feed,
             "story_count": len(selected),
         },
     )
@@ -684,6 +700,11 @@ def process_generation_job(
                     instruction=str(parameters.get("instruction") or ""),
                     revise_text=bool(parameters.get("revise_text")),
                     revise_graphics=bool(parameters.get("revise_graphics")),
+                    rerender_feed=bool(
+                        parameters.get(
+                            "revise_feed", parameters.get("revise_graphics")
+                        )
+                    ),
                     text_generator=(
                         _ProgressTextGenerator(build_text_generator(settings), db, job)
                         if parameters.get("revise_text")
@@ -736,6 +757,7 @@ def process_generation_job(
                     list(job.parameters.get("story_job_ids", [])),
                     logos,
                     job.parameters.get("media_asset_id"),
+                    rerender_feed=bool(job.parameters.get("rerender_feed", True)),
                 )
             job.result_post_id = post.id
             db.commit()

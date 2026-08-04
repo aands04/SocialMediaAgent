@@ -217,13 +217,14 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
     post.critical_warnings=warnings; post.status=PostStatus.INCOMPLETE if warnings else PostStatus.PENDING; db.commit(); return post
 
 
-def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]|None=None,logo_snapshot:dict|None=None,media_asset_id:str|None=None,revision_instruction:str|None=None)->Post:
+def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]|None=None,logo_snapshot:dict|None=None,media_asset_id:str|None=None,revision_instruction:str|None=None,*,rerender_feed:bool=True)->Post:
     game=db.get(Game,post.game_id); team=db.get(Team,post.team_id); asset=db.get(MediaAsset,post.media_asset_id) if post.media_asset_id else None
     if not game or not team: raise ValueError("Beitrag hat keine gültigen Spiel- oder Mannschaftsdaten")
     jobs=list(db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id).with_for_update())); selected=set(story_job_ids or [])
     story_jobs={job.id:job for job in jobs if job.kind=="story"}
     if not selected.issubset(story_jobs): raise RerenderConflict("Mindestens eine ausgewählte Story gehört nicht zu diesem Beitrag")
-    if any(job.status==JobStatus.PUBLISHED for job in jobs if job.kind=="feed"):
+    if not rerender_feed and not selected: raise RerenderConflict("Bitte mindestens Feed oder eine Story auswählen")
+    if rerender_feed and any(job.status==JobStatus.PUBLISHED for job in jobs if job.kind=="feed"):
         raise RerenderConflict("Der Feed wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
     if any(story_jobs[job_id].status==JobStatus.PUBLISHED for job_id in selected):
         raise RerenderConflict("Eine ausgewählte Story wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
@@ -255,13 +256,16 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
     facts=_facts(db,game,team,asset,post.post_type,logos)
     old_snapshot=_normalize_design_snapshot(post.design_snapshot)
     snapshots=_story_snapshot_map(old_snapshot.get("stories"))
-    feed_design=_design(db,team.feed_template,post.post_type,"feed"); post.feed_version+=1
-    feed_prompt_name=team.rules.get(f"image_prompt_feed_{post.post_type}",team.rules.get("image_prompt_feed","default-image-feed"))
-    feed_prompt=resolve_prompt(db,feed_prompt_name,"image",post.post_type,"feed",facts) if getattr(renderer,"is_ai",False) else None
-    feed_prompt=_revision_prompt(feed_prompt,revision_instruction)
-    post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v{post.feed_version}.png",{**facts,"template":feed_design,"image_prompt":feed_prompt}))
+    feed_design=old_snapshot.get("feed")
+    feed_prompt=None
+    if rerender_feed:
+        feed_design=_design(db,team.feed_template,post.post_type,"feed"); post.feed_version+=1
+        feed_prompt_name=team.rules.get(f"image_prompt_feed_{post.post_type}",team.rules.get("image_prompt_feed","default-image-feed"))
+        feed_prompt=resolve_prompt(db,feed_prompt_name,"image",post.post_type,"feed",facts) if getattr(renderer,"is_ai",False) else None
+        feed_prompt=_revision_prompt(feed_prompt,revision_instruction)
+        post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v{post.feed_version}.png",{**facts,"template":feed_design,"image_prompt":feed_prompt}))
     for job in jobs:
-        if job.kind=="feed":
+        if job.kind=="feed" and rerender_feed:
             job.media_path=post.feed_path; job.version+=1; job.idempotency_key=f"{post.id}:feed:v{post.feed_version}"
         elif job.id in selected:
             rule=db.get(StoryRule,job.story_rule_id) if job.story_rule_id else None
@@ -275,9 +279,10 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
             snapshots[job.story_rule_id]={"rule_id":job.story_rule_id,"template":design,"prompt":story_prompt.snapshot() if story_prompt else None,"media_version":media_version,"rendering":renderer.metadata_for(job.media_path) if hasattr(renderer,"metadata_for") else {}}
     raw_prompts=old_snapshot.get("prompts")
     prompt_snapshot=dict(raw_prompts) if isinstance(raw_prompts,dict) else {}
-    prompt_snapshot["feed"]=feed_prompt.snapshot() if feed_prompt else None
+    if rerender_feed:
+        prompt_snapshot["feed"]=feed_prompt.snapshot() if feed_prompt else None
     media_snapshot=dict(old_snapshot.get("media") or {})
-    if hasattr(renderer,"metadata_for"):
+    if rerender_feed and hasattr(renderer,"metadata_for"):
         media_snapshot["feed"]=renderer.metadata_for(post.feed_path)
     post.design_snapshot={**old_snapshot,"feed":feed_design,"prompts":prompt_snapshot,"stories":list(snapshots.values()),"logos":logos,"media":media_snapshot,"player_asset":{"id":asset.id,"filename":asset.filename,"checksum":asset.checksum} if asset else None,"fonts":{"primary":facts["primary_font_asset"] or {"family":team.primary_font,"fallback":True},"secondary":facts["secondary_font_asset"] or {"family":team.secondary_font,"fallback":True}},"colors":team.colors}
     if logos.get("team"):
@@ -311,6 +316,7 @@ def revise_post(
     instruction: str,
     revise_text: bool,
     revise_graphics: bool,
+    rerender_feed: bool | None = None,
     text_generator: TextGenerator | None = None,
     renderer: Renderer | None = None,
     story_job_ids: list[str] | None = None,
@@ -323,6 +329,10 @@ def revise_post(
         raise ValueError("Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein")
     if not revise_text and not revise_graphics:
         raise ValueError("Bitte mindestens Begleittext oder Grafiken auswählen")
+    if rerender_feed is None:
+        rerender_feed = revise_graphics
+    if revise_graphics and not rerender_feed and not story_job_ids:
+        raise ValueError("Bitte Feed oder mindestens eine Story auswählen")
     if revise_text and text_generator is None:
         raise ValueError("Textgenerator fehlt")
     if revise_graphics and renderer is None:
@@ -363,6 +373,7 @@ def revise_post(
             logo_snapshot,
             media_asset_id,
             instruction,
+            rerender_feed=rerender_feed,
         )
 
     if revise_text:
@@ -413,6 +424,8 @@ def revise_post(
             "instruction": instruction,
             "text": revise_text,
             "graphics": revise_graphics,
+            "feed": bool(rerender_feed) if revise_graphics else False,
+            "story_job_ids": sorted(set(story_job_ids or [])),
             "text_model": generated_text.model if generated_text else None,
             "text_prompt_version": generated_text.prompt_version if generated_text else None,
             "text_tokens": generated_text.tokens if generated_text else None,

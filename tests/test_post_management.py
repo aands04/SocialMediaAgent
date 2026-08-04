@@ -190,7 +190,8 @@ def test_ai_revision_enqueue_is_idempotent(db):
         "Erzeuge eine emotionalere Abendstimmung im Bild.",
         revise_text=False,
         revise_graphics=True,
-        story_job_ids=[],
+        revise_feed=False,
+        story_job_ids=["story-target"],
     )
     second = generation.enqueue_ai_revision(
         db,
@@ -200,8 +201,12 @@ def test_ai_revision_enqueue_is_idempotent(db):
         "Erzeuge eine emotionalere Abendstimmung im Bild.",
         revise_text=False,
         revise_graphics=True,
-        story_job_ids=[],
+        revise_feed=False,
+        story_job_ids=["story-target"],
     )
     assert first.id == second.id
     assert first.status == GenerationJobStatus.QUEUED
     assert first.parameters["operation"] == "ai_revision"
+    assert first.parameters["revise_feed"] is False
+    assert first.parameters["story_job_ids"] == ["story-target"]
+    assert first.planned_outputs == 1
