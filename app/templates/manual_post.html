@@ -10,6 +10,7 @@
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   <input type="hidden" name="submission_id" value="{{ submission_id }}">
   <input type="hidden" name="crop_specs" id="manual-crop-specs" value="">
+  <input type="hidden" name="user_tags" id="manual-user-tags" value="">
   <section>
     <div class="columns">
       <label>Mannschaft
@@ -61,6 +62,7 @@
   const images = document.getElementById('manual-images');
   const order = document.getElementById('manual-image-order');
   const cropSpecs = document.getElementById('manual-crop-specs');
+  const userTags = document.getElementById('manual-user-tags');
   let selected = [];
 
   function targetRatio() {
@@ -102,6 +104,42 @@
     cropSpecs.value = JSON.stringify(selected.map(item => item.loaded ? calculateCrop(item) : null));
   }
 
+  function syncUserTags() {
+    userTags.value = JSON.stringify(selected.map(item => item.tags));
+  }
+
+  function normalizedUsername(value) {
+    return value.trim().replace(/^@/, '').toLowerCase();
+  }
+
+  function validUsername(value) {
+    return /^(?!.*\.\.)(?!.*\.$)[A-Za-z0-9_][A-Za-z0-9._]{0,29}$/.test(value);
+  }
+
+  function drawTagMarkers(item, canvas, context) {
+    item.tags.forEach((tag, index) => {
+      const x = tag.x * canvas.width;
+      const y = tag.y * canvas.height;
+      const active = index === item.activeTagIndex;
+      context.beginPath();
+      context.arc(x, y, active ? 10 : 8, 0, Math.PI * 2);
+      context.fillStyle = active ? '#facc15' : '#2563eb';
+      context.fill();
+      context.lineWidth = 2;
+      context.strokeStyle = '#ffffff';
+      context.stroke();
+      context.font = 'bold 12px sans-serif';
+      const label = `@${tag.username}`;
+      const width = context.measureText(label).width + 10;
+      const labelX = Math.min(Math.max(0, x + 12), canvas.width - width);
+      const labelY = Math.min(Math.max(15, y - 12), canvas.height - 4);
+      context.fillStyle = 'rgba(15, 23, 42, 0.88)';
+      context.fillRect(labelX, labelY - 14, width, 18);
+      context.fillStyle = '#ffffff';
+      context.fillText(label, labelX + 5, labelY);
+    });
+  }
+
   function drawPreview(item, canvas) {
     if (!item.loaded) return;
     const crop = calculateCrop(item);
@@ -120,7 +158,9 @@
       canvas.width,
       canvas.height,
     );
+    drawTagMarkers(item, canvas, context);
     syncCropSpecs();
+    syncUserTags();
   }
 
   function makeSlider(labelText, min, max, step, value, onInput) {
@@ -157,6 +197,23 @@
       canvas.style.height = 'auto';
       canvas.style.background = '#172554';
       canvas.setAttribute('aria-label', `Zuschnittvorschau für ${item.file.name}`);
+      canvas.addEventListener('click', event => {
+        if (kind.value === 'story') return;
+        if (item.activeTagIndex === null || !item.tags[item.activeTagIndex]) {
+          alert('Füge zuerst ein Instagram-Konto hinzu oder wähle eine Markierung aus.');
+          return;
+        }
+        const bounds = canvas.getBoundingClientRect();
+        item.tags[item.activeTagIndex].x = Math.max(
+          0,
+          Math.min(1, (event.clientX - bounds.left) / bounds.width),
+        );
+        item.tags[item.activeTagIndex].y = Math.max(
+          0,
+          Math.min(1, (event.clientY - bounds.top) / bounds.height),
+        );
+        drawPreview(item, canvas);
+      });
       card.appendChild(canvas);
 
       const controls = document.createElement('div');
@@ -181,6 +238,76 @@
         drawPreview(item, canvas);
       }));
 
+      if (kind.value !== 'story') {
+        const tagSection = document.createElement('fieldset');
+        tagSection.style.marginTop = '1rem';
+        const legend = document.createElement('legend');
+        legend.textContent = 'Instagram-Konten im Bild markieren';
+        tagSection.appendChild(legend);
+        const explanation = document.createElement('p');
+        explanation.textContent = 'Konto hinzufügen, Markierung auswählen und anschließend die gewünschte Position direkt im Bild anklicken.';
+        tagSection.appendChild(explanation);
+
+        const usernameInput = document.createElement('input');
+        usernameInput.type = 'text';
+        usernameInput.placeholder = 'benutzername oder @benutzername';
+        usernameInput.maxLength = 31;
+        usernameInput.autocomplete = 'off';
+        usernameInput.setAttribute('aria-label', `Instagram-Konto für ${item.file.name}`);
+        tagSection.appendChild(usernameInput);
+
+        const addTag = document.createElement('button');
+        addTag.type = 'button';
+        addTag.textContent = 'Konto markieren';
+        addTag.style.marginTop = '0.35rem';
+        addTag.addEventListener('click', () => {
+          const username = normalizedUsername(usernameInput.value);
+          if (!validUsername(username)) {
+            alert('Bitte einen gültigen Instagram-Benutzernamen eingeben.');
+            return;
+          }
+          if (item.tags.some(tag => tag.username === username)) {
+            alert(`@${username} ist auf diesem Bild bereits markiert.`);
+            return;
+          }
+          if (item.tags.length >= 20) {
+            alert('Pro Bild sind höchstens 20 Instagram-Markierungen zulässig.');
+            return;
+          }
+          item.tags.push({username, x: 0.5, y: 0.5});
+          item.activeTagIndex = item.tags.length - 1;
+          usernameInput.value = '';
+          renderOrder();
+        });
+        tagSection.appendChild(addTag);
+
+        item.tags.forEach((tag, tagIndex) => {
+          const row = document.createElement('div');
+          row.style.marginTop = '0.5rem';
+          const selectTag = document.createElement('button');
+          selectTag.type = 'button';
+          selectTag.textContent = `${tagIndex === item.activeTagIndex ? '✓ ' : ''}@${tag.username} · ${Math.round(tag.x * 100)} % / ${Math.round(tag.y * 100)} %`;
+          selectTag.addEventListener('click', () => {
+            item.activeTagIndex = tagIndex;
+            renderOrder();
+          });
+          row.appendChild(selectTag);
+          const removeTag = document.createElement('button');
+          removeTag.type = 'button';
+          removeTag.className = 'danger';
+          removeTag.textContent = 'Entfernen';
+          removeTag.style.marginLeft = '0.5rem';
+          removeTag.addEventListener('click', () => {
+            item.tags.splice(tagIndex, 1);
+            item.activeTagIndex = item.tags.length ? 0 : null;
+            renderOrder();
+          });
+          row.appendChild(removeTag);
+          tagSection.appendChild(row);
+        });
+        controls.appendChild(tagSection);
+      }
+
       if (kind.value === 'carousel') {
         [['↑ Nach oben', -1], ['↓ Nach unten', 1]].forEach(([label, delta]) => {
           const button = document.createElement('button');
@@ -201,6 +328,7 @@
       drawPreview(item, canvas);
     });
     syncCropSpecs();
+    syncUserTags();
   }
 
   function updateKind() {
@@ -215,6 +343,12 @@
       selected.slice(1).forEach(item => URL.revokeObjectURL(item.url));
       selected = selected.slice(0, 1);
       syncFiles();
+    }
+    if (kind.value === 'story') {
+      selected.forEach(item => {
+        item.tags = [];
+        item.activeTagIndex = null;
+      });
     }
     renderOrder();
   }
@@ -235,6 +369,8 @@
         zoom: 1,
         panX: 0,
         panY: 0,
+        tags: [],
+        activeTagIndex: null,
       };
       item.image.onload = () => {
         item.loaded = true;
@@ -259,6 +395,7 @@
     }
     syncFiles();
     syncCropSpecs();
+    syncUserTags();
   });
   kind.addEventListener('change', updateKind);
   updateKind();

@@ -9,6 +9,23 @@
   <strong>Manuell erstellter Beitrag:</strong> Bild und Text wurden unverändert durch einen Benutzer bereitgestellt.
   Für diesen Beitrag wurden keine KI- oder Designvorlagen verwendet.
 </div>
+{% set manual_images=item.design_snapshot.get('manual_upload',{}).get('images',[]) %}
+{% set tag_summary=namespace(count=0) %}
+{% for image in manual_images %}{% set tag_summary.count=tag_summary.count + image.get('user_tags',[])|length %}{% endfor %}
+{% if tag_summary.count %}
+<section>
+  <h2>Instagram-Markierungen</h2>
+  <p>Die Markierungen werden beim Veröffentlichen positionsbezogen an Instagram übergeben.</p>
+  {% for image in manual_images if image.get('user_tags') %}
+  <h3>Bild {{image.position}}</h3>
+  <ul>
+    {% for tag in image.get('user_tags',[]) %}
+    <li>@{{tag.username}} · Position {{(tag.x * 100)|round|int}} % von links / {{(tag.y * 100)|round|int}} % von oben</li>
+    {% endfor %}
+  </ul>
+  {% endfor %}
+</section>
+{% endif %}
 {% else %}
 {% if item.design_snapshot.get('mode') %}
 <div class="warning">

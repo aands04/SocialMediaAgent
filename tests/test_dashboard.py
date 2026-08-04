@@ -223,6 +223,8 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
     assert "Beitrag manuell erstellen" in form.text
     assert "manual-crop-canvas" in form.text
     assert "Zoom" in form.text
+    assert "Instagram-Konten im Bild markieren" in form.text
+    assert 'name="user_tags"' in form.text
     csrf_token = re.search(r'name="csrf_token" value="([^"]+)', form.text).group(1)
     submission_id = re.search(
         r'name="submission_id" value="([^"]+)', form.text
@@ -238,6 +240,7 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
         "text": "Heute gibt es Neuigkeiten direkt aus dem Verein.",
         "scheduled_at": local_publish_at,
         "crop_specs": '[{"x":0.2,"y":0,"width":0.6,"height":1}]',
+        "user_tags": '[[{"username":"@testverein.kassel","x":0.3,"y":0.4}]]',
     }
     blocked = client.post(
         "/posts/manual/new",
@@ -269,6 +272,9 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
             "width": 0.6,
             "height": 1.0,
         }
+        assert uploaded["user_tags"] == [
+            {"username": "testverein.kassel", "x": 0.3, "y": 0.4}
+        ]
         assert Path(uploaded["original_path"]).read_bytes() == manual_post_image(
             (1600, 1200)
         )
@@ -282,6 +288,8 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
     detail = client.get(f"/posts/{post_id}")
     assert detail.status_code == 200
     assert "Manuell erstellter Beitrag" in detail.text
+    assert "@testverein.kassel" in detail.text
+    assert "30 % von links / 40 % von oben" in detail.text
     assert "Grafiken neu erzeugen" not in detail.text
     rerender = client.post(
         f"/posts/{post_id}/rerender",

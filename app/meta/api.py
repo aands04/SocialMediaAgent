@@ -5,6 +5,7 @@ import httpx
 
 from app.config import Settings
 from app.meta.security import sanitize_platform_data
+from app.meta.user_tags import UserTagValidationError, serialize_user_tags
 
 REQUIRED_SCOPES = {
     "instagram_business_basic",
@@ -180,16 +181,27 @@ class MetaApiClient:
         kind: str,
         image_url: str,
         caption: str | None,
+        user_tags: list[dict[str, float | str]] | None = None,
     ) -> dict:
         if not image_url.startswith("https://"):
             raise MetaApiError("Meta akzeptiert ausschließlich freigegebene HTTPS-Medien-URLs")
         payload = {"image_url": image_url}
+        try:
+            serialized_user_tags = serialize_user_tags(user_tags)
+        except UserTagValidationError as exc:
+            raise MetaApiError(str(exc)) from exc
         if kind == "story":
+            if serialized_user_tags:
+                raise MetaApiError(
+                    "Positionsbezogene Instagram-Markierungen werden für Storys nicht unterstützt"
+                )
             payload["media_type"] = "STORIES"
         elif kind == "feed" and caption:
             payload["caption"] = caption
         elif kind != "feed":
             raise MetaApiError("Nicht unterstützte Medienart")
+        if kind == "feed" and serialized_user_tags:
+            payload["user_tags"] = serialized_user_tags
         return self._request_json(
             "POST",
             f"{self.base}/{account_id}/media",
@@ -214,15 +226,23 @@ class MetaApiClient:
         access_token: str,
         account_id: str,
         image_url: str,
+        user_tags: list[dict[str, float | str]] | None = None,
     ) -> dict:
         if not image_url.startswith("https://"):
             raise MetaApiError("Meta akzeptiert ausschließlich freigegebene HTTPS-Medien-URLs")
+        payload = {"image_url": image_url, "is_carousel_item": "true"}
+        try:
+            serialized_user_tags = serialize_user_tags(user_tags)
+        except UserTagValidationError as exc:
+            raise MetaApiError(str(exc)) from exc
+        if serialized_user_tags:
+            payload["user_tags"] = serialized_user_tags
         return self._request_json(
             "POST",
             f"{self.base}/{account_id}/media",
             "Karussell-Element erstellen",
             uncertain_on_transport_error=True,
-            data={"image_url": image_url, "is_carousel_item": "true"},
+            data=payload,
             headers={"Authorization": f"Bearer {access_token}"},
         )
 

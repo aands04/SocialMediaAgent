@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.meta.user_tags import UserTagValidationError, parse_user_tag_specs
 from app.models import (
     AuditLog,
     InstagramPage,
@@ -101,6 +102,21 @@ def parse_manual_crop_specs(value: str | None, image_count: int) -> list[dict[st
             raise ManualPostError("Zuschneidebereich liegt außerhalb des Bildes")
         result.append(crop)
     return result
+
+
+def parse_manual_user_tag_specs(
+    value: str | None,
+    image_count: int,
+    kind: str,
+) -> list[list[dict[str, float | str]]]:
+    try:
+        return parse_user_tag_specs(
+            value,
+            image_count,
+            allow_tags=kind in {"feed", "carousel"},
+        )
+    except UserTagValidationError as exc:
+        raise ManualPostError(str(exc)) from exc
 
 
 def _crop_box(
@@ -255,6 +271,7 @@ def create_manual_post(
     text: str,
     scheduled_at: datetime,
     images: list[ValidatedManualImage],
+    user_tags_by_image: list[list[dict[str, float | str]]] | None = None,
 ) -> tuple[Post, bool]:
     if not _SUBMISSION_PATTERN.fullmatch(submission_id or ""):
         raise ManualPostError("Ungültige Formular-ID; Seite bitte neu laden")
@@ -269,6 +286,16 @@ def create_manual_post(
         raise ManualPostError("Ein Karussell benötigt 2 bis 10 Bilder")
     if kind != "carousel" and len(images) != 1:
         raise ManualPostError("Feed und Story benötigen genau ein Bild")
+    if user_tags_by_image is None:
+        user_tags_by_image = [[] for _ in images]
+    try:
+        user_tags_by_image = parse_user_tag_specs(
+            json.dumps(user_tags_by_image),
+            len(images),
+            allow_tags=kind in {"feed", "carousel"},
+        )
+    except UserTagValidationError as exc:
+        raise ManualPostError(str(exc)) from exc
     existing = db.scalar(select(Post).where(Post.manual_submission_id == submission_id))
     if existing:
         return existing, False
@@ -357,6 +384,7 @@ def create_manual_post(
                     "final_checksum": image.png_checksum,
                     "width": image.width,
                     "height": image.height,
+                    "user_tags": user_tags_by_image[position - 1],
                 }
                 | {
                     "source_width": image.source_width,
@@ -413,6 +441,9 @@ def create_manual_post(
                 "checksums": [image.png_checksum for image in images],
                 "original_filenames": [image.original_filename for image in images],
                 "image_count": len(images),
+                "instagram_user_tag_count": sum(
+                    len(tags) for tags in user_tags_by_image
+                ),
             },
         )
     )

@@ -58,6 +58,17 @@ Karussell beziehungsweise 1080 × 1920 Pixel für Storys. Die unveränderten
 Originaldateien bleiben privat erhalten. Die Karussell-Reihenfolge lässt sich vor dem Absenden mit den
 Pfeiltasten festlegen; ein gemeinsamer Text und ein Veröffentlichungszeitpunkt
 in der Mannschaftszeitzone gelten für das gesamte Karussell. Die Anwendung
+erlaubt bei Feed und Karussell zusätzlich bis zu 20 positionsbezogene
+Instagram-Kontomarkierungen pro Bild. Der Benutzername wird ohne führendes
+`@` eingefroren; die Position wird als normierter X-/Y-Wert direkt in der
+finalen Zuschnittvorschau gewählt und beim Erzeugen des jeweiligen
+Meta-Mediencontainers als `user_tags` übergeben. Markierungen eines
+Karussells bleiben beim Umsortieren am zugehörigen Bild. Storys unterstützen
+in diesem Workflow keine positionsbezogenen Kontomarkierungen. Ob Instagram
+eine Markierung annimmt, hängt zusätzlich von Existenz, Sichtbarkeit und den
+Markierungseinstellungen des Zielkontos ab.
+
+Die Anwendung
 verändert die Motive nicht und legt genau einen unfreigegebenen
 Veröffentlichungsauftrag an. Er durchläuft denselben versionsgebundenen Prüf-,
 Freigabe- und Scheduler-Ablauf wie ein automatisch erzeugter Beitrag. Bei
