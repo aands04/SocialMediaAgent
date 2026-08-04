@@ -22,7 +22,31 @@ from app.db import Base
 
 def now(): return datetime.now(timezone.utc)
 def uid(): return str(uuid4())
-class Role(str,enum.Enum): ADMIN="admin"; EDITOR="editor"; APPROVER="approver"; VIEWER="viewer"
+
+
+class Role(str, enum.Enum):
+    ADMIN = "admin"
+    EDITOR = "editor"
+    APPROVER = "approver"
+    VIEWER = "viewer"
+
+    @property
+    def label(self) -> str:
+        return {
+            Role.ADMIN: "Administrator",
+            Role.APPROVER: "Redakteur",
+            Role.EDITOR: "Autor",
+            Role.VIEWER: "Betrachter",
+        }[self]
+
+    @property
+    def description(self) -> str:
+        return {
+            Role.ADMIN: "Vollzugriff einschließlich Benutzer- und Systemeinstellungen.",
+            Role.APPROVER: "Darf Beiträge erstellen, bearbeiten und freigeben.",
+            Role.EDITOR: "Darf Beiträge erstellen und bearbeiten, aber nicht freigeben.",
+            Role.VIEWER: "Darf Inhalte ausschließlich ansehen.",
+        }[self]
 class PostStatus(str,enum.Enum): DETECTED="detected"; PLANNED="planned"; CREATING="creating"; INCOMPLETE="incomplete"; PENDING="pending_approval"; REJECTED="rejected"; APPROVED="approved"; REAPPROVAL="reapproval_required"; SCHEDULED="scheduled"; PARTIAL="partially_published"; PUBLISHED="published"; ERROR="publishing_error"; CANCELLED="cancelled"
 class JobStatus(str,enum.Enum): DRAFT="draft"; UNAPPROVED="unapproved"; APPROVED="approved"; SCHEDULED="scheduled"; WAITING="waiting"; PUBLISHING="publishing"; PUBLISHED="published"; RETRY="retry_scheduled"; FAILED="failed"; CANCELLED="cancelled"; SKIPPED="skipped"; UNCERTAIN="uncertain"
 class GenerationJobStatus(str,enum.Enum): QUEUED="queued"; RUNNING="running"; RETRY_WAIT="retry_wait"; SUCCEEDED="succeeded"; FAILED="failed"; CANCELLED="cancelled"; MANUAL_REVIEW_REQUIRED="manual_review_required"

@@ -18,10 +18,13 @@
     ('/','Übersicht'),('/teams','Mannschaften'),('/instagram','Instagram-Seiten'),
     ('/games','Spiele & Testdaten'),('/rules','Regeln & Storys'),('/media','Medienbibliothek'),
     ('/prompts','KI-Promptvorlagen'),('/assets','HTML/CSS-Fallbacks'),
-    ('/generation-jobs','Generierungsaufträge'),('/posts/manual/new','Beitrag manuell erstellen'),('/posts','Beiträge & Freigaben'),
-    ('/publications','Veröffentlichungen'),('/users','Benutzer & Rechte'),
+    ('/generation-jobs','Generierungsaufträge'),
+    ('/posts','Beiträge & Freigaben'),
+    ('/publications','Veröffentlichungen'),
     ('/diagnostics','Provider-Diagnose'),('/system','Systemstatus')
   ] %}<a href="{{ href }}">{{ label }}</a>{% endfor %}
+  {% if user.role.value != 'viewer' %}<a href="/posts/manual/new">Beitrag manuell erstellen</a>{% endif %}
+  {% if user.role.value == 'admin' %}<a href="/users">Benutzer & Rechte</a>{% endif %}
   <form method="post" action="/logout"><button>Abmelden</button></form>
 </nav>
 {% endif %}

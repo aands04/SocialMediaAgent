@@ -94,7 +94,7 @@
   {% endif %}
   {% endfor %}
 </div>
-{% if not is_manual %}
+{% if not is_manual and can_generate %}
 <form method="post" action="/posts/{{item.id}}/ai-revision">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
   <fieldset>
@@ -175,16 +175,18 @@
 </div>
 {% endif %}
 {% endif %}
-<form method="post" action="/posts/{{item.id}}/text">
+{% if can_edit %}<form method="post" action="/posts/{{item.id}}/text">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
   <label>Begleittext<textarea name="text" rows="8" required>{{item.text}}</textarea></label><button>Text versioniert speichern</button>
-</form>
+</form>{% else %}<section><h2>Begleittext</h2><p style="white-space:pre-wrap">{{item.text}}</p></section>{% endif %}
 <h2>Veröffentlichungsaufträge</h2>
-<form method="post" action="/posts/{{item.id}}/approve">
+{% if can_approve %}<form method="post" action="/posts/{{item.id}}/approve">
   <input type="hidden" name="csrf_token" value="{{csrf}}">
+{% endif %}
   <table><tr><th>Freigeben</th><th>Typ</th><th>Zeitpunkt</th><th>Status</th><th>Medienprüfung</th></tr>
-    {% for x in jobs %}<tr class="{% if late_jobs.get(x.id) %}late{% endif %}"><td><input type="checkbox" name="job_ids" value="{{x.id}}" checked></td><td>{{x.kind}}</td><td>{{x.scheduled_at|berlin}}{% if late_jobs.get(x.id) %} <strong>verstrichen</strong>{% endif %}</td><td>{{x.status.value}}</td><td>{{checks[x.id]}}</td></tr>{% endfor %}
+    {% for x in jobs %}<tr class="{% if late_jobs.get(x.id) %}late{% endif %}"><td>{% if can_approve %}<input type="checkbox" name="job_ids" value="{{x.id}}" checked>{% else %}—{% endif %}</td><td>{{x.kind}}</td><td>{{x.scheduled_at|berlin}}{% if late_jobs.get(x.id) %} <strong>verstrichen</strong>{% endif %}</td><td>{{x.status.value}}</td><td>{{checks[x.id]}}</td></tr>{% endfor %}
   </table>
+{% if can_approve %}
   <button class="approve">Ausgewählte Aufträge ausdrücklich freigeben</button>
 </form>
 <form method="post" action="/posts/{{item.id}}/reject">
@@ -199,5 +201,8 @@
 </form>
 {% else %}
 <div class="warning">Dieser Beitrag wurde bereits ganz oder teilweise veröffentlicht und kann deshalb nicht gelöscht werden.</div>
+{% endif %}
+{% else %}
+<div class="notice">Dieser Beitrag wartet auf die Freigabe durch einen Redakteur oder Administrator.</div>
 {% endif %}
 {% endblock %}

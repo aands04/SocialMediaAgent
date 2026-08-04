@@ -1317,6 +1317,44 @@ def test_csrf_and_non_admin_are_rejected(browser):
     )
 
 
+def test_admin_assigns_editorial_roles_and_last_admin_is_protected(browser):
+    client, factory = browser
+    token = session_csrf(client)
+    response = client.post(
+        "/users",
+        data={
+            "csrf_token": token,
+            "email": "author@test.invalid",
+            "password": "Another-Secure-Test",
+            "role": "editor",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    page = client.get("/users")
+    assert all(label in page.text for label in ("Administrator", "Redakteur", "Autor", "Betrachter"))
+    with factory() as db:
+        author = db.query(User).filter_by(email="author@test.invalid").one()
+        administrator = db.query(User).filter_by(email="admin@test.invalid").one()
+        author_id, administrator_id = author.id, administrator.id
+    response = client.post(
+        f"/users/{author_id}/role",
+        data={"csrf_token": token, "role": "approver"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with factory() as db:
+        assert db.get(User, author_id).role == Role.APPROVER
+        audit_item = db.query(AuditLog).filter_by(action="user.role_changed").one()
+        assert audit_item.details == {"old_role": "editor", "new_role": "approver"}
+    response = client.post(
+        f"/users/{administrator_id}/role",
+        data={"csrf_token": token, "role": "viewer"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 409
+
+
 def test_prompt_dashboard_previews_without_api_and_versions_templates(browser):
     client, factory = browser
     token = session_csrf(client)
