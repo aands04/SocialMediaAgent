@@ -49,6 +49,42 @@ def test_change_after_approval_requires_reapproval(db,tmp_path):
     editor=User(email="e@x",password_hash="x",role=Role.EDITOR,all_teams=True); db.add(editor); db.commit(); edit_text(db,post,editor,"Geändert",old)
     assert post.status==PostStatus.REAPPROVAL and all(j.status==JobStatus.UNAPPROVED for j in db.query(PublicationJob).filter_by(post_id=post.id))
 
+
+def test_reapproval_clears_only_selected_resolved_warning(db, tmp_path):
+    _, team, game = setup(db, tmp_path)
+    db.add(
+        StoryRule(
+            team_id=team.id,
+            name="story",
+            post_type="announcement",
+            reference="kickoff",
+            direction="before",
+            offset_minutes=30,
+            template="default-story",
+        )
+    )
+    db.commit()
+    post = mark_verified_logo(
+        create_post(db, game, team, FixtureTextGenerator(), Renderer(tmp_path / "o"))
+    )
+    post.critical_warnings = []
+    jobs = db.query(PublicationJob).filter_by(post_id=post.id).all()
+    selected = next(job for job in jobs if job.kind == "feed")
+    untouched = next(job for job in jobs if job.kind == "story")
+    for job in jobs:
+        job.status = JobStatus.UNAPPROVED
+        job.approval_status = "reapproval_required"
+        job.error = "KI-Änderungen wurden erzeugt; erneute Freigabe erforderlich"
+    db.commit()
+
+    approve(db, post, approver(db), selected_jobs=[selected.id])
+
+    assert selected.status == JobStatus.SCHEDULED
+    assert selected.approval_status == "approved"
+    assert selected.error is None
+    assert untouched.approval_status == "reapproval_required"
+    assert untouched.error == "KI-Änderungen wurden erzeugt; erneute Freigabe erforderlich"
+
 def test_partial_and_duplicate_job_execution(db,tmp_path):
     _,team,game=setup(db,tmp_path); db.add(StoryRule(team_id=team.id,name="s",post_type="announcement",reference="kickoff",direction="before",offset_minutes=30,template="s")); db.commit(); post=mark_verified_logo(create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"o"))); post.critical_warnings=[]; approve(db,post,approver(db)); jobs=db.query(PublicationJob).filter_by(post_id=post.id).all()
     for job in jobs: job.scheduled_at=datetime.now(timezone.utc)-timedelta(seconds=1)

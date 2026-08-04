@@ -22,6 +22,12 @@ from app.models import (
 class ApprovalError(ValueError):
     pass
 
+
+def _clear_resolved_reapproval_error(job: PublicationJob) -> None:
+    """Remove only warnings whose sole purpose was to require a new approval."""
+    if job.error and "erneute freigabe erforderlich" in job.error.casefold():
+        job.error = None
+
 def approve(db:Session,post:Post,user:User,selected_jobs:list[str]|None=None)->Post:
     if not allowed(db,user,"approve",post.team_id): raise ApprovalError("Keine Freigabeberechtigung")
     page=db.get(InstagramPage,post.instagram_page_id); team=db.get(Team,post.team_id)
@@ -98,6 +104,7 @@ def approve(db:Session,post:Post,user:User,selected_jobs:list[str]|None=None)->P
     future_stories=sorted((j for j in selected if j.kind=="story" and (j.scheduled_at.replace(tzinfo=timezone.utc) if j.scheduled_at.tzinfo is None else j.scheduled_at)>=now),key=lambda j:j.scheduled_at)
     for job in selected:
         job.approval_status="approved"; job.approved_post_version=post.version
+        _clear_resolved_reapproval_error(job)
         if (job.scheduled_at.replace(tzinfo=timezone.utc) if job.scheduled_at.tzinfo is None else job.scheduled_at)<now and behavior=="skip": job.status=JobStatus.SKIPPED
         elif (job.scheduled_at.replace(tzinfo=timezone.utc) if job.scheduled_at.tzinfo is None else job.scheduled_at)<now and behavior=="next_story": job.status=JobStatus.SKIPPED
         else:
