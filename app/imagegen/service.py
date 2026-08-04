@@ -11,6 +11,13 @@ from app.rendering.service import Renderer, RenderValidationError
 
 LOGO_REFERENCE_VERSION = "verified-logo-ai-references-v1"
 
+REFERENCE_IMAGE_MIME_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+
 
 class ImageGenerationError(RenderValidationError):
     pass
@@ -43,7 +50,18 @@ class OpenAIImageProvider(ImageProvider):
         try:
             if references:
                 with ExitStack() as stack:
-                    files = [stack.enter_context(path.open("rb")) for path in references]
+                    files = []
+                    for path in references:
+                        mime_type = REFERENCE_IMAGE_MIME_TYPES.get(
+                            path.suffix.lower()
+                        )
+                        if not mime_type:
+                            raise ImageGenerationError(
+                                "Nicht unterstütztes Referenzbildformat: "
+                                f"{path.suffix or 'keine Dateiendung'}"
+                            )
+                        file_handle = stack.enter_context(path.open("rb"))
+                        files.append((path.name, file_handle, mime_type))
                     edit_options = {
                         "model": model,
                         "image": files,
