@@ -535,6 +535,20 @@ def test_nginx_allows_large_requests_only_for_player_image_uploads():
     assert "client_max_body_size 512m;" in config
 
 
+def test_nginx_proxies_refresh_web_container_address_via_docker_dns():
+    nginx_root = Path(__file__).parents[1] / "deploy" / "nginx"
+    for filename, expected_proxy_count in (
+        ("default.conf", 3),
+        ("meta-public.conf", 2),
+    ):
+        config = (nginx_root / filename).read_text(encoding="utf-8")
+        assert "resolver 127.0.0.11 ipv6=off valid=10s;" in config
+        assert "resolver_timeout 5s;" in config
+        assert "set $web_backend web:8000;" in config
+        assert config.count("proxy_pass http://$web_backend;") == expected_proxy_count
+        assert "proxy_pass http://web:8000;" not in config
+
+
 def test_player_image_upload_rejects_fake_images(browser, tmp_path, monkeypatch):
     client, factory = browser
     import app.admin_routes as admin_routes
