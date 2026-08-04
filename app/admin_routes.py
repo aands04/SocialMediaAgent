@@ -1600,6 +1600,83 @@ def rerender_post_media(
     return redirect(f"/generation-jobs/{job.id}", "Neurendern wurde eingereiht")
 
 
+@router.post("/posts/{post_id}/ai-revision")
+def revise_post_with_ai(
+    post_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    version: int = Form(),
+    instruction: str = Form(),
+    revise_text: bool = Form(default=False),
+    revise_graphics: bool = Form(default=False),
+    story_job_ids: list[str] = Form(default=[]),
+    media_asset_id: str = Form(default=""),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    from app.jobs.generation import enqueue_ai_revision
+
+    check_csrf(request, csrf_token_value)
+    item = db.get(Post, post_id)
+    if not item:
+        raise HTTPException(404)
+    require(current, db, "generate", item.team_id)
+    if (item.design_snapshot or {}).get("source") == "manual_upload":
+        raise HTTPException(
+            422,
+            "Manuell hochgeladene Beiträge können nicht durch KI geändert werden",
+        )
+    if item.version != version:
+        raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    if not 10 <= len(instruction.strip()) <= 2000:
+        raise HTTPException(
+            422, "Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein"
+        )
+    if not revise_text and not revise_graphics:
+        raise HTTPException(422, "Bitte mindestens Begleittext oder Grafiken auswählen")
+    allowed_story_ids = set(
+        db.scalars(
+            select(PublicationJob.id).where(
+                PublicationJob.post_id == item.id,
+                PublicationJob.kind == "story",
+                PublicationJob.status != JobStatus.PUBLISHED,
+            )
+        )
+    )
+    if revise_graphics and not set(story_job_ids).issubset(allowed_story_ids):
+        raise HTTPException(422, "Ungültige oder bereits veröffentlichte Story-Auswahl")
+    selected_media_asset_id = media_asset_id or item.media_asset_id
+    if revise_graphics and selected_media_asset_id != item.media_asset_id:
+        selected_asset = db.get(MediaAsset, selected_media_asset_id)
+        if not selected_asset or selected_asset.team_id != item.team_id:
+            raise HTTPException(422, "Ungültiges Spielerbild")
+        if (
+            not selected_asset.active
+            or not selected_asset.available
+            or selected_asset.reserved_game_id is not None
+            or selected_asset.uses != 0
+        ):
+            raise HTTPException(409, "Das ausgewählte Spielerbild ist nicht mehr frei")
+    try:
+        job = enqueue_ai_revision(
+            db,
+            item,
+            current,
+            version,
+            instruction,
+            revise_text=revise_text,
+            revise_graphics=revise_graphics,
+            story_job_ids=story_job_ids,
+            media_asset_id=selected_media_asset_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return redirect(
+        f"/generation-jobs/{job.id}",
+        "KI-Änderungsauftrag wurde eingereiht",
+    )
+
+
 @router.post("/posts/{post_id}/recompose-logos")
 def recompose_post_media_logos(
     post_id: str,
@@ -1696,6 +1773,45 @@ def reject_post(
     audit(db, current, "post.rejected", "post", item.id, item.team_id, {"reason": reason})
     db.commit()
     return redirect(f"/posts/{item.id}", "Beitrag abgelehnt")
+
+
+@router.post("/posts/{post_id}/delete")
+def delete_post(
+    post_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    version: int = Form(),
+    confirmation: str = Form(),
+    reason: str = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    from app.posts.deletion import PostDeletionConflict, delete_unpublished_post
+
+    check_csrf(request, csrf_token_value)
+    item = db.get(Post, post_id)
+    if not item:
+        raise HTTPException(404)
+    require(current, db, "approve", item.team_id)
+    if confirmation.strip() != "BEITRAG LÖSCHEN":
+        raise HTTPException(422, "Bitte zur Bestätigung exakt BEITRAG LÖSCHEN eingeben")
+    try:
+        result = delete_unpublished_post(
+            db,
+            settings,
+            item,
+            current,
+            expected_version=version,
+            reason=reason,
+        )
+    except PostDeletionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return redirect(
+        "/posts",
+        f"Beitrag gelöscht; {result.publication_jobs} unveröffentlichte Aufträge entfernt",
+    )
 
 
 @router.get("/publications", response_class=HTMLResponse)
