@@ -1,1 +1,144 @@
-{% extends 'base.html' %}{% block content %}<h1>Beiträge und Freigaben</h1><p><a class="button" href="/posts/manual/new">Beitrag manuell erstellen</a></p><table><tr><th>Mannschaft</th><th>Typ</th><th>Status</th><th>Version</th><th>Bearbeitet</th><th></th></tr>{% for x in items %}<tr><td>{{teams[x.team_id].display_name}}</td><td>{{'manuell' if x.post_type=='manual' else x.post_type}}</td><td><span class="badge">{{x.status.value}}</span></td><td>{{x.version}}</td><td>{{x.updated_at|berlin}}</td><td><a class="button" href="/posts/{{x.id}}">Prüfen</a></td></tr>{% endfor %}</table>{% endblock %}
+{% extends 'base.html' %}
+
+{% macro publication_row(job, published=false) %}
+  {% set post = calendar_posts.get(job.post_id) %}
+  {% set game = games.get(job.game_id) if job.game_id else none %}
+  {% set media = carousel_items.get(job.id, []) %}
+  <tr class="publication-row{% if job.approval_status != 'approved' or job.error or job.stale_time %} publication-attention{% endif %}">
+    <td class="publication-preview-cell">
+      {% if post and job.kind == 'carousel' and media %}
+        <div class="publication-carousel-preview" aria-label="Karussell mit {{ media|length }} Bildern">
+          {% for image in media[:3] %}
+            <img src="/posts/{{ post.id }}/media/{{ job.id }}/items/{{ image.id }}" alt="Karussellbild {{ image.position }}" loading="lazy">
+          {% endfor %}
+        </div>
+      {% elif post and job.kind in ['feed', 'story'] %}
+        <img class="publication-preview" src="/posts/{{ post.id }}/media/{{ job.id }}" alt="{{ format_labels.get(job.kind, job.kind) }}-Vorschau" loading="lazy">
+      {% else %}
+        <span class="publication-no-preview">Keine Vorschau</span>
+      {% endif %}
+    </td>
+    <td>
+      <strong>{{ (job.published_at if published else job.scheduled_at)|berlin }}</strong>
+      {% if published and job.scheduled_at %}<small>geplant: {{ job.scheduled_at|berlin }}</small>{% endif %}
+    </td>
+    <td>
+      <strong>{{ teams[job.team_id].display_name }}</strong>
+      {% if pages.get(job.instagram_page_id) %}<small>@{{ pages[job.instagram_page_id].username }}</small>{% endif %}
+    </td>
+    <td>
+      <strong>{{ format_labels.get(job.kind, job.kind) }}</strong>
+      {% if job.kind == 'carousel' %}<small>{{ media|length }} Bilder</small>{% endif %}
+    </td>
+    <td class="publication-content">
+      {% if game %}
+        <strong>{{ game.home_team }} – {{ game.away_team }}</strong>
+        {% if game.competition %}<small>{{ game.competition }}</small>{% endif %}
+      {% else %}
+        <strong>Manueller Beitrag</strong>
+      {% endif %}
+      {% if post and post.text %}<small>{{ post.text|truncate(120) }}</small>{% endif %}
+    </td>
+    <td>
+      <span class="badge publication-status-{{ job.status.value }}">{{ status_labels.get(job.status, job.status.value) }}</span>
+      {% if job.approval_status != 'approved' %}<small class="publication-warning">Freigabe: {{ job.approval_status }}</small>{% endif %}
+      {% if job.stale_time %}<small class="publication-warning">Zeitpunkt muss geprüft werden</small>{% endif %}
+      {% if job.error %}<small class="publication-warning">{{ job.error|truncate(100) }}</small>{% endif %}
+    </td>
+    <td class="publication-actions">
+      {% if post %}<a class="button" href="/posts/{{ post.id }}">Beitrag öffnen</a>{% endif %}
+      {% if published and job.permalink %}<a href="{{ job.permalink }}" target="_blank" rel="noopener">Instagram öffnen</a>{% endif %}
+    </td>
+  </tr>
+{% endmacro %}
+
+{% block content %}
+<div class="publication-heading">
+  <div>
+    <h1>Beiträge und Freigaben</h1>
+    <p>Zentraler Veröffentlichungsplan für Feed-Beiträge, Karussells und Storys.</p>
+  </div>
+  <a class="button" href="/posts/manual/new">Beitrag manuell erstellen</a>
+</div>
+
+<section class="publication-calendar">
+  <div class="publication-calendar-toolbar">
+    <div>
+      <h2>Veröffentlichungsplan</h2>
+      <small>Rückblick: letzte 2 Tage · Vorschau: nächste {{ future_days }} Tage</small>
+    </div>
+    <form method="get" action="/posts" class="publication-range-form">
+      <label for="publication-days">Vorschauzeitraum</label>
+      <div>
+        <input id="publication-days" type="number" name="days" value="{{ future_days }}" min="1" max="90" required>
+        <span>Tage</span>
+        <button type="submit">Anzeigen</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="cards publication-summary">
+    <article>
+      <strong>{{ published_jobs|length }}</strong>
+      <span>veröffentlicht in 2 Tagen</span>
+    </article>
+    <article>
+      <strong>{{ planned_jobs|length }}</strong>
+      <span>geplant in {{ future_days }} Tagen</span>
+    </article>
+    <article class="{% if attention_count %}publication-summary-warning{% endif %}">
+      <strong>{{ attention_count }}</strong>
+      <span>benötigen Aufmerksamkeit</span>
+    </article>
+  </div>
+
+  <h3>In den letzten 2 Tagen veröffentlicht</h3>
+  <div class="publication-table-wrap">
+    <table class="publication-table">
+      <thead><tr><th>Vorschau</th><th>Veröffentlicht</th><th>Mannschaft / Seite</th><th>Format</th><th>Inhalt</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        {% for job in published_jobs %}
+          {{ publication_row(job, true) }}
+        {% else %}
+          <tr><td colspan="7" class="publication-empty">In den letzten 2 Tagen wurden keine Beiträge veröffentlicht.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Geplant für die nächsten {{ future_days }} Tage</h3>
+  <div class="publication-table-wrap">
+    <table class="publication-table">
+      <thead><tr><th>Vorschau</th><th>Geplant</th><th>Mannschaft / Seite</th><th>Format</th><th>Inhalt</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        {% for job in planned_jobs %}
+          {{ publication_row(job, false) }}
+        {% else %}
+          <tr><td colspan="7" class="publication-empty">Für diesen Zeitraum sind keine Veröffentlichungen geplant.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Alle Beiträge</h2>
+  <table>
+    <thead><tr><th>Mannschaft</th><th>Typ</th><th>Status</th><th>Version</th><th>Bearbeitet</th><th></th></tr></thead>
+    <tbody>
+      {% for x in items %}
+        <tr>
+          <td>{{ teams[x.team_id].display_name }}</td>
+          <td>{{ 'manuell' if x.post_type == 'manual' else x.post_type }}</td>
+          <td><span class="badge">{{ x.status.value }}</span></td>
+          <td>{{ x.version }}</td>
+          <td>{{ x.updated_at|berlin }}</td>
+          <td><a class="button" href="/posts/{{ x.id }}">Prüfen</a></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6">Noch keine Beiträge vorhanden.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
