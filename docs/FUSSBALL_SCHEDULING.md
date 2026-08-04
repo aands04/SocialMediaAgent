@@ -39,11 +39,16 @@ werden.
 Für Ankündigungs-Feeds stehen zwei Modelle zur Verfügung:
 
 1. Abstand in Minuten vor oder nach dem Anpfiff.
-2. Eine feste Berliner Uhrzeit für jeden Wochentag, an dem das Spiel stattfindet.
+2. Eine Zuordnung aus Spiel-Wochentag, Veröffentlichungs-Wochentag und fester
+   Berliner Uhrzeit. Beispielsweise kann ein Sonntagsspiel am vorherigen
+   Freitag um 18:00 Uhr und ein Freitagsspiel am vorherigen Donnerstag um
+   15:00 Uhr angekündigt werden.
 
 Ergebnis-Feeds unterstützen zusätzlich „sofort nach bestätigter Erkennung“.
 Ein konfigurierter Ergebniszeitpunkt wird niemals vor der bestätigten
-Ergebniserkennung verwendet.
+Ergebniserkennung verwendet. Bei festen Wochentagen liegt die Ankündigung auf
+dem gewählten Tag vor oder am Spieltag; für Ergebnisse wird der gewählte Tag
+nach oder am Spieltag verwendet.
 
 Story-Regeln können weiterhin relativ geplant werden oder eine eigene feste
 Uhrzeit je Spiel-Wochentag erhalten. Feste Zeiten werden als absolute Termine

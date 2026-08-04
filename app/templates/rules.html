@@ -49,12 +49,28 @@
       <legend>Feste Feed-Uhrzeiten nach Wochentag des Spiels</legend>
       {% set announcement_times=selected.rules.get('announcement_weekday_times',{}) %}
       {% set result_times=selected.rules.get('result_weekday_times',{}) %}
+      {% set announcement_targets=selected.rules.get('announcement_weekday_targets',{}) %}
+      {% set result_targets=selected.rules.get('result_weekday_targets',{}) %}
       {% set weekday_names=['monday','tuesday','wednesday','thursday','friday','saturday','sunday'] %}
-      {% for key,label in [('0','Montag'),('1','Dienstag'),('2','Mittwoch'),('3','Donnerstag'),('4','Freitag'),('5','Samstag'),('6','Sonntag')] %}
-      <label>{{label}} – Ankündigung<input type="time" name="announcement_{{weekday_names[key|int]}}" value="{{announcement_times.get(key,'')}}"></label>
-      <label>{{label}} – Ergebnis<input type="time" name="result_{{weekday_names[key|int]}}" value="{{result_times.get(key,'')}}"></label>
+      {% set weekday_options=[('0','Montag'),('1','Dienstag'),('2','Mittwoch'),('3','Donnerstag'),('4','Freitag'),('5','Samstag'),('6','Sonntag')] %}
+      {% for key,label in weekday_options %}
+      <fieldset>
+        <legend>Wenn das Spiel am {{label}} stattfindet</legend>
+        <label>Ankündigung veröffentlichen am
+          <select name="announcement_target_{{weekday_names[key|int]}}">
+            {% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if announcement_targets.get(key,key)==target_key %}selected{% endif %}>{{target_label}}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Ankündigung um<input type="time" name="announcement_{{weekday_names[key|int]}}" value="{{announcement_times.get(key,'')}}"></label>
+        <label>Ergebnis veröffentlichen am
+          <select name="result_target_{{weekday_names[key|int]}}">
+            {% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if result_targets.get(key,key)==target_key %}selected{% endif %}>{{target_label}}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Ergebnis um<input type="time" name="result_{{weekday_names[key|int]}}" value="{{result_times.get(key,'')}}"></label>
+      </fieldset>
       {% endfor %}
-      <p>Diese Zeiten werden nur bei „Feste Uhrzeit je Spiel-Wochentag“ verwendet. Dann müssen alle sieben Tage ausgefüllt sein.</p>
+      <p>Für Ankündigungen wird der gewählte Veröffentlichungs-Wochentag vor oder am Spieltag verwendet. Für Ergebnisse wird er nach oder am Spieltag verwendet. Die Zuordnung gilt nur bei „Feste Uhrzeit je Spiel-Wochentag“; dann müssen alle sieben Uhrzeiten ausgefüllt sein.</p>
     </fieldset>
     <label>KI-Bildprompt Feed
       <select name="image_prompt_feed">

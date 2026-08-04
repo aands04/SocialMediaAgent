@@ -235,6 +235,7 @@ def test_weekday_fixed_feed_and_story_times_use_berlin_match_date(db):
         **team.rules,
         "announcement_timing_mode": "weekday_fixed",
         "announcement_weekday_times": {"6": "09:00"},
+        "announcement_weekday_targets": {"6": "4"},
     }
     story = StoryRule(
         team_id=team.id,
@@ -251,8 +252,35 @@ def test_weekday_fixed_feed_and_story_times_use_berlin_match_date(db):
     db.commit()
     feed_at, absolute = feed_time(team, game, "announcement")
     assert absolute is True
-    assert feed_at == datetime(2026, 8, 9, 7, 0, tzinfo=timezone.utc)
+    assert feed_at == datetime(2026, 8, 7, 7, 0, tzinfo=timezone.utc)
     assert story_time(story, game) == datetime(2026, 8, 9, 8, 30, tzinfo=timezone.utc)
+
+
+def test_weekday_mapping_uses_previous_day_for_announcement_and_next_for_result(db):
+    now = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+    team, game = _base(db, now)
+    game.kickoff = datetime(2026, 8, 7, 17, 0, tzinfo=timezone.utc)
+    game.checked_at = datetime(2026, 8, 7, 20, 0, tzinfo=timezone.utc)
+    game.overrides = {"result_detected_at": "2026-08-07T20:00:00+00:00"}
+    team.rules = {
+        **team.rules,
+        "announcement_timing_mode": "weekday_fixed",
+        "announcement_weekday_times": {"4": "15:00"},
+        "announcement_weekday_targets": {"4": "3"},
+        "result_timing_mode": "weekday_fixed",
+        "result_wait_minutes": 0,
+        "result_weekday_times": {"4": "10:00"},
+        "result_weekday_targets": {"4": "5"},
+    }
+    db.commit()
+    announcement_at, announcement_absolute = feed_time(
+        team, game, "announcement"
+    )
+    result_at, result_absolute = feed_time(team, game, "result")
+    assert announcement_absolute is True
+    assert announcement_at == datetime(2026, 8, 6, 13, 0, tzinfo=timezone.utc)
+    assert result_absolute is True
+    assert result_at == datetime(2026, 8, 8, 8, 0, tzinfo=timezone.utc)
 
 
 def test_automatic_approval_choice_is_frozen_into_generation_job(db):
