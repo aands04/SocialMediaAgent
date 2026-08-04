@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     password_reset_enabled: bool = False
     password_reset_token_ttl_seconds: int = 1800
     password_reset_request_cooldown_seconds: int = 60
+    email_change_token_ttl_seconds: int = 1800
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_starttls: bool = True

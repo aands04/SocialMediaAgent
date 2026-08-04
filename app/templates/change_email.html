@@ -1,0 +1,15 @@
+{% extends 'base.html' %}{% block content %}
+<section class="login">
+  <h1>E-Mail-Adresse ändern</h1>
+  <p>Aktuelle Adresse: <strong>{{ user.email }}</strong></p>
+  <p>Die Änderung wird erst aktiv, nachdem der Link in der Bestätigungsmail an diese bisherige Adresse geöffnet und bestätigt wurde.</p>
+  {% if success %}<div class="notice">{{ success }}</div>{% endif %}
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Aktuelles Passwort<input name="current_password" type="password" autocomplete="current-password" required></label>
+    <label>Neue E-Mail-Adresse<input name="new_email" type="email" value="{{ new_email or '' }}" autocomplete="email" required></label>
+    <button>Bestätigungslink an bisherige Adresse senden</button>
+  </form>
+</section>
+{% endblock %}

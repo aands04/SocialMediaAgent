@@ -1,0 +1,13 @@
+{% extends 'base.html' %}{% block content %}
+<section class="login">
+  <h1>E-Mail-Änderung bestätigen</h1>
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  {% if token %}
+  <p>Die Konto-Adresse wird von <strong>{{ old_email }}</strong> auf <strong>{{ new_email }}</strong> geändert.</p>
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <button>E-Mail-Adresse verbindlich ändern</button>
+  </form>
+  {% else %}<p><a href="/login">Zur Anmeldung</a></p>{% endif %}
+</section>
+{% endblock %}

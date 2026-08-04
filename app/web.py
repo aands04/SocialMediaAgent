@@ -25,7 +25,7 @@ def check_csrf(request: Request, supplied: str) -> None:
     if not secrets.compare_digest(supplied, request.session.get("csrf", "")):
         raise HTTPException(403, "CSRF-Prüfung fehlgeschlagen")
 
-def current_user(request: Request, db: Session = Depends(get_db)) -> User:
+def optional_current_user(request: Request, db: Session = Depends(get_db)) -> User | None:
     user_id = request.session.get("uid")
     current = db.get(User, user_id) if user_id else None
     session_auth_version = request.session.get("auth_version")
@@ -36,6 +36,12 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User:
         or session_auth_version != current.auth_version
     ):
         request.session.clear()
+        return None
+    return current
+
+def current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    current = optional_current_user(request, db)
+    if current is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
     return current
 
