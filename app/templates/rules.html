@@ -172,8 +172,18 @@
     <button>Zeitpunkt hinzufügen</button>
   </form>
   <table>
-    <tr><th>Name</th><th>Typ</th><th>Bezug</th><th>Offset</th><th>KI-Prompt</th><th>Fallback</th></tr>
-    {% for x in stories %}<tr><td>{{x.name}}</td><td>{{x.post_type}}</td><td>{{x.reference}} / {{x.direction}}</td><td>{% if x.timing_mode=='weekday_fixed' %}je Wochentag{% else %}{{x.offset_minutes}} min{% if x.fixed_time %}, {{x.fixed_time}}{% endif %}{% endif %}</td><td>{{x.prompt_template}}</td><td>{{x.template}}</td></tr>{% endfor %}
+    <tr><th>Name</th><th>Typ</th><th>Bezug</th><th>Offset</th><th>KI-Prompt</th><th>Fallback</th><th>Aktion</th></tr>
+    {% for x in stories %}
+    <tr>
+      <td>{{x.name}}</td><td>{{x.post_type}}</td><td>{{x.reference}} / {{x.direction}}</td><td>{% if x.timing_mode=='weekday_fixed' %}je Wochentag{% else %}{{x.offset_minutes}} min{% if x.fixed_time %}, {{x.fixed_time}}{% endif %}{% endif %}</td><td>{{x.prompt_template}}</td><td>{{x.template}}</td>
+      <td>
+        <form method="post" action="/rules/{{selected.id}}/stories/{{x.id}}/delete" onsubmit="return confirm('Story-Zeitpunkt wirklich löschen? Bereits erzeugte Beiträge und Veröffentlichungsaufträge bleiben unverändert.');">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <button class="danger">Löschen</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
   </table>
 </section>
 {% endif %}

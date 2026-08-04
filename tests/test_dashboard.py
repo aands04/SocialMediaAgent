@@ -1361,6 +1361,94 @@ def test_csrf_and_non_admin_are_rejected(browser):
     )
 
 
+def test_story_rule_can_be_deleted_and_restored_without_removing_history(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="story-rule-page",
+            display_name="Story Rule Page",
+            username="storyrules",
+            club="SV Test",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="story-rule-team",
+            display_name="SV Test I",
+            short_name="SVT",
+            slug="story-rule-team",
+            club="SV Test",
+            fussball_url="https://www.fussball.de/story-rule-team",
+            instagram_page_id=page.id,
+            media_subdir="story-rule-team",
+        )
+        db.add(team)
+        db.flush()
+        item = StoryRule(
+            team_id=team.id,
+            name="24 Stunden vorher",
+            post_type="announcement",
+            reference="kickoff",
+            direction="before",
+            offset_minutes=1440,
+            template="default-story",
+            prompt_template="default-image-story",
+            sort_order=1,
+        )
+        db.add(item)
+        db.commit()
+        team_id, story_rule_id = team.id, item.id
+
+    rejected = client.post(
+        f"/rules/{team_id}/stories/{story_rule_id}/delete",
+        data={"csrf_token": "ungueltig"},
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 403
+
+    token = session_csrf(client)
+    response = client.post(
+        f"/rules/{team_id}/stories/{story_rule_id}/delete",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert f"team_id={team_id}&notice=" in response.headers["location"]
+    assert "24 Stunden vorher" not in client.get(f"/rules?team_id={team_id}").text
+    with factory() as db:
+        item = db.get(StoryRule, story_rule_id)
+        assert item is not None
+        assert item.active is False
+        deleted = db.query(AuditLog).filter_by(action="story_rule.deleted").one()
+        assert deleted.entity_id == story_rule_id
+        assert deleted.details["deletion_mode"] == "deactivated"
+
+    response = client.post(
+        f"/rules/{team_id}/stories",
+        data={
+            "csrf_token": token,
+            "name": "24 Stunden vorher",
+            "post_type": "announcement",
+            "reference": "kickoff",
+            "direction": "before",
+            "offset_minutes": "720",
+            "template": "default-story",
+            "prompt_template": "default-image-story",
+            "sort_order": "2",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with factory() as db:
+        items = db.query(StoryRule).filter_by(team_id=team_id).all()
+        assert len(items) == 1
+        assert items[0].id == story_rule_id
+        assert items[0].active is True
+        assert items[0].offset_minutes == 720
+        assert db.query(AuditLog).filter_by(action="story_rule.restored").count() == 1
+
+
 def test_admin_assigns_editorial_roles_and_last_admin_is_protected(browser):
     client, factory = browser
     token = session_csrf(client)

@@ -98,7 +98,8 @@ def audit(db, current, action, entity, entity_id=None, team_id=None, details=Non
 
 
 def redirect(path, message="Gespeichert"):
-    return RedirectResponse(f"{path}?notice={message}", 303)
+    separator = "&" if "?" in path else "?"
+    return RedirectResponse(f"{path}{separator}notice={message}", 303)
 
 
 def _invalidate_posts_for_logo_change(
@@ -1261,7 +1262,9 @@ def rules(
     selected = next((t for t in teams if t.id == team_id), teams[0] if teams else None)
     stories = (
         db.scalars(
-            select(StoryRule).where(StoryRule.team_id == selected.id).order_by(StoryRule.sort_order)
+            select(StoryRule)
+            .where(StoryRule.team_id == selected.id, StoryRule.active.is_(True))
+            .order_by(StoryRule.sort_order)
         ).all()
         if selected
         else []
@@ -1593,6 +1596,12 @@ def create_story_rule(
 ):
     check_csrf(request, csrf_token_value)
     require_admin(current)
+    team = db.get(Team, team_id)
+    if not team or team.archived_at is not None:
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    name = name.strip()
+    if not name:
+        raise HTTPException(422, "Name darf nicht leer sein")
     if reference not in {
         "kickoff",
         "planned_end",
@@ -1625,28 +1634,79 @@ def create_story_rule(
             raise HTTPException(422, "Ungueltige Story-Uhrzeit") from exc
     if timing_mode == "weekday_fixed" and len(weekday_times) != 7:
         raise HTTPException(422, "Fuer feste Story-Zeiten sind alle sieben Wochentage erforderlich")
-    item = StoryRule(
-        team_id=team_id,
-        name=name,
-        post_type=post_type,
-        reference=reference,
-        direction=direction,
-        offset_minutes=offset_minutes,
-        fixed_time=fixed_time or None,
-        timing_mode=timing_mode,
-        weekday_times=weekday_times,
-        next_day=next_day,
-        template=template,
-        prompt_template=prompt_template,
-        instagram_page_id=instagram_page_id or None,
-        reuse_media=reuse_media,
-        sort_order=sort_order,
+    item = db.scalar(
+        select(StoryRule).where(StoryRule.team_id == team_id, StoryRule.name == name)
     )
-    db.add(item)
+    if item and item.active:
+        raise HTTPException(409, "Ein Story-Zeitpunkt mit diesem Namen existiert bereits")
+    restored = item is not None
+    if item is None:
+        item = StoryRule(team_id=team_id, name=name)
+        db.add(item)
+    item.active = True
+    item.post_type = post_type
+    item.reference = reference
+    item.direction = direction
+    item.offset_minutes = offset_minutes
+    item.fixed_time = fixed_time or None
+    item.timing_mode = timing_mode
+    item.weekday_times = weekday_times
+    item.next_day = next_day
+    item.template = template
+    item.prompt_template = prompt_template
+    item.instagram_page_id = instagram_page_id or None
+    item.reuse_media = reuse_media
+    item.sort_order = sort_order
     db.flush()
-    audit(db, current, "story_rule.created", "story_rule", item.id, team_id)
+    audit(
+        db,
+        current,
+        "story_rule.restored" if restored else "story_rule.created",
+        "story_rule",
+        item.id,
+        team_id,
+        {"name": item.name},
+    )
     db.commit()
     return redirect(f"/rules?team_id={team_id}")
+
+
+@router.post("/rules/{team_id}/stories/{story_rule_id}/delete")
+def delete_story_rule(
+    team_id: str,
+    story_rule_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    item = db.scalar(
+        select(StoryRule).where(
+            StoryRule.id == story_rule_id,
+            StoryRule.team_id == team_id,
+            StoryRule.active.is_(True),
+        )
+    )
+    if item is None:
+        raise HTTPException(404, "Story-Zeitpunkt nicht gefunden")
+
+    item.active = False
+    audit(
+        db,
+        current,
+        "story_rule.deleted",
+        "story_rule",
+        item.id,
+        team_id,
+        {"name": item.name, "deletion_mode": "deactivated"},
+    )
+    db.commit()
+    return redirect(
+        f"/rules?team_id={team_id}",
+        "Story-Zeitpunkt gelöscht",
+    )
 
 
 @router.get("/posts", response_class=HTMLResponse)
