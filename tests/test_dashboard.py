@@ -36,6 +36,7 @@ from app.models import (
     PublicationJob,
     PublicationMediaItem,
     Role,
+    StoryRule,
     Team,
     User,
 )
@@ -1058,9 +1059,28 @@ def test_dashboard_admin_flow(browser):
             "csrf_token": token,
             "announcement_enabled": "true",
             "feed_before_minutes": "1440",
+            "announcement_timing_mode": "weekday_fixed",
+            "announcement_offset_direction": "before",
+            "announcement_offset_minutes": "1440",
+            "announcement_monday": "18:00",
+            "announcement_tuesday": "18:05",
+            "announcement_wednesday": "18:10",
+            "announcement_thursday": "18:15",
+            "announcement_friday": "18:20",
+            "announcement_saturday": "10:00",
+            "announcement_sunday": "09:00",
             "late_approval": "manual",
             "result_wait_minutes": "120",
+            "result_timing_mode": "result_detected",
+            "result_offset_direction": "after",
+            "result_offset_minutes": "120",
             "allow_provisional_games": "true",
+            "automatic_sync_enabled": "true",
+            "automatic_generation_enabled": "true",
+            "generation_lead_days": "4",
+            "sync_interval_hours": "24",
+            "result_poll_interval_minutes": "15",
+            "auto_approve_announcements": "true",
         },
         follow_redirects=False,
     )
@@ -1068,6 +1088,12 @@ def test_dashboard_admin_flow(browser):
     with factory() as db:
         saved_team = db.get(Team, team.id)
         assert saved_team.rules["allow_provisional_games"] is True
+        assert saved_team.rules["generation_lead_days"] == 4
+        assert saved_team.rules["sync_interval_hours"] == 24
+        assert saved_team.rules["result_poll_interval_minutes"] == 15
+        assert saved_team.rules["auto_approve_announcements"] is True
+        assert saved_team.rules["announcement_timing_mode"] == "weekday_fixed"
+        assert saved_team.rules["announcement_weekday_times"]["6"] == "09:00"
     assert "Vorläufige FUSSBALL.DE-Spielpläne" in client.get(
         f"/rules?team_id={team.id}"
     ).text
@@ -1081,12 +1107,24 @@ def test_dashboard_admin_flow(browser):
             "direction": "before",
             "offset_minutes": "1440",
             "fixed_time": "",
+            "timing_mode": "weekday_fixed",
+            "weekday_monday": "18:00",
+            "weekday_tuesday": "18:05",
+            "weekday_wednesday": "18:10",
+            "weekday_thursday": "18:15",
+            "weekday_friday": "18:20",
+            "weekday_saturday": "10:00",
+            "weekday_sunday": "09:00",
             "template": "default-story",
             "sort_order": "1",
         },
         follow_redirects=False,
     )
     assert result.status_code == 303
+    with factory() as db:
+        story = db.query(StoryRule).one()
+        assert story.timing_mode == "weekday_fixed"
+        assert story.weekday_times["6"] == "09:00"
     assert "24 Stunden" in client.get(f"/rules?team_id={team.id}").text
     result = client.post(
         "/games/mock",

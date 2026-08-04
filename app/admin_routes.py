@@ -1240,15 +1240,40 @@ def save_rules(
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
     announcement_enabled: bool = Form(default=False),
-    feed_before_minutes: int = Form(),
+    feed_before_minutes: int = Form(default=1440),
+    announcement_timing_mode: str = Form(default="relative"),
+    announcement_offset_direction: str = Form(default="before"),
+    announcement_offset_minutes: int | None = Form(default=None),
+    announcement_monday: str = Form(default=""),
+    announcement_tuesday: str = Form(default=""),
+    announcement_wednesday: str = Form(default=""),
+    announcement_thursday: str = Form(default=""),
+    announcement_friday: str = Form(default=""),
+    announcement_saturday: str = Form(default=""),
+    announcement_sunday: str = Form(default=""),
     late_approval: str = Form(),
     result_enabled: bool = Form(default=False),
     result_wait_minutes: int = Form(),
+    result_timing_mode: str = Form(default="result_detected"),
+    result_offset_direction: str = Form(default="after"),
+    result_offset_minutes: int = Form(default=120),
+    result_monday: str = Form(default=""),
+    result_tuesday: str = Form(default=""),
+    result_wednesday: str = Form(default=""),
+    result_thursday: str = Form(default=""),
+    result_friday: str = Form(default=""),
+    result_saturday: str = Form(default=""),
+    result_sunday: str = Form(default=""),
     allow_provisional_games: bool = Form(default=False),
     automatic_sync_enabled: bool = Form(default=False),
     automatic_generation_enabled: bool = Form(default=False),
     reminder_enabled: bool = Form(default=False),
     generation_lead_minutes: int = Form(default=120),
+    generation_lead_days: int = Form(default=4),
+    sync_interval_hours: int = Form(default=24),
+    result_poll_interval_minutes: int = Form(default=15),
+    auto_approve_announcements: bool = Form(default=False),
+    auto_approve_results: bool = Form(default=False),
     reminder_feed_before_minutes: int = Form(default=360),
     image_prompt_feed: str = Form(default="default-image-feed"),
     image_prompt_story: str = Form(default="default-image-story"),
@@ -1267,8 +1292,27 @@ def save_rules(
         raise HTTPException(404)
     if late_approval not in {"publish_now", "manual", "skip", "next_story"}:
         raise HTTPException(422)
+    if announcement_timing_mode not in {"relative", "weekday_fixed"}:
+        raise HTTPException(422, "Ungueltiger Zeitpunkt fuer Ankuendigungen")
+    if result_timing_mode not in {"result_detected", "relative", "weekday_fixed"}:
+        raise HTTPException(422, "Ungueltiger Zeitpunkt fuer Ergebnisse")
+    if announcement_offset_direction not in {"before", "after"} or result_offset_direction not in {"before", "after"}:
+        raise HTTPException(422, "Ungueltige Zeitrichtung")
+    announcement_offset_minutes = (
+        feed_before_minutes
+        if announcement_offset_minutes is None
+        else announcement_offset_minutes
+    )
+    if not 0 <= announcement_offset_minutes <= 43200 or not 0 <= result_offset_minutes <= 43200:
+        raise HTTPException(422, "Relative Zeitpunkte muessen zwischen 0 und 43200 Minuten liegen")
     if not 0 <= generation_lead_minutes <= 10080:
         raise HTTPException(422, "Der Generierungsvorlauf muss zwischen 0 und 10080 Minuten liegen")
+    if not 0 <= generation_lead_days <= 30:
+        raise HTTPException(422, "Der Generierungsvorlauf muss zwischen 0 und 30 Tagen liegen")
+    if not 1 <= sync_interval_hours <= 168:
+        raise HTTPException(422, "Das Abrufintervall muss zwischen 1 und 168 Stunden liegen")
+    if not 5 <= result_poll_interval_minutes <= 120:
+        raise HTTPException(422, "Das Ergebnisintervall muss zwischen 5 und 120 Minuten liegen")
     if not 0 <= reminder_feed_before_minutes <= 10080:
         raise HTTPException(422, "Der Erinnerungszeitpunkt ist ungültig")
     if automatic_generation_enabled and not automatic_sync_enabled:
@@ -1276,18 +1320,72 @@ def save_rules(
             422,
             "Automatische Entwürfe erfordern den automatischen FUSSBALL.DE-Abruf",
         )
+    announcement_weekday_times = {
+        str(index): value
+        for index, value in enumerate(
+            [
+                announcement_monday,
+                announcement_tuesday,
+                announcement_wednesday,
+                announcement_thursday,
+                announcement_friday,
+                announcement_saturday,
+                announcement_sunday,
+            ]
+        )
+        if value
+    }
+    result_weekday_times = {
+        str(index): value
+        for index, value in enumerate(
+            [
+                result_monday,
+                result_tuesday,
+                result_wednesday,
+                result_thursday,
+                result_friday,
+                result_saturday,
+                result_sunday,
+            ]
+        )
+        if value
+    }
+    for value in [*announcement_weekday_times.values(), *result_weekday_times.values()]:
+        try:
+            parsed = datetime.strptime(value, "%H:%M")
+        except ValueError as exc:
+            raise HTTPException(422, "Ungueltige feste Uhrzeit") from exc
+        if parsed.strftime("%H:%M") != value:
+            raise HTTPException(422, "Ungueltige feste Uhrzeit")
+    if announcement_timing_mode == "weekday_fixed" and len(announcement_weekday_times) != 7:
+        raise HTTPException(422, "Fuer feste Ankuendigungszeiten sind alle sieben Wochentage erforderlich")
+    if result_timing_mode == "weekday_fixed" and len(result_weekday_times) != 7:
+        raise HTTPException(422, "Fuer feste Ergebniszeiten sind alle sieben Wochentage erforderlich")
     team.rules = {
         **team.rules,
         "announcement_enabled": announcement_enabled,
         "feed_before_minutes": feed_before_minutes,
+        "announcement_timing_mode": announcement_timing_mode,
+        "announcement_offset_direction": announcement_offset_direction,
+        "announcement_offset_minutes": announcement_offset_minutes,
+        "announcement_weekday_times": announcement_weekday_times,
         "late_approval": late_approval,
         "result_enabled": result_enabled,
         "result_wait_minutes": result_wait_minutes,
+        "result_timing_mode": result_timing_mode,
+        "result_offset_direction": result_offset_direction,
+        "result_offset_minutes": result_offset_minutes,
+        "result_weekday_times": result_weekday_times,
         "allow_provisional_games": allow_provisional_games,
         "automatic_sync_enabled": automatic_sync_enabled,
         "automatic_generation_enabled": automatic_generation_enabled,
         "reminder_enabled": reminder_enabled,
         "generation_lead_minutes": generation_lead_minutes,
+        "generation_lead_days": generation_lead_days,
+        "sync_interval_hours": sync_interval_hours,
+        "result_poll_interval_minutes": result_poll_interval_minutes,
+        "auto_approve_announcements": auto_approve_announcements,
+        "auto_approve_results": auto_approve_results,
         "reminder_feed_before_minutes": reminder_feed_before_minutes,
         "image_prompt_feed": image_prompt_feed,
         "image_prompt_story": image_prompt_story,
@@ -1331,6 +1429,14 @@ def create_story_rule(
     direction: str = Form(),
     offset_minutes: int = Form(),
     fixed_time: str = Form(default=""),
+    timing_mode: str = Form(default="relative"),
+    weekday_monday: str = Form(default=""),
+    weekday_tuesday: str = Form(default=""),
+    weekday_wednesday: str = Form(default=""),
+    weekday_thursday: str = Form(default=""),
+    weekday_friday: str = Form(default=""),
+    weekday_saturday: str = Form(default=""),
+    weekday_sunday: str = Form(default=""),
     next_day: bool = Form(default=False),
     template: str = Form(),
     prompt_template: str = Form(default="default-image-story"),
@@ -1350,6 +1456,30 @@ def create_story_rule(
         "next_day",
     } or direction not in {"before", "after"}:
         raise HTTPException(422, "Ungültiger Bezugspunkt")
+    if timing_mode not in {"relative", "weekday_fixed"}:
+        raise HTTPException(422, "Ungueltiger Story-Zeitmodus")
+    weekday_times = {
+        str(index): value
+        for index, value in enumerate(
+            [
+                weekday_monday,
+                weekday_tuesday,
+                weekday_wednesday,
+                weekday_thursday,
+                weekday_friday,
+                weekday_saturday,
+                weekday_sunday,
+            ]
+        )
+        if value
+    }
+    for value in weekday_times.values():
+        try:
+            datetime.strptime(value, "%H:%M")
+        except ValueError as exc:
+            raise HTTPException(422, "Ungueltige Story-Uhrzeit") from exc
+    if timing_mode == "weekday_fixed" and len(weekday_times) != 7:
+        raise HTTPException(422, "Fuer feste Story-Zeiten sind alle sieben Wochentage erforderlich")
     item = StoryRule(
         team_id=team_id,
         name=name,
@@ -1358,6 +1488,8 @@ def create_story_rule(
         direction=direction,
         offset_minutes=offset_minutes,
         fixed_time=fixed_time or None,
+        timing_mode=timing_mode,
+        weekday_times=weekday_times,
         next_day=next_day,
         template=template,
         prompt_template=prompt_template,

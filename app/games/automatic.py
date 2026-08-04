@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from socket import gethostname
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import or_, select
@@ -29,7 +30,7 @@ from app.models import (
     Team,
     User,
 )
-from app.posts.service import story_time
+from app.posts.service import feed_time, story_time
 
 log = structlog.get_logger()
 
@@ -346,20 +347,7 @@ def _automatic_actor(db: Session) -> User | None:
 def _earliest_publication(
     db: Session, team: Team, game: Game, post_type: str
 ) -> datetime:
-    if post_type == "result":
-        detected = (game.overrides or {}).get("result_detected_at")
-        base = datetime.fromisoformat(detected) if detected else game.checked_at
-        feed_at = _utc(base) + timedelta(
-            minutes=int((team.rules or {}).get("result_wait_minutes", 15))
-        )
-    elif post_type == "reminder":
-        feed_at = _utc(game.kickoff) - timedelta(
-            minutes=int((team.rules or {}).get("reminder_feed_before_minutes", 360))
-        )
-    else:
-        feed_at = _utc(game.kickoff) - timedelta(
-            minutes=int((team.rules or {}).get("feed_before_minutes", 1440))
-        )
+    feed_at, _ = feed_time(team, game, post_type)
     times = [feed_at]
     for rule in db.scalars(
         select(StoryRule).where(
@@ -383,9 +371,17 @@ def plan_generation_jobs(
     if not actor:
         return 0
     now = now or _now()
-    lead = timedelta(
-        minutes=int((team.rules or {}).get("generation_lead_minutes", 120))
-    )
+    rules = team.rules or {}
+    if "generation_lead_days" in rules:
+        def generation_due(game: Game) -> datetime:
+            return _utc(game.kickoff) - timedelta(
+                days=int(rules.get("generation_lead_days", 4))
+            )
+    else:
+        legacy_lead = timedelta(minutes=int(rules.get("generation_lead_minutes", 120)))
+
+        def generation_due(game: Game) -> datetime:
+            return _earliest_publication(db, team, game, "announcement") - legacy_lead
     queued = 0
     games = db.scalars(
         select(Game).where(
@@ -401,24 +397,23 @@ def plan_generation_jobs(
             continue
         post_types: list[str] = []
         if (
-            (team.rules or {}).get("announcement_enabled")
+            rules.get("announcement_enabled")
             and now <= _utc(game.kickoff)
-            and now >= _earliest_publication(db, team, game, "announcement") - lead
+            and now >= generation_due(game)
         ):
             post_types.append("announcement")
         if (
-            (team.rules or {}).get("reminder_enabled")
+            rules.get("reminder_enabled")
             and now <= _utc(game.kickoff)
-            and now >= _earliest_publication(db, team, game, "reminder") - lead
+            and now >= generation_due(game)
         ):
             post_types.append("reminder")
         if (
-            (team.rules or {}).get("result_enabled")
+            rules.get("result_enabled")
             and game.result_confirmed
             and now
             <= _utc(game.kickoff)
             + timedelta(hours=settings.fussball_result_max_age_hours)
-            and now >= _earliest_publication(db, team, game, "result") - lead
         ):
             post_types.append("result")
         for post_type in post_types:
@@ -444,6 +439,14 @@ def plan_generation_jobs(
                     **(job.parameters or {}),
                     "trigger_mode": "automatic_fussball",
                     "provider_sync_at": now.isoformat(),
+                    "automatic_approval_requested": bool(
+                        rules.get(
+                            "auto_approve_results"
+                            if post_type == "result"
+                            else "auto_approve_announcements",
+                            False,
+                        )
+                    ),
                 }
                 db.add(
                     AuditLog(
@@ -461,18 +464,50 @@ def plan_generation_jobs(
 
 
 def _next_interval(db: Session, team_id: str, settings: Settings, now: datetime) -> int:
-    nearby = db.scalar(
-        select(Game.id).where(
+    team = db.get(Team, team_id)
+    rules = (team.rules or {}) if team else {}
+    normal = max(
+        3600,
+        int(rules.get("sync_interval_hours", 24)) * 3600,
+    )
+    result_poll = max(
+        300,
+        int(rules.get("result_poll_interval_minutes", 15)) * 60,
+    )
+    berlin = ZoneInfo("Europe/Berlin")
+    local_now = _utc(now).astimezone(berlin)
+    games = db.scalars(
+        select(Game).where(
             Game.team_id == team_id,
-            Game.kickoff >= now - timedelta(hours=5),
-            Game.kickoff <= now + timedelta(hours=2),
+            # Keep every game from the current local match day in the polling
+            # window, including early kickoffs whose result may arrive later.
+            Game.kickoff >= now - timedelta(days=1),
+            Game.kickoff <= now + timedelta(days=31),
+            Game.status.not_in(["cancelled", "postponed"]),
         )
+    ).all()
+    if any(
+        _utc(game.kickoff).astimezone(berlin).date() == local_now.date()
+        and not game.result_confirmed
+        for game in games
+    ):
+        return result_poll
+
+    upcoming_dates = sorted(
+        {
+            _utc(game.kickoff).astimezone(berlin).date()
+            for game in games
+            if _utc(game.kickoff) > now
+        }
     )
-    return (
-        settings.fussball_result_poll_interval_seconds
-        if nearby
-        else settings.fussball_sync_interval_seconds
-    )
+    if upcoming_dates:
+        next_matchday = datetime.combine(
+            upcoming_dates[0], datetime.min.time(), tzinfo=berlin
+        ).astimezone(timezone.utc)
+        until_matchday = int((next_matchday - _utc(now)).total_seconds())
+        if until_matchday > 0:
+            return max(60, min(normal, until_matchday))
+    return normal
 
 
 def process_claimed_team(

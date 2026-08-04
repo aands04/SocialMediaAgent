@@ -7,6 +7,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from app.approvals.service import ApprovalError, approve
 from app.auth.service import allowed
 from app.config import Settings
 from app.generation import build_renderer, build_text_generator
@@ -763,6 +764,50 @@ def process_generation_job(
             db.commit()
         _phase(db, job, "validating", 90, job.planned_outputs)
         _phase(db, job, "saving", 95, job.planned_outputs)
+        if (
+            job.job_type == GenerationJobType.CREATE_POST
+            and parameters.get("trigger_mode") == "automatic_fussball"
+            and parameters.get("automatic_approval_requested")
+        ):
+            try:
+                approve(db, post, user)
+                db.add(
+                    AuditLog(
+                        user_id=user.id,
+                        team_id=team.id,
+                        action="post.approved_automatically",
+                        entity_type="post",
+                        entity_id=post.id,
+                        details={
+                            "generation_job_id": job.id,
+                            "post_type": post.post_type,
+                            "rule_opt_in": True,
+                        },
+                    )
+                )
+                db.commit()
+            except ApprovalError as exc:
+                db.rollback()
+                db.add(
+                    AuditLog(
+                        user_id=None,
+                        team_id=team.id,
+                        action="post.automatic_approval_blocked",
+                        entity_type="post",
+                        entity_id=post.id,
+                        details={
+                            "generation_job_id": job.id,
+                            "reason": str(exc)[:500],
+                        },
+                    )
+                )
+                db.commit()
+                log.warning(
+                    "automatic_post_approval_blocked",
+                    job_id=job.id,
+                    post_id=post.id,
+                    reason=str(exc),
+                )
         _finish(db, job, GenerationJobStatus.SUCCEEDED)
     except GenerationCancelled as exc:
         db.rollback()
