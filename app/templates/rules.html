@@ -171,6 +171,15 @@
         </select>
         <small>Eine Vereinsbündelung verwendet genau ein Feed-Bild pro Spiel. Storys bleiben pro Spiel getrennt.</small>
       </label>
+      <label>Erstes Bild im Vereinskarussell
+        <select name="club_matchday_primary_team_id">
+          <option value="">Automatisch nach Anstoßzeit</option>
+          {% for carousel_team in carousel_teams %}
+          <option value="{{carousel_team.id}}" {% if selected.rules.get('club_matchday_primary_team_id')==carousel_team.id %}selected{% endif %}>{{carousel_team.display_name}}</option>
+          {% endfor %}
+        </select>
+        <small>Die gewählte Mannschaft steht im Karussell immer vorne. Die weiteren Spielbilder folgen chronologisch.</small>
+      </label>
     </div>
     <p class="warning">Automatische Freigaben können bei aktivierter Instagram-Automatik ohne weitere manuelle Prüfung veröffentlicht werden. Fehlende Medien, Logos, Rechte oder Sicherheitsprüfungen blockieren weiterhin.</p>
   </section>

@@ -1286,6 +1286,19 @@ def rules(
             story_output_defaults.get(story.post_type, 1),
             int(getattr(story, "media_slot", 1) or 1),
         )
+    carousel_teams = []
+    if selected:
+        club_key = normalize_club_name(selected.club)
+        carousel_teams = sorted(
+            (
+                candidate
+                for candidate in teams
+                if candidate.instagram_page_id == selected.instagram_page_id
+                and candidate.active
+                and normalize_club_name(candidate.club) == club_key
+            ),
+            key=lambda candidate: (candidate.display_name.casefold(), candidate.id),
+        )
     return render(
         request,
         "rules.html",
@@ -1296,6 +1309,7 @@ def rules(
         pages=pages,
         prompts=list(latest.values()),
         story_output_defaults=story_output_defaults,
+        carousel_teams=carousel_teams,
         title="Veröffentlichungsregeln",
     )
 
@@ -1355,6 +1369,7 @@ def save_rules(
     auto_approve_announcements: bool = Form(default=False),
     auto_approve_results: bool = Form(default=False),
     club_matchday_feed_mode: str = Form(default="separate"),
+    club_matchday_primary_team_id: str = Form(default=""),
     reminder_feed_before_minutes: int = Form(default=360),
     reminder_timing_mode: str = Form(default="relative"),
     reminder_monday: str = Form(default=""),
@@ -1406,6 +1421,28 @@ def save_rules(
         "announcements_and_results",
     }:
         raise HTTPException(422, "Ungueltige Vereins-Feed-Buendelung")
+    club_key = normalize_club_name(team.club)
+    club_teams = [team]
+    club_teams.extend(
+        sibling
+        for sibling in db.scalars(
+            select(Team).where(
+                Team.instagram_page_id == team.instagram_page_id,
+                Team.active.is_(True),
+                Team.archived_at.is_(None),
+                Team.id != team.id,
+            )
+        )
+        if normalize_club_name(sibling.club) == club_key
+    )
+    club_matchday_primary_team_id = club_matchday_primary_team_id.strip()
+    if club_matchday_primary_team_id and club_matchday_primary_team_id not in {
+        candidate.id for candidate in club_teams
+    }:
+        raise HTTPException(
+            422,
+            "Die bevorzugte Mannschaft gehört nicht zu diesem Verein und dieser Instagram-Seite",
+        )
     if announcement_offset_direction not in {"before", "after"} or result_offset_direction not in {"before", "after"}:
         raise HTTPException(422, "Ungueltige Zeitrichtung")
     announcement_offset_minutes = (
@@ -1652,6 +1689,7 @@ def save_rules(
         "auto_approve_announcements": auto_approve_announcements,
         "auto_approve_results": auto_approve_results,
         "club_matchday_feed_mode": club_matchday_feed_mode,
+        "club_matchday_primary_team_id": club_matchday_primary_team_id or None,
         "reminder_feed_before_minutes": reminder_feed_before_minutes,
         **output_counts,
         "image_prompt_feed": image_prompt_feed,
@@ -1666,21 +1704,14 @@ def save_rules(
     # This is deliberately a club/page setting even though rules are stored on
     # teams. Keeping all sibling teams in sync prevents one half of a matchday
     # from silently opting out of a configured carousel.
-    club_key = normalize_club_name(team.club)
     grouped_team_ids = [team.id]
-    for sibling in db.scalars(
-        select(Team).where(
-            Team.instagram_page_id == team.instagram_page_id,
-            Team.active.is_(True),
-            Team.archived_at.is_(None),
-            Team.id != team.id,
-        )
-    ):
-        if normalize_club_name(sibling.club) != club_key:
+    for sibling in club_teams:
+        if sibling.id == team.id:
             continue
         sibling.rules = {
             **(sibling.rules or {}),
             "club_matchday_feed_mode": club_matchday_feed_mode,
+            "club_matchday_primary_team_id": club_matchday_primary_team_id or None,
         }
         sibling.version += 1
         grouped_team_ids.append(sibling.id)
