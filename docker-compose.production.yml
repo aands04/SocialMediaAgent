@@ -38,6 +38,10 @@ services:
       - ${PRODUCTION_DATA_ROOT}/logs:/app/data/logs
       - ${PRODUCTION_BACKUP_ROOT}:/app/data/backups
       - type: bind
+        source: ${SMTP_PASSWORD_FILE_HOST:-/dev/null}
+        target: /run/secrets/smtp_password
+        read_only: true
+      - type: bind
         source: ${MEDIA_HOST_ROOT:?MEDIA_HOST_ROOT fehlt}
         target: /app/external-media
         read_only: true

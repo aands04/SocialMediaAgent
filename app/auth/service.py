@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.models import Role, User, UserTeam
 
 passwords=PasswordHash.recommended()
+MIN_PASSWORD_LENGTH = 12
+MAX_PASSWORD_LENGTH = 256
 PERMISSIONS={
     Role.ADMIN: {"*"},
     Role.APPROVER: {"view", "edit_post", "generate", "approve", "publish_retry"},
@@ -15,6 +17,12 @@ PERMISSIONS={
 }
 def hash_password(value:str)->str: return passwords.hash(value)
 def verify_password(value:str,hashed:str)->bool: return passwords.verify(value,hashed)
+def validate_new_password(value:str)->str|None:
+    if len(value) < MIN_PASSWORD_LENGTH:
+        return f"Passwort muss mindestens {MIN_PASSWORD_LENGTH} Zeichen haben"
+    if len(value) > MAX_PASSWORD_LENGTH:
+        return f"Passwort darf höchstens {MAX_PASSWORD_LENGTH} Zeichen haben"
+    return None
 def authenticate(db:Session,email:str,password:str)->User|None:
     user=db.scalar(select(User).where(User.email==email,User.archived_at.is_(None)))
     now=datetime.now(timezone.utc)

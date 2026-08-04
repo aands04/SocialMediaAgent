@@ -65,6 +65,24 @@ case "${META_PUBLIC_BASE_URL:-}" in
   *) fail "META_PUBLIC_BASE_URL muss mit https:// beginnen" ;;
 esac
 
+if [ "${PASSWORD_RESET_ENABLED:-false}" = "true" ]; then
+  case "${APP_PUBLIC_BASE_URL:-}" in
+    https://*) ok "Passwort-Reset verwendet eine öffentliche HTTPS-Basis" ;;
+    *) fail "APP_PUBLIC_BASE_URL muss für Passwort-Reset mit https:// beginnen" ;;
+  esac
+  [ -n "${SMTP_HOST:-}" ] && [ -n "${SMTP_FROM_EMAIL:-}" ] &&
+    ok "SMTP-Konfiguration für Passwort-Reset vorhanden" ||
+    fail "SMTP_HOST und SMTP_FROM_EMAIL fehlen"
+  smtp_secret="${SMTP_PASSWORD_FILE_HOST:-/dev/null}"
+  if [ -n "${SMTP_USERNAME:-}" ] && [ ! -s "$smtp_secret" ]; then
+    fail "SMTP-Passwortdatei fehlt oder ist leer"
+  else
+    ok "SMTP-Passwortdatei ist passend konfiguriert"
+  fi
+else
+  ok "Passwort-Reset bewusst deaktiviert"
+fi
+
 for name in db_password session_secret openai_api_key meta_app_id meta_app_secret meta_token_encryption_key; do
   path="${PRODUCTION_SECRETS_ROOT:-/nonexistent}/$name"
   if [ -s "$path" ]; then

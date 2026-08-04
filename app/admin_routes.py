@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.approvals.service import ApprovalError, approve, edit_text
-from app.auth.service import allowed, hash_password
+from app.auth.service import allowed, hash_password, validate_new_password
 from app.config import get_settings
 from app.db import get_db
 from app.games.identity import team_name_variants
@@ -542,8 +542,9 @@ def create_user(
 ):
     check_csrf(request, csrf_token_value)
     require_admin(current)
-    if len(password) < 12:
-        raise HTTPException(422, "Passwort muss mindestens 12 Zeichen haben")
+    password_error = validate_new_password(password)
+    if password_error:
+        raise HTTPException(422, password_error)
     item = User(
         email=email.lower(), password_hash=hash_password(password), role=role, all_teams=all_teams
     )
