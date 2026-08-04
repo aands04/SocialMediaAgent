@@ -25,6 +25,7 @@ from app.posts.manual import (
     create_manual_post,
     parse_manual_crop_specs,
     parse_manual_publication_time,
+    parse_manual_user_tag_specs,
     validate_manual_image,
 )
 from app.publishing.service import DryRunPublisher
@@ -196,6 +197,30 @@ def test_manual_crop_metadata_is_strictly_validated():
         parse_manual_crop_specs('[{"x":0.5,"y":0,"width":0.6,"height":1}]', 1)
 
 
+def test_manual_instagram_user_tags_are_normalized_and_strictly_validated():
+    parsed = parse_manual_user_tag_specs(
+        '[[{"username":"@SV.Ehlen1901","x":0.25,"y":0.75}]]',
+        1,
+        "feed",
+    )
+    assert parsed == [[{"username": "sv.ehlen1901", "x": 0.25, "y": 0.75}]]
+    with pytest.raises(ManualPostError, match="mehrfach"):
+        parse_manual_user_tag_specs(
+            '[[{"username":"svehlen1901","x":0.2,"y":0.3},'
+            '{"username":"@svehlen1901","x":0.7,"y":0.8}]]',
+            1,
+            "feed",
+        )
+    with pytest.raises(ManualPostError, match="außerhalb"):
+        parse_manual_user_tag_specs(
+            '[[{"username":"svehlen1901","x":1.2,"y":0.3}]]', 1, "feed"
+        )
+    with pytest.raises(ManualPostError, match="Storys"):
+        parse_manual_user_tag_specs(
+            '[[{"username":"svehlen1901","x":0.5,"y":0.5}]]', 1, "story"
+        )
+
+
 def test_manual_time_rejects_past_and_dst_ambiguity():
     past = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M")
     with pytest.raises(ManualPostError, match="Zukunft"):
@@ -262,6 +287,10 @@ def test_manual_carousel_persists_selected_order_and_shared_caption(db, tmp_path
         text="Eine gemeinsame Karussell-Bildunterschrift",
         scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
         images=[first, second],
+        user_tags_by_image=[
+            [{"username": "erster_spieler", "x": 0.2, "y": 0.3}],
+            [{"username": "zweiter.spieler", "x": 0.8, "y": 0.7}],
+        ],
     )
     assert created is True
     job = db.query(PublicationJob).filter_by(post_id=post.id).one()
@@ -280,6 +309,12 @@ def test_manual_carousel_persists_selected_order_and_shared_caption(db, tmp_path
         "carousel-02-v1.png",
     ]
     assert post.design_snapshot["manual_upload"]["images"][0]["original_filename"] == "zuerst.png"
+    assert post.design_snapshot["manual_upload"]["images"][0]["user_tags"] == [
+        {"username": "erster_spieler", "x": 0.2, "y": 0.3}
+    ]
+    assert post.design_snapshot["manual_upload"]["images"][1]["user_tags"] == [
+        {"username": "zweiter.spieler", "x": 0.8, "y": 0.7}
+    ]
     approve(db, post, user)
     assert job.status == JobStatus.SCHEDULED
 

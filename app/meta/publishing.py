@@ -22,6 +22,7 @@ from app.meta.security import (
     sanitize_platform_data,
     secret_hash,
 )
+from app.meta.user_tags import UserTagValidationError, user_tags_from_snapshot
 from app.models import (
     AuditLog,
     Game,
@@ -738,10 +739,28 @@ def create_container(
         raise MetaPublishingError(
             "Medium oder Medienfreigabe wurde während der Prüfung verändert"
         )
+    try:
+        user_tags_by_position = {
+            position: user_tags_from_snapshot(post.design_snapshot, position)
+            for position in range(1, len(media_reports) + 1)
+        }
+    except UserTagValidationError as exc:
+        raise MetaPublishingError(
+            f"Eingefrorene Instagram-Markierungen sind ungültig: {exc}"
+        ) from exc
+    if attempt.media_kind == "story" and any(user_tags_by_position.values()):
+        raise MetaPublishingError(
+            "Positionsbezogene Instagram-Markierungen werden für Storys nicht unterstützt"
+        )
     attempt.phase = "creating_container"
     attempt.sanitized_response = {
         **(attempt.sanitized_response or {}),
         "public_media_checks": public_checks,
+        "instagram_user_tag_counts": {
+            str(position): len(tags)
+            for position, tags in user_tags_by_position.items()
+            if tags
+        },
     }
     db.commit()
     token = TokenCipher(settings.meta_token_encryption_key).decrypt(
@@ -757,6 +776,7 @@ def create_container(
                         access_token=token,
                         account_id=attempt.target_account_id,
                         image_url=media_url,
+                        user_tags=user_tags_by_position.get(child.position, []),
                     )
                     child_id = str(child_response.get("id") or "")
                     if not child_id:
@@ -782,6 +802,7 @@ def create_container(
                 kind=attempt.media_kind,
                 image_url=grant_rows[0][2],
                 caption=job.text_snapshot if attempt.media_kind == "feed" else None,
+                user_tags=user_tags_by_position.get(1, []),
             )
         container_id = str(response.get("id") or "")
         if not container_id:

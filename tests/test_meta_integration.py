@@ -341,6 +341,40 @@ def test_meta_api_uses_instagram_host_and_story_has_no_caption(tmp_path):
     assert request.headers["Authorization"] == "Bearer token"
 
 
+def test_meta_api_sends_positioned_user_tags_only_for_feed_media(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"id": "container-1"})
+
+    api = MetaApiClient(
+        meta_settings(tmp_path),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    api.create_container(
+        access_token="token",
+        account_id="ig-user",
+        kind="feed",
+        image_url="https://meta.example/feed.png",
+        caption="Mit markiertem Spieler",
+        user_tags=[{"username": "spieler.eins", "x": 0.125, "y": 0.875}],
+    )
+    payload = parse_qs(calls[0].content.decode())
+    assert payload["user_tags"] == [
+        '[{"username":"spieler.eins","x":0.125,"y":0.875}]'
+    ]
+    with pytest.raises(MetaApiError, match="Storys"):
+        api.create_container(
+            access_token="token",
+            account_id="ig-user",
+            kind="story",
+            image_url="https://meta.example/story.png",
+            caption=None,
+            user_tags=[{"username": "spieler.eins", "x": 0.5, "y": 0.5}],
+        )
+
+
 def test_meta_api_builds_carousel_child_and_ordered_parent_payloads(tmp_path):
     calls = []
 
@@ -356,6 +390,7 @@ def test_meta_api_builds_carousel_child_and_ordered_parent_payloads(tmp_path):
         access_token="token",
         account_id="ig-user",
         image_url="https://meta.example/item-1.png",
+        user_tags=[{"username": "spieler.eins", "x": 0.25, "y": 0.75}],
     )
     api.create_carousel_container(
         access_token="token",
@@ -368,6 +403,7 @@ def test_meta_api_builds_carousel_child_and_ordered_parent_payloads(tmp_path):
     assert child_payload == {
         "image_url": ["https://meta.example/item-1.png"],
         "is_carousel_item": ["true"],
+        "user_tags": ['[{"username":"spieler.eins","x":0.25,"y":0.75}]'],
     }
     assert parent_payload == {
         "media_type": ["CAROUSEL"],
@@ -436,10 +472,12 @@ class CarouselPublishingApi(PublishingApi):
     def __init__(self):
         super().__init__()
         self.child_urls = []
+        self.child_tags = []
         self.parent_children = []
 
     def create_carousel_item(self, **kwargs):
         self.child_urls.append(kwargs["image_url"])
+        self.child_tags.append(kwargs.get("user_tags"))
         return {"id": f"child-{len(self.child_urls)}"}
 
     def create_carousel_container(self, **kwargs):
@@ -790,6 +828,26 @@ def test_carousel_creates_ordered_children_then_one_parent_and_publishes(db, tmp
     user, _, _, post, job = make_context(db, settings)
     job.kind = "carousel"
     job.idempotency_key = "meta-test-carousel-v1"
+    post.design_snapshot = {
+        "source": "manual_upload",
+        "manual_upload": {
+            "images": [
+                {
+                    "position": 1,
+                    "user_tags": [
+                        {"username": "spieler.eins", "x": 0.2, "y": 0.3}
+                    ],
+                },
+                {"position": 2, "user_tags": []},
+                {
+                    "position": 3,
+                    "user_tags": [
+                        {"username": "spieler.drei", "x": 0.7, "y": 0.8}
+                    ],
+                },
+            ]
+        },
+    }
     source = settings.generated_root / "feed.png"
     for position in range(1, 4):
         target = settings.generated_root / f"carousel-{position}.png"
@@ -828,6 +886,11 @@ def test_carousel_creates_ordered_children_then_one_parent_and_publishes(db, tmp
         media_http_client=public_media_client(settings),
     )
     assert len(api.child_urls) == 3
+    assert api.child_tags == [
+        [{"username": "spieler.eins", "x": 0.2, "y": 0.3}],
+        [],
+        [{"username": "spieler.drei", "x": 0.7, "y": 0.8}],
+    ]
     assert api.parent_children == ["child-1", "child-2", "child-3"]
     assert api.container_calls == 1
     children = list(

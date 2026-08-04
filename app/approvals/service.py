@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth.service import allowed
+from app.meta.user_tags import UserTagValidationError, user_tags_from_snapshot
 from app.models import (
     AuditLog,
     InstagramPage,
@@ -45,6 +46,37 @@ def approve(db:Session,post:Post,user:User,selected_jobs:list[str]|None=None)->P
             problems.append("Karussell-Reihenfolge ist nicht lückenlos")
         elif any(not Path(item.media_path).is_file() for item in media):
             problems.append("Karussellbilder fehlen")
+    if (post.design_snapshot or {}).get("source") == "manual_upload":
+        for job in selected:
+            positions = (
+                range(
+                    1,
+                    len(
+                        list(
+                            db.scalars(
+                                select(PublicationMediaItem).where(
+                                    PublicationMediaItem.publication_job_id == job.id
+                                )
+                            )
+                        )
+                    )
+                    + 1,
+                )
+                if job.kind == "carousel"
+                else range(1, 2)
+            )
+            try:
+                tags = [
+                    user_tags_from_snapshot(post.design_snapshot, position)
+                    for position in positions
+                ]
+            except UserTagValidationError as exc:
+                problems.append(f"Instagram-Markierungen sind ungültig: {exc}")
+                continue
+            if job.kind == "story" and any(tags):
+                problems.append(
+                    "Positionsbezogene Instagram-Markierungen werden für Storys nicht unterstützt"
+                )
     if post.critical_warnings: problems.extend(post.critical_warnings)
     logos=(post.design_snapshot or {}).get("logos")
     team_logo=(logos or {}).get("team")

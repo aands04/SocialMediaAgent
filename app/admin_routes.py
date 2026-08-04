@@ -64,6 +64,7 @@ from app.posts.manual import (
     create_manual_post,
     parse_manual_crop_specs,
     parse_manual_publication_time,
+    parse_manual_user_tag_specs,
     validate_manual_image,
 )
 from app.posts.service import logo_recompose_availability
@@ -1390,6 +1391,7 @@ async def create_manual_post_route(
     text_value: str = Form(alias="text"),
     scheduled_at_value: str = Form(alias="scheduled_at"),
     crop_specs_value: str = Form(default="", alias="crop_specs"),
+    user_tags_value: str = Form(default="", alias="user_tags"),
     images: list[UploadFile] = File(),
     current=Depends(current_user),
     db: Session = Depends(get_db),
@@ -1405,6 +1407,9 @@ async def create_manual_post_route(
         if kind != "carousel" and len(images) != 1:
             raise ManualPostError("Feed und Story benötigen genau ein Bild")
         crop_specs = parse_manual_crop_specs(crop_specs_value, len(images))
+        user_tags_by_image = parse_manual_user_tag_specs(
+            user_tags_value, len(images), kind
+        )
         validated = []
         for image, crop in zip(images, crop_specs, strict=True):
             content = await image.read(MAX_MANUAL_IMAGE_BYTES + 1)
@@ -1426,6 +1431,7 @@ async def create_manual_post_route(
             text=text_value,
             scheduled_at=scheduled_at,
             images=validated,
+            user_tags_by_image=user_tags_by_image,
         )
     except ManualPostError as exc:
         raise HTTPException(422, str(exc)) from exc

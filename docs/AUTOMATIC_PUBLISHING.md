@@ -71,6 +71,10 @@ Reihenfolge erzeugt und ihre IDs einzeln gespeichert. Erst danach wird ein
 Parent-Container erstellt. Bereits gespeicherte Child-IDs werden nach einem
 Neustart wiederverwendet; ein Timeout mit unklarer Annahme wird nicht durch
 einen kosten- beziehungsweise duplikatenträchtigen Neuversuch übergangen.
+Positionsbezogene Instagram-Kontomarkierungen manueller Feed-Beiträge werden
+am Feed-Container, bei Karussells am jeweiligen Child-Container als
+`user_tags` übertragen. Sie sind Bestandteil des eingefrorenen
+Design-Snapshots und werden vor jedem externen Aufruf erneut validiert.
 
 ```text
 scheduled/retry
