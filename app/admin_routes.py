@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.approvals.service import ApprovalError, approve, edit_text
-from app.auth.service import hash_password
+from app.auth.service import allowed, hash_password
 from app.config import get_settings
 from app.db import get_db
 from app.games.identity import team_name_variants
@@ -524,6 +524,7 @@ def users(request: Request, current=Depends(current_user), db: Session = Depends
         items=items,
         teams=teams,
         assignments=assignments,
+        roles=[Role.ADMIN, Role.APPROVER, Role.EDITOR, Role.VIEWER],
         title="Benutzer und Rechte",
     )
 
@@ -585,6 +586,46 @@ def assign_user_teams(
     )
     db.commit()
     return redirect("/users")
+
+
+@router.post("/users/{user_id}/role")
+def assign_user_role(
+    user_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    role: Role = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    item = db.get(User, user_id)
+    if not item or item.archived_at is not None:
+        raise HTTPException(404)
+    if item.role == Role.ADMIN and role != Role.ADMIN:
+        active_admin_ids = list(
+            db.scalars(
+                select(User.id).where(
+                    User.role == Role.ADMIN,
+                    User.active.is_(True),
+                    User.archived_at.is_(None),
+                )
+            )
+        )
+        if len(active_admin_ids) <= 1:
+            raise HTTPException(409, "Der letzte aktive Administrator kann nicht herabgestuft werden")
+    previous_role = item.role
+    item.role = role
+    audit(
+        db,
+        current,
+        "user.role_changed",
+        "user",
+        item.id,
+        details={"old_role": previous_role.value, "new_role": role.value},
+    )
+    db.commit()
+    return redirect("/users", f"Rolle von {item.email} wurde auf {role.label} geändert")
 
 
 @router.get("/media", response_class=HTMLResponse)
@@ -1650,6 +1691,9 @@ def post_detail(
         logo_recompose=logo_recompose_availability(item, jobs),
         current_media_asset=current_media_asset,
         alternative_media_assets=alternative_media_assets,
+        can_edit=allowed(db, current, "edit_post", item.team_id),
+        can_generate=allowed(db, current, "generate", item.team_id),
+        can_approve=allowed(db, current, "approve", item.team_id),
         now=now,
         title="Beitrag prüfen",
     )

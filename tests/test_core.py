@@ -50,6 +50,26 @@ def mark_verified_logo(post):
 def test_password_and_team_scope(db,tmp_path):
  _,team,_=graph(db,tmp_path); user=User(email="e@x.de",password_hash=hash_password("long-enough"),role=Role.EDITOR,all_teams=False); db.add(user); db.commit()
  assert not allowed(db,user,"edit_post",team.id); db.add(UserTeam(user_id=user.id,team_id=team.id)); db.commit(); assert allowed(db,user,"edit_post",team.id); assert not allowed(db,user,"approve",team.id)
+
+
+def test_editorial_roles_enforce_creation_and_approval_permissions(db, tmp_path):
+ _,team,_=graph(db,tmp_path)
+ administrator=User(email="admin-role@x.de",password_hash="x",role=Role.ADMIN,all_teams=True)
+ editor=User(email="editor-role@x.de",password_hash="x",role=Role.APPROVER,all_teams=True)
+ author=User(email="author-role@x.de",password_hash="x",role=Role.EDITOR,all_teams=True)
+ viewer=User(email="viewer-role@x.de",password_hash="x",role=Role.VIEWER,all_teams=True)
+ db.add_all([administrator,editor,author,viewer]); db.commit()
+
+ assert administrator.role.label=="Administrator" and allowed(db,administrator,"manage_users",team.id)
+ assert editor.role.label=="Redakteur"
+ assert all(allowed(db,editor,permission,team.id) for permission in ("view","edit_post","generate","approve","publish_retry"))
+ assert not allowed(db,editor,"manage_users",team.id)
+ assert author.role.label=="Autor"
+ assert all(allowed(db,author,permission,team.id) for permission in ("view","edit_post","generate"))
+ assert not allowed(db,author,"approve",team.id)
+ assert not allowed(db,author,"publish_retry",team.id)
+ assert viewer.role.label=="Betrachter" and allowed(db,viewer,"view",team.id)
+ assert not allowed(db,viewer,"edit_post",team.id)
 def test_storage_blocks_escape_and_bad_type(media_root):
  store=LocalStorageProvider(media_root); (media_root/"x.jpg").write_bytes(b"x")
  assert store.validate_file("x.jpg").name=="x.jpg"

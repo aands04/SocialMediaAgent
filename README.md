@@ -41,6 +41,18 @@ PUBLISHER_MODE=dry-run GLOBAL_PUBLISH_ENABLED=false docker compose -f docker-com
 1. **Instagram-Seite:** internen Namen, Username und offizielle Konto-ID anlegen; Token ausschließlich als Docker Secret/Environment. Nach offizieller Verbindungsprüfung aktivieren. Mehrere Teams dürfen dieselbe Seite nutzen; der Beitrag snapshotet sein Ziel.
 2. **Mannschaft:** Namen/Slug, plausible `https://www.fussball.de/...`-URL, aktive Seite, relativen Medienunterordner, vorhandene Vorlagen/Fonts, Farben und Zeitzone anlegen. Löschen ist Soft-Delete/Archivierung.
 3. **Rechte:** Rolle und Mannschaftszuordnung sind getrennt. `all_teams=false` verlangt explizite `UserTeam`-Zeilen; direkte URLs und Services prüfen serverseitig.
+
+### Benutzerrollen
+
+- **Administrator:** Vollzugriff einschließlich Benutzerkonten, Rollen, Mannschaftsrechten und Systemeinstellungen.
+- **Redakteur:** Darf Beiträge erstellen, bearbeiten, per KI neu erzeugen und ausdrücklich freigeben.
+- **Autor:** Darf Beiträge erstellen, bearbeiten und per KI neu erzeugen. Die Freigabe muss anschließend durch einen Redakteur oder Administrator erfolgen.
+- **Betrachter:** Darf Inhalte ausschließlich lesen.
+
+Rollen und Mannschaftszuordnungen werden unabhängig voneinander geprüft. Ein
+Redakteur oder Autor kann daher nur für die ihm ausdrücklich zugewiesenen
+Mannschaften handeln. Nur Administratoren dürfen Konten anlegen oder Rollen
+ändern; der letzte aktive Administrator kann nicht herabgestuft werden.
 4. **Zeitregeln:** Feed als Minuten vor Anpfiff; Story-Regeln referenzieren Anpfiff, geplantes Ende, Ergebniserkennung, Freigabe oder Folgetag, mit Offset/fester Uhrzeit. Jede Regel erzeugt einen Job; Kollisionen werden nicht unbemerkt dupliziert.
 5. **Medien:** Spielerbilder können in der Medienbibliothek als JPG, PNG oder WebP mehrfach hochgeladen oder aus einem read-only eingebundenen Team-Unterordner eingelesen werden. Dashboard-Uploads liegen getrennt im persistenten Upload-Volume; die externe Medienwurzel bleibt schreibgeschützt. Ein Bild wird atomar einem Spiel reserviert und darf in dessen Feed/Storys wiederverwendet werden. Ohne Bild entsteht eine neutrale Grafik mit Prüfhinweis.
 6. **Workflow:** Worker synchronisiert Spiele, erzeugt Beiträge automatisch, rendert alle Dateien und Text. Freigeber prüft Version, Ziel und abgelaufene Zeiten. Jede relevante Änderung setzt offene Jobs auf erneute Freigabe.

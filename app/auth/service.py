@@ -7,7 +7,12 @@ from sqlalchemy.orm import Session
 from app.models import Role, User, UserTeam
 
 passwords=PasswordHash.recommended()
-PERMISSIONS={Role.ADMIN:{"*"},Role.EDITOR:{"view","edit_post","edit_game","generate"},Role.APPROVER:{"view","approve","publish_retry"},Role.VIEWER:{"view"}}
+PERMISSIONS={
+    Role.ADMIN: {"*"},
+    Role.APPROVER: {"view", "edit_post", "generate", "approve", "publish_retry"},
+    Role.EDITOR: {"view", "edit_post", "generate"},
+    Role.VIEWER: {"view"},
+}
 def hash_password(value:str)->str: return passwords.hash(value)
 def verify_password(value:str,hashed:str)->bool: return passwords.verify(value,hashed)
 def authenticate(db:Session,email:str,password:str)->User|None:
