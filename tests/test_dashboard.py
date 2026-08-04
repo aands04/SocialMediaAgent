@@ -379,6 +379,9 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
                 )
             )
         db.commit()
+        attention_post_id = attention_post.id
+        story_post_id = story_post.id
+        story_post_version = story_post.version
 
     default_page = client.get("/posts")
     assert default_page.status_code == 200
@@ -405,8 +408,47 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
     assert 'class="publication-preview"' in extended_page.text
     assert 'width="92" height="116"' in extended_page.text
 
+    story_page = client.get("/posts?days=14&format=story")
+    assert story_page.status_code == 200
+    assert story_page.text.count('data-publication-kind="story"') == 1
+    assert 'data-publication-kind="feed"' not in story_page.text
+    assert 'data-publication-kind="carousel"' not in story_page.text
+    assert '<option value="story" selected>' in story_page.text
+
+    feed_page = client.get("/posts?days=14&format=feed")
+    assert feed_page.status_code == 200
+    assert feed_page.text.count('data-publication-kind="feed"') == 2
+    assert feed_page.text.count('data-publication-kind="carousel"') == 1
+    assert 'data-publication-kind="story"' not in feed_page.text
+    assert '<option value="feed" selected>' in feed_page.text
+
     assert client.get("/posts?days=0").status_code == 422
     assert client.get("/posts?days=91").status_code == 422
+    assert client.get("/posts?format=video").status_code == 422
+
+    token = session_csrf(client)
+    rejected = client.post(
+        f"/posts/{attention_post_id}/reject",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 303
+    deleted = client.post(
+        f"/posts/{story_post_id}/delete",
+        data={
+            "csrf_token": token,
+            "version": story_post_version,
+            "confirmation": "BEITRAG LÖSCHEN",
+        },
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    with factory() as db:
+        assert db.get(Post, story_post_id) is None
+        rejected_post = db.get(Post, attention_post_id)
+        assert rejected_post.status == PostStatus.REJECTED
+        rejection_audit = db.query(AuditLog).filter_by(action="post.rejected").one()
+        assert rejection_audit.details["reason"] is None
 
 
 def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
@@ -887,7 +929,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260804-publication-plan" in teams_page
+    assert "/static/style.css?v=20260804-post-targeting" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text
@@ -1098,12 +1140,17 @@ def test_dashboard_admin_flow(browser):
         feed.status = __import__("app.models", fromlist=["JobStatus"]).JobStatus.PUBLISHED
         feed.platform_id = "published-feed"
         db.commit()
-    conflict = client.post(
+        published_feed_state = (feed.media_path, feed.version, feed.platform_id)
+        story_paths = {
+            job.id: job.media_path
+            for job in db.query(PublicationJob).filter_by(post_id=post.id, kind="story")
+        }
+    targeted_rerender = client.post(
         f"/posts/{post.id}/rerender",
         data={"csrf_token": token, "version": post_version, "story_job_ids": story_ids},
         follow_redirects=False,
     )
-    assert conflict.status_code == 303 and conflict.headers["location"].startswith(
+    assert targeted_rerender.status_code == 303 and targeted_rerender.headers["location"].startswith(
         "/generation-jobs/"
     )
     with factory() as db:
@@ -1114,14 +1161,14 @@ def test_dashboard_admin_flow(browser):
         )
         claimed = claim_next(db)
         assert claimed == queued.id
-        failed = process_generation_job(db, claimed, get_settings())
-        assert failed.status == GenerationJobStatus.FAILED
-        assert "Feed wurde bereits" in failed.error_message
-    with factory() as db:
+        completed = process_generation_job(db, claimed, get_settings())
+        assert completed.status == GenerationJobStatus.SUCCEEDED
+        db.expire_all()
         feed = db.query(PublicationJob).filter_by(post_id=post.id, kind="feed").one()
-        feed.status = __import__("app.models", fromlist=["JobStatus"]).JobStatus.UNAPPROVED
-        feed.platform_id = None
-        db.commit()
+        assert feed.status == __import__("app.models", fromlist=["JobStatus"]).JobStatus.PUBLISHED
+        assert (feed.media_path, feed.version, feed.platform_id) == published_feed_state
+        rerendered_stories = db.query(PublicationJob).filter_by(post_id=post.id, kind="story").all()
+        assert all(job.media_path != story_paths[job.id] for job in rerendered_stories)
     assert (
         client.post(
             f"/posts/{post.id}/rerender", data={"csrf_token": "wrong", "version": post_version}
@@ -1129,7 +1176,7 @@ def test_dashboard_admin_flow(browser):
         == 403
     )
     with factory() as db:
-        assert db.query(AuditLog).filter_by(action="generation.failed").count() == 1
+        assert db.query(AuditLog).filter_by(action="generation.succeeded").count() >= 1
     records = FussballDeProvider().parse(
         open("tests/fixtures/fussball_sv_ehlen_2627.html", encoding="utf-8").read()
     )

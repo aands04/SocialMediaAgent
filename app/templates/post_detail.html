@@ -103,11 +103,13 @@
     <label>Änderungsanweisung
       <textarea name="instruction" rows="5" minlength="10" maxlength="2000" required placeholder="Beispiel: Verwende eine emotionalere Bildstimmung mit Flutlicht. Der Spieler soll zentraler stehen. Formuliere den Begleittext enthusiastischer, ohne neue Fakten zu erfinden."></textarea>
     </label>
+    <p><strong>Genau auswählen, was neu erstellt werden soll:</strong></p>
     <label><input type="checkbox" name="revise_text" value="true"> Begleittext durch KI überarbeiten</label>
-    <label><input type="checkbox" name="revise_graphics" value="true" checked> Feed-Grafik durch KI neu erzeugen</label>
-    <p>Optional zusätzlich neu zu erzeugende Storys:</p>
+    {% for x in jobs if x.kind=='feed' and x.status.value!='published' %}
+      <label><input type="checkbox" name="revise_feed" value="true"> Feed-Grafik {{x.scheduled_at|berlin}} durch KI neu erzeugen</label>
+    {% endfor %}
     {% for x in jobs if x.kind=='story' and x.status.value!='published' %}
-      <label><input type="checkbox" name="story_job_ids" value="{{x.id}}" checked> Story {{x.scheduled_at|berlin}}</label>
+      <label><input type="checkbox" name="story_job_ids" value="{{x.id}}"> Story {{x.scheduled_at|berlin}} durch KI neu erzeugen</label>
     {% endfor %}
     <label>Spielerbild für die neue Bildversion
       <select name="media_asset_id">
@@ -131,8 +133,9 @@
 {% endif %}
 <form method="post" action="/posts/{{item.id}}/rerender">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
-  <fieldset><legend>Grafiken neu erzeugen</legend><p>Der Feed wird immer versioniert neu erzeugt. Storys auswählen:</p>
-    {% for x in jobs if x.kind=='story' %}<label><input type="checkbox" name="story_job_ids" value="{{x.id}}" checked> Story {{x.scheduled_at|berlin}}</label>{% endfor %}
+  <fieldset><legend>Grafiken neu erzeugen</legend><p>Wähle genau die neu zu erzeugenden Grafiken aus:</p>
+    {% for x in jobs if x.kind=='feed' and x.status.value!='published' %}<label><input type="checkbox" name="rerender_feed" value="true"> Feed {{x.scheduled_at|berlin}}</label>{% endfor %}
+    {% for x in jobs if x.kind=='story' and x.status.value!='published' %}<label><input type="checkbox" name="story_job_ids" value="{{x.id}}"> Story {{x.scheduled_at|berlin}}</label>{% endfor %}
     <label>Spielerbild für die Neugenerierung
       <select name="media_asset_id">
         {% if current_media_asset %}<option value="{{current_media_asset.id}}" selected>Bisheriges Bild beibehalten: {{current_media_asset.filename}}</option>{% endif %}
@@ -185,18 +188,14 @@
   <button class="approve">Ausgewählte Aufträge ausdrücklich freigeben</button>
 </form>
 <form method="post" action="/posts/{{item.id}}/reject">
-  <input type="hidden" name="csrf_token" value="{{csrf}}"><label>Ablehnungsgrund<input name="reason" required></label><button class="danger">Ablehnen</button>
+  <input type="hidden" name="csrf_token" value="{{csrf}}"><label>Ablehnungsgrund (optional)<input name="reason"></label><button class="danger">Ablehnen</button>
 </form>
 {% if item.status.value not in ['published','partially_published'] %}
 <form method="post" action="/posts/{{item.id}}/delete" onsubmit="return confirm('Diesen unveröffentlichten Beitrag und seine Aufträge wirklich dauerhaft löschen?');">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
-  <fieldset>
-    <legend>Beitrag dauerhaft löschen</legend>
-    <p>Nur vollständig unveröffentlichte Beiträge können gelöscht werden. Laufende Generierungs- oder Plattformvorgänge müssen vorher abgeschlossen oder abgebrochen sein. Das Audit-Protokoll bleibt erhalten.</p>
-    <label>Löschbegründung<input name="reason" required></label>
-    <label>Zur Bestätigung <strong>BEITRAG LÖSCHEN</strong> eingeben<input name="confirmation" required></label>
-    <button class="danger">Beitrag und unveröffentlichte Aufträge löschen</button>
-  </fieldset>
+  <input type="hidden" name="confirmation" value="BEITRAG LÖSCHEN">
+  <button class="danger">Beitrag löschen</button>
+  <small>Nur vollständig unveröffentlichte Beiträge können gelöscht werden. Vor dem Löschen folgt eine Sicherheitsabfrage.</small>
 </form>
 {% else %}
 <div class="warning">Dieser Beitrag wurde bereits ganz oder teilweise veröffentlicht und kann deshalb nicht gelöscht werden.</div>
