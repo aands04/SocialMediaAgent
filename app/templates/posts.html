@@ -9,11 +9,11 @@
       {% if post and job.kind == 'carousel' and media %}
         <div class="publication-carousel-preview" aria-label="Karussell mit {{ media|length }} Bildern">
           {% for image in media[:3] %}
-            <img src="/posts/{{ post.id }}/media/{{ job.id }}/items/{{ image.id }}" alt="Karussellbild {{ image.position }}" loading="lazy">
+            <img src="/posts/{{ post.id }}/media/{{ job.id }}/items/{{ image.id }}" alt="Karussellbild {{ image.position }}" width="62" height="92" loading="lazy">
           {% endfor %}
         </div>
       {% elif post and job.kind in ['feed', 'story'] %}
-        <img class="publication-preview" src="/posts/{{ post.id }}/media/{{ job.id }}" alt="{{ format_labels.get(job.kind, job.kind) }}-Vorschau" loading="lazy">
+        <img class="publication-preview" src="/posts/{{ post.id }}/media/{{ job.id }}" alt="{{ format_labels.get(job.kind, job.kind) }}-Vorschau" width="92" height="116" loading="lazy">
       {% else %}
         <span class="publication-no-preview">Keine Vorschau</span>
       {% endif %}

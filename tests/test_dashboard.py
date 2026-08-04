@@ -401,6 +401,9 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
     assert "Karussell" in extended_page.text
     assert "3 Bilder" in extended_page.text
     assert extended_page.text.count("Karussellbild") == 3
+    assert extended_page.text.count('width="62" height="92"') == 3
+    assert 'class="publication-preview"' in extended_page.text
+    assert 'width="92" height="116"' in extended_page.text
 
     assert client.get("/posts?days=0").status_code == 422
     assert client.get("/posts?days=91").status_code == 422
@@ -884,7 +887,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260731-player-uploads" in teams_page
+    assert "/static/style.css?v=20260804-publication-plan" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text
