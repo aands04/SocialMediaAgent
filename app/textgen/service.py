@@ -15,6 +15,8 @@ class GeneratedText:
 class TextGenerator:
     is_ai = False
     def generate(self,data:dict)->GeneratedText: raise NotImplementedError
+    def revise(self,data:dict,current_text:str,instruction:str)->GeneratedText:
+        raise NotImplementedError
 class FixtureTextGenerator(TextGenerator):
     def generate(self,data:dict)->GeneratedText:
         kickoff=datetime.fromisoformat(data["kickoff"]) if isinstance(data["kickoff"],str) else data["kickoff"]
@@ -26,6 +28,12 @@ class FixtureTextGenerator(TextGenerator):
             result=f"{data['home_team']} trifft {when} auf {data['away_team']}."
         if data.get("venue"): result+=f" Spielort: {data['venue']}."
         return GeneratedText(result+" "+" ".join(data.get("hashtags",[])),"fixture")
+    def revise(self,data:dict,current_text:str,instruction:str)->GeneratedText:
+        return GeneratedText(
+            current_text.rstrip()+f"\n\n[Fixture-Änderungswunsch: {instruction.strip()}]",
+            "fixture",
+            prompt_version="revision-fixture-v1",
+        )
 class OpenAITextGenerator(TextGenerator):
     is_ai = True
     def __init__(self,key:str,model:str): self.client=OpenAI(api_key=key); self.model=model
@@ -41,3 +49,32 @@ class OpenAITextGenerator(TextGenerator):
             model=self.model
         response=self.client.responses.create(model=model,input=rendered)
         return GeneratedText(response.output_text,model,prompt_version=version,tokens=getattr(getattr(response,"usage",None),"total_tokens",None),rendered_prompt=rendered)
+    def revise(self,data:dict,current_text:str,instruction:str)->GeneratedText:
+        allowed_facts={
+            key:data.get(key)
+            for key in (
+                "home_team","away_team","own_team","kickoff","venue","pitch",
+                "competition","post_type","hashtags","side_label","score",
+            )
+            if data.get(key) not in (None,"")
+        }
+        rendered=(
+            "VERBINDLICHE REGELN:\n"
+            "- Überarbeite den vorhandenen deutschen Instagram-Begleittext gemäß "
+            "dem Änderungsauftrag.\n"
+            "- Verwende ausschließlich die angegebenen Fakten und den vorhandenen Text.\n"
+            "- Erfinde keinen Spielverlauf, keine Personen, Ergebnisse, Zitate oder sonstigen Fakten.\n"
+            "- Mannschaftsnamen, Datum, Uhrzeit, Wettbewerb und Spielort dürfen nicht verfälscht werden.\n"
+            "- Gib ausschließlich den vollständigen, direkt kopierbaren neuen Begleittext aus.\n\n"
+            f"FAKTEN:\n{allowed_facts!r}\n\n"
+            f"VORHANDENER TEXT:\n{current_text}\n\n"
+            f"ÄNDERUNGSAUFTRAG:\n{instruction.strip()}"
+        )
+        response=self.client.responses.create(model=self.model,input=rendered)
+        return GeneratedText(
+            response.output_text,
+            self.model,
+            prompt_version="ai-revision-v1",
+            tokens=getattr(getattr(response,"usage",None),"total_tokens",None),
+            rendered_prompt=rendered,
+        )

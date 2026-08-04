@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,6 +28,19 @@ from app.textgen.service import TextGenerator
 
 class RerenderConflict(ValueError):
     pass
+
+
+def _revision_prompt(prompt, instruction: str | None):
+    """Append a user-requested change without weakening the frozen safety prompt."""
+    if not prompt or not instruction:
+        return prompt
+    addition = (
+        "\n\nZUSÄTZLICHER ÄNDERUNGSAUFTRAG FÜR DIESE NEUE VERSION:\n"
+        + instruction.strip()
+        + "\nSetze diesen Wunsch nur um, soweit er den oben stehenden Fakten-, "
+        "Identitäts-, Logo- und Sicherheitsregeln nicht widerspricht."
+    )
+    return replace(prompt, rendered=prompt.rendered + addition)
 
 
 def reserve_image(db:Session,team_id:str,game_id:str)->MediaAsset|None:
@@ -203,7 +217,7 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
     post.critical_warnings=warnings; post.status=PostStatus.INCOMPLETE if warnings else PostStatus.PENDING; db.commit(); return post
 
 
-def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]|None=None,logo_snapshot:dict|None=None,media_asset_id:str|None=None)->Post:
+def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]|None=None,logo_snapshot:dict|None=None,media_asset_id:str|None=None,revision_instruction:str|None=None)->Post:
     game=db.get(Game,post.game_id); team=db.get(Team,post.team_id); asset=db.get(MediaAsset,post.media_asset_id) if post.media_asset_id else None
     if not game or not team: raise ValueError("Beitrag hat keine gültigen Spiel- oder Mannschaftsdaten")
     jobs=list(db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id).with_for_update())); selected=set(story_job_ids or [])
@@ -244,6 +258,7 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
     feed_design=_design(db,team.feed_template,post.post_type,"feed"); post.feed_version+=1
     feed_prompt_name=team.rules.get(f"image_prompt_feed_{post.post_type}",team.rules.get("image_prompt_feed","default-image-feed"))
     feed_prompt=resolve_prompt(db,feed_prompt_name,"image",post.post_type,"feed",facts) if getattr(renderer,"is_ai",False) else None
+    feed_prompt=_revision_prompt(feed_prompt,revision_instruction)
     post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v{post.feed_version}.png",{**facts,"template":feed_design,"image_prompt":feed_prompt}))
     for job in jobs:
         if job.kind=="feed":
@@ -255,6 +270,7 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
             if not story_prompt_name or story_prompt_name=="default-image-story":
                 story_prompt_name=team.rules.get(f"image_prompt_story_{post.post_type}",team.rules.get("image_prompt_story","default-image-story"))
             story_prompt=resolve_prompt(db,story_prompt_name,"image",post.post_type,"story",facts) if getattr(renderer,"is_ai",False) else None
+            story_prompt=_revision_prompt(story_prompt,revision_instruction)
             job.media_path=str(renderer.render("story",f"{post.id}/story-{job.story_rule_id}-v{media_version}.png",{**facts,"template":design,"image_prompt":story_prompt})); job.version+=1; job.idempotency_key=f"{post.id}:story:{job.story_rule_id}:v{media_version}"
             snapshots[job.story_rule_id]={"rule_id":job.story_rule_id,"template":design,"prompt":story_prompt.snapshot() if story_prompt else None,"media_version":media_version,"rendering":renderer.metadata_for(job.media_path) if hasattr(renderer,"metadata_for") else {}}
     raw_prompts=old_snapshot.get("prompts")
@@ -286,6 +302,127 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
             if job.status!=JobStatus.PUBLISHED:
                 job.status=JobStatus.UNAPPROVED; job.approval_status="reapproval_required"; job.approved_post_version=None; job.error="Grafiken wurden neu erzeugt; erneute Freigabe erforderlich"
     db.flush(); return post
+
+
+def revise_post(
+    db: Session,
+    post: Post,
+    *,
+    instruction: str,
+    revise_text: bool,
+    revise_graphics: bool,
+    text_generator: TextGenerator | None = None,
+    renderer: Renderer | None = None,
+    story_job_ids: list[str] | None = None,
+    logo_snapshot: dict | None = None,
+    media_asset_id: str | None = None,
+) -> Post:
+    """Apply a persistent AI revision while preserving published outputs."""
+    instruction = instruction.strip()
+    if not 10 <= len(instruction) <= 2000:
+        raise ValueError("Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein")
+    if not revise_text and not revise_graphics:
+        raise ValueError("Bitte mindestens Begleittext oder Grafiken auswählen")
+    if revise_text and text_generator is None:
+        raise ValueError("Textgenerator fehlt")
+    if revise_graphics and renderer is None:
+        raise ValueError("Bildgenerator fehlt")
+
+    game = db.get(Game, post.game_id)
+    team = db.get(Team, post.team_id)
+    if not game or not team:
+        raise ValueError("Beitrag hat keine gültigen Spiel- oder Mannschaftsdaten")
+    jobs = list(
+        db.scalars(
+            select(PublicationJob)
+            .where(PublicationJob.post_id == post.id)
+            .with_for_update()
+        )
+    )
+    if revise_text and any(
+        job.kind in {"feed", "carousel"}
+        and (
+            job.status == JobStatus.PUBLISHED
+            or job.platform_id
+            or job.published_at
+        )
+        for job in jobs
+    ):
+        raise RerenderConflict(
+            "Der Feed wurde bereits veröffentlicht; sein Begleittext darf nicht per KI geändert werden"
+        )
+
+    previous_status = post.status
+    generated_text = None
+    if revise_graphics:
+        post = rerender_post(
+            db,
+            post,
+            renderer,
+            story_job_ids,
+            logo_snapshot,
+            media_asset_id,
+            instruction,
+        )
+
+    if revise_text:
+        asset = db.get(MediaAsset, post.media_asset_id) if post.media_asset_id else None
+        facts = _facts(db, game, team, asset, post.post_type, logo_snapshot)
+        generated_text = text_generator.revise(facts, post.text or "", instruction)
+        post.text = generated_text.text
+        post.text_version += 1
+        for publication in jobs:
+            if publication.status == JobStatus.PUBLISHED:
+                continue
+            if publication.kind in {"feed", "carousel"} or publication.text_snapshot is not None:
+                publication.text_snapshot = post.text
+
+    if not revise_graphics:
+        post.version += 1
+
+    was_approved = previous_status in {
+        PostStatus.APPROVED,
+        PostStatus.SCHEDULED,
+        PostStatus.PARTIAL,
+    }
+    post.approved_version = None
+    post.approved_by = None
+    post.approved_at = None
+    post.status = (
+        PostStatus.REAPPROVAL
+        if was_approved
+        else (PostStatus.INCOMPLETE if post.critical_warnings else PostStatus.PENDING)
+    )
+    approval_status = "reapproval_required" if was_approved else "unapproved"
+    for publication in jobs:
+        if publication.status == JobStatus.PUBLISHED:
+            continue
+        publication.status = JobStatus.UNAPPROVED
+        publication.approval_status = approval_status
+        publication.approved_post_version = None
+        publication.error = "KI-Änderungen wurden erzeugt; erneute Freigabe erforderlich"
+
+    snapshot = _normalize_design_snapshot(post.design_snapshot)
+    revisions = [
+        dict(entry)
+        for entry in snapshot.get("ai_revisions", [])
+        if isinstance(entry, dict)
+    ]
+    revisions.append(
+        {
+            "instruction": instruction,
+            "text": revise_text,
+            "graphics": revise_graphics,
+            "text_model": generated_text.model if generated_text else None,
+            "text_prompt_version": generated_text.prompt_version if generated_text else None,
+            "text_tokens": generated_text.tokens if generated_text else None,
+            "post_version": post.version,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    post.design_snapshot = {**snapshot, "ai_revisions": revisions}
+    db.flush()
+    return post
 
 
 def _safe_generated_base(value: str | None) -> Path:

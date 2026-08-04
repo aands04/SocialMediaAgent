@@ -35,6 +35,7 @@ from app.posts.service import (
     logo_recompose_preflight,
     recompose_post_logos,
     rerender_post,
+    revise_post,
 )
 
 log = structlog.get_logger()
@@ -67,6 +68,12 @@ class _ProgressTextGenerator:
     def generate(self, facts):
         _phase(self.db, self.job, "generating_text", 10)
         result = self.inner.generate(facts)
+        _check_cancel(self.db, self.job)
+        return result
+
+    def revise(self, facts, current_text, instruction):
+        _phase(self.db, self.job, "generating_text", 10)
+        result = self.inner.revise(facts, current_text, instruction)
         _check_cancel(self.db, self.job)
         return result
 
@@ -268,6 +275,108 @@ def enqueue_rerender(
             return existing
         raise
     _audit(db, job, "generation.queued", {"job_type": job.job_type.value})
+    db.commit()
+    return job
+
+
+def enqueue_ai_revision(
+    db: Session,
+    post: Post,
+    user: User,
+    expected_version: int,
+    instruction: str,
+    *,
+    revise_text: bool,
+    revise_graphics: bool,
+    story_job_ids: list[str],
+    media_asset_id: str | None = None,
+) -> GenerationJob:
+    instruction = instruction.strip()
+    if not 10 <= len(instruction) <= 2000:
+        raise ValueError("Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein")
+    if not revise_text and not revise_graphics:
+        raise ValueError("Bitte mindestens Begleittext oder Grafiken auswählen")
+    if not post.game_id:
+        raise ValueError("Nur spielbezogene KI-Beiträge können durch KI geändert werden")
+    selected = sorted(set(story_job_ids)) if revise_graphics else []
+    digest = hashlib.sha256(
+        repr(
+            (
+                expected_version,
+                instruction,
+                revise_text,
+                revise_graphics,
+                selected,
+                media_asset_id or post.media_asset_id,
+            )
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    key = f"ai-revision:{post.id}:{digest}"
+    active_key = f"rerender:{post.id}"
+    existing = db.scalar(
+        select(GenerationJob).where(
+            or_(
+                GenerationJob.active_key == active_key,
+                GenerationJob.idempotency_key == key,
+            )
+        )
+    )
+    if existing:
+        return existing
+    game = db.get(Game, post.game_id)
+    team = db.get(Team, post.team_id)
+    if not game or not team:
+        raise ValueError("Spiel oder Mannschaft ist nicht mehr vorhanden")
+    job = GenerationJob(
+        job_type=GenerationJobType.RERENDER_POST,
+        game_id=game.id,
+        team_id=team.id,
+        post_id=post.id,
+        post_type=post.post_type,
+        requested_by=user.id,
+        status=GenerationJobStatus.QUEUED,
+        phase="preparing",
+        planned_outputs=(1 + len(selected)) if revise_graphics else 1,
+        idempotency_key=key,
+        active_key=active_key,
+        parameters={
+            "operation": "ai_revision",
+            "expected_post_version": expected_version,
+            "instruction": instruction,
+            "revise_text": revise_text,
+            "revise_graphics": revise_graphics,
+            "story_job_ids": selected,
+            "media_asset_id": media_asset_id or post.media_asset_id,
+            "logos": frozen_logo_set(db, game, team),
+        },
+    )
+    db.add(job)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(
+            select(GenerationJob).where(
+                or_(
+                    GenerationJob.active_key == active_key,
+                    GenerationJob.idempotency_key == key,
+                )
+            )
+        )
+        if existing:
+            return existing
+        raise
+    _audit(
+        db,
+        job,
+        "generation.ai_revision_queued",
+        {
+            "post_id": post.id,
+            "revise_text": revise_text,
+            "revise_graphics": revise_graphics,
+            "story_count": len(selected),
+        },
+    )
     db.commit()
     return job
 
@@ -510,13 +619,20 @@ def process_generation_job(
             raise ValueError(
                 "Das Spiel ist vorläufig, abgesagt, verschoben oder für Automatisierung gesperrt."
             )
-        logos = dict((job.parameters or {}).get("logos") or {})
-        if settings.image_generator_mode == "openai" and not logos.get("team"):
+        parameters = dict(job.parameters or {})
+        logos = dict(parameters.get("logos") or {})
+        needs_images = (
+            job.job_type == GenerationJobType.CREATE_POST
+            or parameters.get("recompose_only")
+            or parameters.get("operation") != "ai_revision"
+            or bool(parameters.get("revise_graphics"))
+        )
+        if needs_images and settings.image_generator_mode == "openai" and not logos.get("team"):
             raise LogoValidationError(
                 "Eigenes Mannschaftslogo fehlt. Bitte zuerst ein verifiziertes Teamlogo zuordnen."
             )
-        team_logo = validate_frozen_logo(db, logos.get("team"), "team")
-        opponent_logo = validate_frozen_logo(db, logos.get("opponent"), "opponent")
+        team_logo = validate_frozen_logo(db, logos.get("team"), "team") if needs_images else None
+        opponent_logo = validate_frozen_logo(db, logos.get("opponent"), "opponent") if needs_images else None
         if team_logo and team.logo_asset_id != team_logo.id:
             raise LogoValidationError(
                 "Das eingefrorene Mannschaftslogo ist dieser Mannschaft nicht mehr zugeordnet."
@@ -525,7 +641,7 @@ def process_generation_job(
             raise LogoValidationError(
                 "Das eingefrorene Gegnerlogo ist diesem Spiel nicht mehr zugeordnet."
             )
-        if (
+        if needs_images and (
             not opponent_logo
             and (logos.get("opponent") or {}).get("fallback")
             and game.opponent_logo_id
@@ -533,8 +649,9 @@ def process_generation_job(
             raise LogoValidationError(
                 "Die Gegnerlogo-Zuordnung wurde nach dem Einreihen geändert."
             )
-        validate_frozen_file(team_logo, settings.upload_root)
-        validate_frozen_file(opponent_logo, settings.upload_root)
+        if needs_images:
+            validate_frozen_file(team_logo, settings.upload_root)
+            validate_frozen_file(opponent_logo, settings.upload_root)
         _phase(db, job, "preparing", 5)
         if job.job_type == GenerationJobType.CREATE_POST:
             renderer = _ProgressRenderer(build_renderer(settings), db, job)
@@ -560,7 +677,38 @@ def process_generation_job(
                     "Der Beitrag wurde seit dem Einreihen verändert; es wurden keine "
                     "neuen Dateien erzeugt."
                 )
-            if job.parameters.get("recompose_only"):
+            if parameters.get("operation") == "ai_revision":
+                post = revise_post(
+                    db,
+                    post,
+                    instruction=str(parameters.get("instruction") or ""),
+                    revise_text=bool(parameters.get("revise_text")),
+                    revise_graphics=bool(parameters.get("revise_graphics")),
+                    text_generator=(
+                        _ProgressTextGenerator(build_text_generator(settings), db, job)
+                        if parameters.get("revise_text")
+                        else None
+                    ),
+                    renderer=(
+                        _ProgressRenderer(build_renderer(settings), db, job)
+                        if parameters.get("revise_graphics")
+                        else None
+                    ),
+                    story_job_ids=list(parameters.get("story_job_ids", [])),
+                    logo_snapshot=logos,
+                    media_asset_id=parameters.get("media_asset_id"),
+                )
+                _audit(
+                    db,
+                    job,
+                    "post.ai_revision_completed",
+                    {
+                        "post_id": post.id,
+                        "revise_text": bool(parameters.get("revise_text")),
+                        "revise_graphics": bool(parameters.get("revise_graphics")),
+                    },
+                )
+            elif job.parameters.get("recompose_only"):
                 _phase(db, job, "compositing_logos", 35)
                 post = recompose_post_logos(
                     db,
