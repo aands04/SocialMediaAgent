@@ -2,13 +2,14 @@
 {% block content %}
 <h1>Beitrag manuell erstellen</h1>
 <div class="warning">
-  Die Bilder werden nicht durch KI verändert. Der Beitrag wird zunächst nur als
-  Entwurf zur Prüfung angelegt und erst nach ausdrücklicher Freigabe veröffentlicht.
+  Die Bilder werden nicht durch KI verändert. Ausschnitt und Skalierung werden kontrolliert angewendet.
+  Der Beitrag wird zunächst nur als Entwurf zur Prüfung angelegt und erst nach ausdrücklicher Freigabe veröffentlicht.
 </div>
 {% if teams %}
-<form method="post" action="/posts/manual/new" enctype="multipart/form-data">
+<form id="manual-post-form" method="post" action="/posts/manual/new" enctype="multipart/form-data">
   <input type="hidden" name="csrf_token" value="{{ csrf }}">
   <input type="hidden" name="submission_id" value="{{ submission_id }}">
+  <input type="hidden" name="crop_specs" id="manual-crop-specs" value="">
   <section>
     <div class="columns">
       <label>Mannschaft
@@ -38,10 +39,10 @@
         required
       >
     </label>
-    <div id="manual-image-order" class="card-list"></div>
     <small id="manual-size-hint">
-      Das Bild muss für einen Feed exakt 1080 × 1350 Pixel groß sein. Erlaubt sind JPG, PNG und WebP bis 20 MiB.
+      Du kannst ein JPG, PNG oder WebP bis 20 MiB in einer anderen Größe hochladen und den Ausschnitt anschließend festlegen.
     </small>
+    <div id="manual-image-order" class="card-list" style="margin-top: 1rem;"></div>
     <label>Text
       <textarea name="text" rows="10" maxlength="2200" required></textarea>
     </label>
@@ -54,65 +55,210 @@
   </section>
 </form>
 <script>
+  const form = document.getElementById('manual-post-form');
   const kind = document.getElementById('manual-kind');
   const hint = document.getElementById('manual-size-hint');
   const images = document.getElementById('manual-images');
   const order = document.getElementById('manual-image-order');
+  const cropSpecs = document.getElementById('manual-crop-specs');
   let selected = [];
+
+  function targetRatio() {
+    return kind.value === 'story' ? 1080 / 1920 : 1080 / 1350;
+  }
 
   function syncFiles() {
     const transfer = new DataTransfer();
-    selected.forEach(file => transfer.items.add(file));
+    selected.forEach(item => transfer.items.add(item.file));
     images.files = transfer.files;
+  }
+
+  function calculateCrop(item) {
+    const sourceWidth = item.image.naturalWidth;
+    const sourceHeight = item.image.naturalHeight;
+    const ratio = targetRatio();
+    let baseWidth;
+    let baseHeight;
+    if (sourceWidth / sourceHeight > ratio) {
+      baseHeight = sourceHeight;
+      baseWidth = baseHeight * ratio;
+    } else {
+      baseWidth = sourceWidth;
+      baseHeight = baseWidth / ratio;
+    }
+    const cropWidth = baseWidth / item.zoom;
+    const cropHeight = baseHeight / item.zoom;
+    const left = (sourceWidth - cropWidth) * ((item.panX + 100) / 200);
+    const top = (sourceHeight - cropHeight) * ((item.panY + 100) / 200);
+    return {
+      x: left / sourceWidth,
+      y: top / sourceHeight,
+      width: cropWidth / sourceWidth,
+      height: cropHeight / sourceHeight,
+    };
+  }
+
+  function syncCropSpecs() {
+    cropSpecs.value = JSON.stringify(selected.map(item => item.loaded ? calculateCrop(item) : null));
+  }
+
+  function drawPreview(item, canvas) {
+    if (!item.loaded) return;
+    const crop = calculateCrop(item);
+    const sourceWidth = item.image.naturalWidth;
+    const sourceHeight = item.image.naturalHeight;
+    const context = canvas.getContext('2d');
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(
+      item.image,
+      crop.x * sourceWidth,
+      crop.y * sourceHeight,
+      crop.width * sourceWidth,
+      crop.height * sourceHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    );
+    syncCropSpecs();
+  }
+
+  function makeSlider(labelText, min, max, step, value, onInput) {
+    const label = document.createElement('label');
+    label.style.margin = '0.35rem 0';
+    label.textContent = labelText;
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = min;
+    input.max = max;
+    input.step = step;
+    input.value = value;
+    input.addEventListener('input', () => onInput(Number(input.value)));
+    label.appendChild(input);
+    return label;
   }
 
   function renderOrder() {
     order.innerHTML = '';
-    selected.forEach((file, index) => {
-      const row = document.createElement('div');
-      row.className = 'notice';
-      const name = document.createElement('span');
-      name.textContent = `${index + 1}. ${file.name}`;
-      row.appendChild(name);
-      [['↑', -1], ['↓', 1]].forEach(([label, delta]) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = label;
-        button.disabled = index + delta < 0 || index + delta >= selected.length;
-        button.addEventListener('click', () => {
-          [selected[index], selected[index + delta]] = [selected[index + delta], selected[index]];
-          syncFiles();
-          renderOrder();
+    const ratio = targetRatio();
+    selected.forEach((item, index) => {
+      const card = document.createElement('div');
+      card.className = 'notice';
+      card.style.display = 'grid';
+      card.style.gridTemplateColumns = 'minmax(160px, 240px) minmax(220px, 1fr)';
+      card.style.gap = '1rem';
+      card.style.alignItems = 'start';
+
+      const canvas = document.createElement('canvas');
+      canvas.className = 'manual-crop-canvas';
+      canvas.width = 240;
+      canvas.height = Math.round(240 / ratio);
+      canvas.style.width = 'min(240px, 100%)';
+      canvas.style.height = 'auto';
+      canvas.style.background = '#172554';
+      canvas.setAttribute('aria-label', `Zuschnittvorschau für ${item.file.name}`);
+      card.appendChild(canvas);
+
+      const controls = document.createElement('div');
+      const title = document.createElement('strong');
+      title.textContent = `${index + 1}. ${item.file.name}`;
+      controls.appendChild(title);
+      const dimensions = document.createElement('div');
+      dimensions.textContent = item.loaded
+        ? `Original: ${item.image.naturalWidth} × ${item.image.naturalHeight} Pixel · Ausgabe: ${kind.value === 'story' ? '1080 × 1920' : '1080 × 1350'} Pixel`
+        : 'Bild wird geladen …';
+      controls.appendChild(dimensions);
+      controls.appendChild(makeSlider('Zoom', 1, 3, 0.01, item.zoom, value => {
+        item.zoom = value;
+        drawPreview(item, canvas);
+      }));
+      controls.appendChild(makeSlider('Horizontaler Ausschnitt', -100, 100, 1, item.panX, value => {
+        item.panX = value;
+        drawPreview(item, canvas);
+      }));
+      controls.appendChild(makeSlider('Vertikaler Ausschnitt', -100, 100, 1, item.panY, value => {
+        item.panY = value;
+        drawPreview(item, canvas);
+      }));
+
+      if (kind.value === 'carousel') {
+        [['↑ Nach oben', -1], ['↓ Nach unten', 1]].forEach(([label, delta]) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = label;
+          button.disabled = index + delta < 0 || index + delta >= selected.length;
+          button.style.marginRight = '0.5rem';
+          button.addEventListener('click', () => {
+            [selected[index], selected[index + delta]] = [selected[index + delta], selected[index]];
+            syncFiles();
+            renderOrder();
+          });
+          controls.appendChild(button);
         });
-        row.appendChild(button);
-      });
-      order.appendChild(row);
+      }
+      card.appendChild(controls);
+      order.appendChild(card);
+      drawPreview(item, canvas);
     });
+    syncCropSpecs();
   }
 
   function updateKind() {
     const carousel = kind.value === 'carousel';
     images.multiple = carousel;
     hint.textContent = kind.value === 'story'
-      ? 'Das Bild muss für eine Story exakt 1080 × 1920 Pixel groß sein. Erlaubt sind JPG, PNG und WebP bis 20 MiB.'
+      ? 'Story-Ausgabe: 1080 × 1920 Pixel. Andere Ausgangsgrößen sind erlaubt; richte den Ausschnitt unten aus.'
       : carousel
-        ? 'Wähle 2 bis 10 Bilder mit exakt 1080 × 1350 Pixel. Die angezeigte Reihenfolge ist die Instagram-Reihenfolge.'
-        : 'Das Bild muss für einen Feed exakt 1080 × 1350 Pixel groß sein. Erlaubt sind JPG, PNG und WebP bis 20 MiB.';
+        ? 'Wähle 2 bis 10 Bilder. Jedes Bild wird separat auf 1080 × 1350 Pixel zugeschnitten; die Reihenfolge ist die Instagram-Reihenfolge.'
+        : 'Feed-Ausgabe: 1080 × 1350 Pixel. Andere Ausgangsgrößen sind erlaubt; richte den Ausschnitt unten aus.';
     if (!carousel && selected.length > 1) {
+      selected.slice(1).forEach(item => URL.revokeObjectURL(item.url));
       selected = selected.slice(0, 1);
       syncFiles();
-      renderOrder();
     }
+    renderOrder();
   }
 
   images.addEventListener('change', () => {
-    selected = Array.from(images.files);
-    if (kind.value === 'carousel' && selected.length > 10) {
-      selected = selected.slice(0, 10);
+    selected.forEach(item => URL.revokeObjectURL(item.url));
+    let files = Array.from(images.files);
+    if (kind.value === 'carousel' && files.length > 10) {
+      files = files.slice(0, 10);
       alert('Ein Karussell unterstützt höchstens 10 Bilder.');
     }
+    selected = files.map(file => {
+      const item = {
+        file,
+        url: URL.createObjectURL(file),
+        image: new Image(),
+        loaded: false,
+        zoom: 1,
+        panX: 0,
+        panY: 0,
+      };
+      item.image.onload = () => {
+        item.loaded = true;
+        renderOrder();
+      };
+      item.image.onerror = () => {
+        item.loaded = false;
+        alert(`Das Bild ${file.name} kann im Browser nicht gelesen werden.`);
+      };
+      item.image.src = item.url;
+      return item;
+    });
     syncFiles();
     renderOrder();
+  });
+
+  form.addEventListener('submit', event => {
+    if (selected.some(item => !item.loaded)) {
+      event.preventDefault();
+      alert('Bitte warte, bis alle Bildvorschauen geladen wurden.');
+      return;
+    }
+    syncFiles();
+    syncCropSpecs();
   });
   kind.addEventListener('change', updateKind);
   updateKind();

@@ -62,6 +62,7 @@ from app.posts.manual import (
     MAX_MANUAL_IMAGE_BYTES,
     ManualPostError,
     create_manual_post,
+    parse_manual_crop_specs,
     parse_manual_publication_time,
     validate_manual_image,
 )
@@ -1388,6 +1389,7 @@ async def create_manual_post_route(
     kind: str = Form(),
     text_value: str = Form(alias="text"),
     scheduled_at_value: str = Form(alias="scheduled_at"),
+    crop_specs_value: str = Form(default="", alias="crop_specs"),
     images: list[UploadFile] = File(),
     current=Depends(current_user),
     db: Session = Depends(get_db),
@@ -1402,12 +1404,13 @@ async def create_manual_post_route(
             raise ManualPostError("Ein Karussell benötigt 2 bis 10 Bilder")
         if kind != "carousel" and len(images) != 1:
             raise ManualPostError("Feed und Story benötigen genau ein Bild")
+        crop_specs = parse_manual_crop_specs(crop_specs_value, len(images))
         validated = []
-        for image in images:
+        for image, crop in zip(images, crop_specs, strict=True):
             content = await image.read(MAX_MANUAL_IMAGE_BYTES + 1)
             validated.append(
                 validate_manual_image(
-                    image.filename or "", image.content_type, content, kind
+                    image.filename or "", image.content_type, content, kind, crop
                 )
             )
         scheduled_at = parse_manual_publication_time(

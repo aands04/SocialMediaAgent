@@ -23,6 +23,7 @@ from app.models import (
 from app.posts.manual import (
     ManualPostError,
     create_manual_post,
+    parse_manual_crop_specs,
     parse_manual_publication_time,
     validate_manual_image,
 )
@@ -80,9 +81,7 @@ def setup_manual_context(db):
 
 def test_manual_feed_uses_normal_approval_and_dry_run_publishing(db, tmp_path):
     user, _page, team = setup_manual_context(db)
-    image = validate_manual_image(
-        "upload.png", "image/png", image_bytes(), "feed"
-    )
+    image = validate_manual_image("upload.png", "image/png", image_bytes(), "feed")
     post, created = create_manual_post(
         db,
         Settings(
@@ -106,6 +105,11 @@ def test_manual_feed_uses_normal_approval_and_dry_run_publishing(db, tmp_path):
     assert job.kind == "feed"
     assert job.status == JobStatus.UNAPPROVED
     assert job.text_snapshot == post.text
+    image_snapshot = post.design_snapshot["manual_upload"]["images"][0]
+    original_path = Path(image_snapshot["original_path"])
+    assert original_path.read_bytes() == image_bytes()
+    assert image_snapshot["source_width"] == 1080
+    assert image_snapshot["source_height"] == 1350
 
     duplicate, created_again = create_manual_post(
         db,
@@ -134,13 +138,13 @@ def test_manual_feed_uses_normal_approval_and_dry_run_publishing(db, tmp_path):
     assert post.status == PostStatus.PUBLISHED
 
 
-def test_manual_story_has_no_platform_caption_and_needs_exact_dimensions(db, tmp_path):
+def test_manual_story_crops_other_dimensions_and_has_no_platform_caption(db, tmp_path):
     user, _page, team = setup_manual_context(db)
-    with pytest.raises(ManualPostError, match="1080 × 1920"):
-        validate_manual_image("wrong.png", "image/png", image_bytes(), "story")
     story_image = validate_manual_image(
-        "story.webp", "image/webp", image_bytes((1080, 1920), "WEBP"), "story"
+        "story.webp", "image/webp", image_bytes((1400, 1000), "WEBP"), "story"
     )
+    assert (story_image.width, story_image.height) == (1080, 1920)
+    assert (story_image.source_width, story_image.source_height) == (1400, 1000)
     post, _ = create_manual_post(
         db,
         Settings(
@@ -161,6 +165,35 @@ def test_manual_story_has_no_platform_caption_and_needs_exact_dimensions(db, tmp
     assert job.text_snapshot is None
     approve(db, post, user)
     assert job.status == JobStatus.SCHEDULED
+
+
+def test_manual_image_uses_selected_crop_and_preserves_original():
+    source = Image.new("RGB", (2000, 1000), (220, 30, 30))
+    ImageDraw.Draw(source).rectangle((1200, 0, 1999, 999), fill=(20, 70, 220))
+    buffer = BytesIO()
+    source.save(buffer, "PNG")
+    payload = buffer.getvalue()
+    crop = {"x": 0.6, "y": 0, "width": 0.4, "height": 1}
+
+    validated = validate_manual_image("wide.png", "image/png", payload, "feed", crop)
+
+    assert validated.original == payload
+    assert (validated.source_width, validated.source_height) == (2000, 1000)
+    assert validated.crop == crop
+    with Image.open(BytesIO(validated.png)) as output:
+        assert output.size == (1080, 1350)
+        assert output.getpixel((540, 675)) == (20, 70, 220)
+
+
+def test_manual_crop_metadata_is_strictly_validated():
+    assert parse_manual_crop_specs("", 2) == [None, None]
+    assert parse_manual_crop_specs('[{"x":0.1,"y":0,"width":0.8,"height":1}]', 1) == [
+        {"x": 0.1, "y": 0.0, "width": 0.8, "height": 1.0}
+    ]
+    with pytest.raises(ManualPostError, match="passen nicht"):
+        parse_manual_crop_specs("[]", 1)
+    with pytest.raises(ManualPostError, match="außerhalb"):
+        parse_manual_crop_specs('[{"x":0.5,"y":0,"width":0.6,"height":1}]', 1)
 
 
 def test_manual_time_rejects_past_and_dst_ambiguity():
@@ -200,11 +233,7 @@ def test_automatic_scheduler_selects_due_manual_post(db, tmp_path):
         kind="feed",
         text="Automatisch nach Freigabe",
         scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
-        images=[
-            validate_manual_image(
-                "feed.png", "image/png", image_bytes(), "feed"
-            )
-        ],
+        images=[validate_manual_image("feed.png", "image/png", image_bytes(), "feed")],
     )
     approve(db, post, user)
     job = db.query(PublicationJob).filter_by(post_id=post.id).one()
@@ -216,13 +245,9 @@ def test_automatic_scheduler_selects_due_manual_post(db, tmp_path):
 
 def test_manual_carousel_persists_selected_order_and_shared_caption(db, tmp_path):
     user, _page, team = setup_manual_context(db)
-    first = validate_manual_image(
-        "zuerst.png", "image/png", image_bytes(), "carousel"
-    )
+    first = validate_manual_image("zuerst.png", "image/png", image_bytes(), "carousel")
     second_payload = image_bytes()
-    second = validate_manual_image(
-        "danach.png", "image/png", second_payload, "carousel"
-    )
+    second = validate_manual_image("danach.png", "image/png", second_payload, "carousel")
     post, created = create_manual_post(
         db,
         Settings(
@@ -261,9 +286,7 @@ def test_manual_carousel_persists_selected_order_and_shared_caption(db, tmp_path
 
 def test_manual_carousel_requires_two_to_ten_images(db, tmp_path):
     user, _page, team = setup_manual_context(db)
-    image = validate_manual_image(
-        "single.png", "image/png", image_bytes(), "carousel"
-    )
+    image = validate_manual_image("single.png", "image/png", image_bytes(), "carousel")
     with pytest.raises(ManualPostError, match="2 bis 10"):
         create_manual_post(
             db,
