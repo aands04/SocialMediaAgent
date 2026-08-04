@@ -33,6 +33,8 @@ def approve(db:Session,post:Post,user:User,selected_jobs:list[str]|None=None)->P
     page=db.get(InstagramPage,post.instagram_page_id); team=db.get(Team,post.team_id)
     jobs=list(db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id)))
     selected=[j for j in jobs if selected_jobs is None or j.id in selected_jobs]; problems=[]
+    if any(job.approval_status == "bundle_wait" for job in selected):
+        problems.append("Der gemeinsame Vereins-Feed wartet noch auf weitere Spiele oder Ergebnisse")
     if not post.text: problems.append("Text fehlt")
     if any(j.kind in {"feed", "carousel"} for j in selected) and not post.feed_path: problems.append("Feed fehlt")
     if not selected or any(not Path(j.media_path).is_file() for j in selected): problems.append("Veröffentlichungsdateien fehlen")
@@ -98,6 +100,8 @@ def approve(db:Session,post:Post,user:User,selected_jobs:list[str]|None=None)->P
         problems.append("Kein eingefrorenes verifiziertes Mannschaftslogo vorhanden")
     if not page or not page.active or page.connection_status!="connected": problems.append("Instagram-Seite nicht aktiv verbunden")
     now=datetime.now(timezone.utc); late=[j for j in selected if (j.scheduled_at.replace(tzinfo=timezone.utc) if j.scheduled_at.tzinfo is None else j.scheduled_at)<now]; behavior=team.rules.get("late_approval","publish_now")
+    if post.post_type=="result" and team.rules.get("result_timing_mode","result_detected")=="result_detected":
+        behavior="publish_now"
     if late and behavior=="manual": problems.append("Veröffentlichungszeitpunkt verstrichen; manuelle Entscheidung erforderlich")
     if problems: raise ApprovalError("; ".join(problems))
     post.status=PostStatus.APPROVED; post.approved_by=user.id; post.approved_at=now; post.approved_version=post.version

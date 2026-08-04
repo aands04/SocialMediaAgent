@@ -23,7 +23,7 @@
     <label>Abstand in Minuten<input type="number" name="announcement_offset_minutes" min="0" max="43200" value="{{selected.rules.get('announcement_offset_minutes',selected.rules.get('feed_before_minutes',1440))}}"></label>
     <label>Verspätete Freigabe<select name="late_approval">{% for v,n in [('publish_now','Sofort'),('manual','Manuelle Entscheidung'),('skip','Überspringen'),('next_story','Nächste Story')] %}<option value="{{v}}" {% if selected.rules.get('late_approval')==v %}selected{% endif %}>{{n}}</option>{% endfor %}</select></label>
     <label><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Ergebnismeldung aktiv</label>
-    <label>Wartezeit nach bestätigter Ergebniserkennung<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',0)}}"></label>
+    <label>Optionale Mindestwartezeit bei geplantem Ergebniszeitpunkt<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',0)}}"><small>Im Sofort-Modus wird keine zusätzliche Wartezeit angewendet.</small></label>
     <label>Feed-Zeitpunkt Ergebnis
       <select name="result_timing_mode">
         <option value="result_detected" {% if selected.rules.get('result_timing_mode','result_detected')=='result_detected' %}selected{% endif %}>Sofort nach bestätigter Erkennung</option>
@@ -42,6 +42,14 @@
     <label>Automatisch erzeugen<input type="number" name="generation_lead_days" min="0" max="30" value="{{selected.rules.get('generation_lead_days',4)}}"> Tage vor dem Spiel</label>
     <label><input type="checkbox" name="auto_approve_announcements" value="true" {% if selected.rules.get('auto_approve_announcements') %}checked{% endif %}> Automatisch erzeugte Ankündigungen freigeben</label>
     <label><input type="checkbox" name="auto_approve_results" value="true" {% if selected.rules.get('auto_approve_results') %}checked{% endif %}> Automatisch erzeugte Ergebnisbeiträge freigeben</label>
+    <label>Feed-Bündelung für mehrere Vereinsteams am selben Spieltag
+      <select name="club_matchday_feed_mode">
+        <option value="separate" {% if selected.rules.get('club_matchday_feed_mode','separate')=='separate' %}selected{% endif %}>Alle Feed-Beiträge getrennt</option>
+        <option value="announcements" {% if selected.rules.get('club_matchday_feed_mode')=='announcements' %}selected{% endif %}>Ankündigungen als gemeinsames Karussell</option>
+        <option value="announcements_and_results" {% if selected.rules.get('club_matchday_feed_mode')=='announcements_and_results' %}selected{% endif %}>Ankündigungen und Ergebnisse als gemeinsame Karussells</option>
+      </select>
+      <small>Die Einstellung gilt automatisch für alle aktiven Mannschaften desselben Vereins auf dieser Instagram-Seite. Storys bleiben immer pro Spiel getrennt. Gemeinsame Ergebnis-Feeds warten auf die bestätigten Ergebnisse aller erkannten Vereinsspiele dieses Tages; für echte Ad-hoc-Ergebnisse daher „nur Ankündigungen“ wählen.</small>
+    </label>
     <label><input type="checkbox" name="reminder_enabled" value="true" {% if selected.rules.get('reminder_enabled') %}checked{% endif %}> Separaten Erinnerungsbeitrag automatisch erzeugen</label>
     <label>Erinnerungs-Feed Minuten vor Anpfiff<input type="number" name="reminder_feed_before_minutes" min="0" max="10080" value="{{selected.rules.get('reminder_feed_before_minutes',360)}}"></label>
     <p class="warning">Automatische Freigaben können bei aktivierter Instagram-Automatik ohne weitere manuelle Prüfung veröffentlicht werden. Fehlende Medien, Logos, Rechte oder Sicherheitsprüfungen blockieren die Freigabe weiterhin. Absagen und Verlegungen bleiben gesperrt.</p>

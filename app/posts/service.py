@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -29,6 +29,20 @@ from app.textgen.service import TextGenerator
 
 class RerenderConflict(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class _SyntheticResultStoryRule:
+    """Runtime fallback so every result post always contains one story."""
+
+    id: str = "result-immediate"
+    name: str = "Ergebnis – automatisch"
+    template: str = "default-story"
+    prompt_template: str = "default-image-story"
+    instagram_page_id: str | None = None
+    text_variant: str | None = None
+    post_type: str = "result"
+    timing_mode: str = "result_detected"
 
 
 def _revision_prompt(prompt, instruction: str | None):
@@ -105,10 +119,16 @@ def feed_time(team: Team, game: Game, post_type: str) -> tuple[datetime, bool]:
             if detected
             else _aware_utc(game.checked_at)
         )
-        earliest = detected_at + timedelta(
-            minutes=int(rules.get("result_wait_minutes", 15))
-        )
         mode = rules.get("result_timing_mode", "result_detected")
+        # "Sofort" is deliberately literal.  The result was already protected
+        # by the provider stability checks before result_confirmed was set, so
+        # another scheduling delay would make ad-hoc result publishing
+        # surprisingly late.
+        if mode == "result_detected":
+            return detected_at, False
+        earliest = detected_at + timedelta(
+            minutes=int(rules.get("result_wait_minutes", 0))
+        )
         if mode == "weekday_fixed":
             target = _weekday_time(
                 game,
@@ -297,10 +317,17 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
         post.design_snapshot={**post.design_snapshot,"media":{"feed":renderer.metadata_for(post.feed_path)}}
     feed_at, feed_is_absolute = feed_time(team, game, post_type)
     db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=page.id,kind="feed",media_path=post.feed_path,text_snapshot=post.text,scheduled_at=feed_at,absolute_time=feed_is_absolute,idempotency_key=f"{post.id}:feed:v1"))
-    rules=db.scalars(select(StoryRule).where(StoryRule.team_id==team.id,StoryRule.post_type==post_type,StoryRule.active.is_(True)).order_by(StoryRule.sort_order)).all(); seen=set()
+    rules=list(db.scalars(select(StoryRule).where(StoryRule.team_id==team.id,StoryRule.post_type==post_type,StoryRule.active.is_(True)).order_by(StoryRule.sort_order)).all())
+    if post_type=="result" and not rules:
+        rules=[_SyntheticResultStoryRule(instagram_page_id=page.id)]
+    seen=set()
     story_snapshots=[]
     for rule in rules:
-        at=story_time(rule,game)
+        # Result feed and result stories deliberately share the selected
+        # ad-hoc/fixed publication model. This makes a detected result a single
+        # coherent release instead of leaving a story behind on an unrelated
+        # legacy StoryRule schedule.
+        at=feed_at if post_type=="result" else story_time(rule,game)
         collision=(at,rule.template)
         if collision in seen: warnings.append(f"Story-Regel {rule.name} kollidiert und wurde nicht doppelt geplant"); continue
         story_design=_design(db,rule.template,post_type,"story")
@@ -314,7 +341,7 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
         else:
             path=str(renderer.render("story",f"{post.id}/story-{rule.id}-v1.png",{**facts,"template":story_design}))
         story_snapshots.append({"rule_id":rule.id,"template":story_design,"prompt":story_prompt.snapshot() if story_prompt else None,"media_version":1,"rendering":renderer.metadata_for(path) if hasattr(renderer,"metadata_for") else {}})
-        db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=rule.instagram_page_id or page.id,story_rule_id=rule.id,kind="story",media_path=path,text_snapshot=post.text if rule.text_variant else None,scheduled_at=at,absolute_time=getattr(rule,"timing_mode","relative")=="weekday_fixed",idempotency_key=f"{post.id}:story:{rule.id}:v1"))
+        db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=rule.instagram_page_id or page.id,story_rule_id=None if isinstance(rule,_SyntheticResultStoryRule) else rule.id,kind="story",media_path=path,text_snapshot=post.text if rule.text_variant else None,scheduled_at=at,absolute_time=feed_is_absolute if post_type=="result" else getattr(rule,"timing_mode","relative")=="weekday_fixed",idempotency_key=f"{post.id}:story:{rule.id}:v1"))
     post.design_snapshot={**post.design_snapshot,"stories":story_snapshots}
     post.critical_warnings=warnings; post.status=PostStatus.INCOMPLETE if warnings else PostStatus.PENDING; db.commit(); return post
 

@@ -65,8 +65,10 @@ für neue automatische Ergebnisbeiträge betrachtet. Dadurch erzeugt der erste
 Produktionsabruf keine Entwürfe für historische Partien.
 
 Eine geänderte Torfolge beginnt die Stabilitätsprüfung neu. Erst danach wird
-das Spiel auf `finished` gesetzt. Der Ergebnisbeitrag bleibt zusätzlich um die
-mannschaftsbezogene **Wartezeit nach Ergebnis** verzögert. Eine spätere
+das Spiel auf `finished` gesetzt. Im Zeitmodell **sofort nach bestätigter
+Erkennung** werden Feed und Ergebnis-Story ohne weitere Wartezeit eingeplant.
+Die mannschaftsbezogene **Wartezeit nach Ergebnis** gilt nur für geplante
+relative oder feste Ergebniszeiten. Eine spätere
 Ergebniskorrektur entzieht offene Freigaben und erfordert eine neue Prüfung.
 
 ## Beitragsplanung
@@ -80,8 +82,11 @@ denselben Beitragstyp.
 - `reminder`: nur bei aktiviertem separatem Erinnerungsbeitrag.
 - `result`: erst nach bestätigtem Ergebnis und der Ergebniszeitregel.
 
-Die erzeugten Beiträge starten unverändert im Zustand `pending_approval`.
-Automatische Freigaben sind nicht Bestandteil dieser Funktion.
+Die erzeugten Beiträge starten grundsätzlich im Zustand `pending_approval`.
+Nur wenn die getrennte mannschaftsbezogene Option für automatische Freigaben
+aktiv ist, durchlaufen sie anschließend sofort den normalen Freigabeservice.
+Gemeinsame Vereins-Karussells werden nur automatisch freigegeben, wenn alle
+beteiligten Mannschaften diese Option aktiviert haben.
 
 ## Erstes Aktivieren in Produktion
 
