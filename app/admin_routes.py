@@ -1288,6 +1288,7 @@ def save_rules(
     result_poll_interval_minutes: int = Form(default=15),
     auto_approve_announcements: bool = Form(default=False),
     auto_approve_results: bool = Form(default=False),
+    club_matchday_feed_mode: str = Form(default="separate"),
     reminder_feed_before_minutes: int = Form(default=360),
     image_prompt_feed: str = Form(default="default-image-feed"),
     image_prompt_story: str = Form(default="default-image-story"),
@@ -1310,6 +1311,12 @@ def save_rules(
         raise HTTPException(422, "Ungueltiger Zeitpunkt fuer Ankuendigungen")
     if result_timing_mode not in {"result_detected", "relative", "weekday_fixed"}:
         raise HTTPException(422, "Ungueltiger Zeitpunkt fuer Ergebnisse")
+    if club_matchday_feed_mode not in {
+        "separate",
+        "announcements",
+        "announcements_and_results",
+    }:
+        raise HTTPException(422, "Ungueltige Vereins-Feed-Buendelung")
     if announcement_offset_direction not in {"before", "after"} or result_offset_direction not in {"before", "after"}:
         raise HTTPException(422, "Ungueltige Zeitrichtung")
     announcement_offset_minutes = (
@@ -1438,6 +1445,7 @@ def save_rules(
         "result_poll_interval_minutes": result_poll_interval_minutes,
         "auto_approve_announcements": auto_approve_announcements,
         "auto_approve_results": auto_approve_results,
+        "club_matchday_feed_mode": club_matchday_feed_mode,
         "reminder_feed_before_minutes": reminder_feed_before_minutes,
         "image_prompt_feed": image_prompt_feed,
         "image_prompt_story": image_prompt_story,
@@ -1448,6 +1456,27 @@ def save_rules(
         "style_direction": style_direction.strip(),
     }
     team.version += 1
+    # This is deliberately a club/page setting even though rules are stored on
+    # teams. Keeping all sibling teams in sync prevents one half of a matchday
+    # from silently opting out of a configured carousel.
+    club_key = normalize_club_name(team.club)
+    grouped_team_ids = [team.id]
+    for sibling in db.scalars(
+        select(Team).where(
+            Team.instagram_page_id == team.instagram_page_id,
+            Team.active.is_(True),
+            Team.archived_at.is_(None),
+            Team.id != team.id,
+        )
+    ):
+        if normalize_club_name(sibling.club) != club_key:
+            continue
+        sibling.rules = {
+            **(sibling.rules or {}),
+            "club_matchday_feed_mode": club_matchday_feed_mode,
+        }
+        sibling.version += 1
+        grouped_team_ids.append(sibling.id)
     sync_state = db.get(FussballSyncState, team.id)
     if automatic_sync_enabled:
         if sync_state is None:
@@ -1465,7 +1494,15 @@ def save_rules(
             sync_state.lease_expires_at = None
     elif sync_state is not None and sync_state.status != "running":
         sync_state.status = "disabled"
-    audit(db, current, "rules.updated", "team", team.id, team.id, team.rules)
+    audit(
+        db,
+        current,
+        "rules.updated",
+        "team",
+        team.id,
+        team.id,
+        {**team.rules, "club_feed_setting_applied_to": grouped_team_ids},
+    )
     db.commit()
     return redirect(f"/rules?team_id={team.id}")
 

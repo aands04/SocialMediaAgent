@@ -58,12 +58,32 @@ def _different(current, value) -> bool:
 
 
 def _invalidate_publications(db: Session, game: Game, kickoff_delta) -> None:
-    open_jobs = db.scalars(
-        select(PublicationJob).where(
-            PublicationJob.game_id == game.id,
-            PublicationJob.status.in_(OPEN_JOB_STATUSES),
+    candidate_posts = list(
+        db.scalars(select(Post).where(Post.status.in_(REAPPROVAL_POST_STATUSES)))
+    )
+    posts = [
+        post
+        for post in candidate_posts
+        if post.game_id == game.id
+        or game.id
+        in (
+            ((post.design_snapshot or {}).get("club_matchday_carousel") or {}).get(
+                "game_ids", []
+            )
         )
-    ).all()
+    ]
+    post_ids = [post.id for post in posts]
+    open_jobs = list(
+        db.scalars(
+            select(PublicationJob).where(
+                (
+                    (PublicationJob.game_id == game.id)
+                    | PublicationJob.post_id.in_(post_ids)
+                ),
+                PublicationJob.status.in_(OPEN_JOB_STATUSES),
+            )
+        )
+    )
     if kickoff_delta:
         for job in open_jobs:
             if job.absolute_time:
@@ -71,15 +91,10 @@ def _invalidate_publications(db: Session, game: Game, kickoff_delta) -> None:
             else:
                 job.scheduled_at = _utc(job.scheduled_at) + kickoff_delta
 
-    posts = db.scalars(
-        select(Post).where(Post.game_id == game.id, Post.status.in_(REAPPROVAL_POST_STATUSES))
-    ).all()
-    post_ids = []
     for post in posts:
         post.status = PostStatus.REAPPROVAL
         post.version += 1
         post.approved_version = None
-        post_ids.append(post.id)
 
     if not post_ids:
         return

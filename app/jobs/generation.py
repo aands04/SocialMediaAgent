@@ -30,6 +30,7 @@ from app.models import (
     Team,
     User,
 )
+from app.posts.club_carousel import ClubCarouselState, coordinate_club_matchday_feed
 from app.posts.service import (
     RerenderConflict,
     create_post,
@@ -57,6 +58,59 @@ LEASE_SECONDS = 300
 
 class GenerationCancelled(RuntimeError):
     pass
+
+
+def _automatically_approve_created_outputs(
+    db: Session,
+    *,
+    post: Post,
+    user: User,
+    team: Team,
+    parameters: dict,
+    carousel: ClubCarouselState,
+) -> int:
+    """Approve only outputs explicitly opted in by their owning team.
+
+    A pending bundle may release its per-game stories immediately.  Its feed
+    remains blocked until every member exists.  Once complete, the shared feed
+    is auto-approved only when every participating team opted in.
+    """
+    if not carousel.active:
+        if parameters.get("automatic_approval_requested"):
+            approve(db, post, user)
+            return 1
+        return 0
+
+    member_ids = list(carousel.member_post_ids) or [post.id]
+    members = [db.get(Post, post_id) for post_id in member_ids]
+    members = [item for item in members if item is not None]
+    auto_key = (
+        "auto_approve_results" if post.post_type == "result" else "auto_approve_announcements"
+    )
+    all_auto = bool(carousel.complete and members) and all(
+        bool(
+            (owner.rules or {}).get(auto_key)
+            if (owner := db.get(Team, item.team_id))
+            else False
+        )
+        for item in members
+    )
+    approved = 0
+    for member in members:
+        owner = db.get(Team, member.team_id)
+        owner_auto = bool(owner and (owner.rules or {}).get(auto_key))
+        jobs = list(
+            db.scalars(
+                select(PublicationJob).where(PublicationJob.post_id == member.id)
+            )
+        )
+        selected = [job.id for job in jobs if job.kind == "story" and owner_auto]
+        if carousel.complete and member.id == carousel.primary_post_id and all_auto:
+            selected.extend(job.id for job in jobs if job.kind == "carousel")
+        if selected:
+            approve(db, member, user, selected)
+            approved += 1
+    return approved
 
 
 class _ProgressTextGenerator:
@@ -146,7 +200,7 @@ def _audit(
 
 
 def _story_count(db: Session, team_id: str, post_type: str) -> int:
-    return len(
+    count = len(
         db.scalars(
             select(StoryRule.id).where(
                 StoryRule.team_id == team_id,
@@ -155,6 +209,7 @@ def _story_count(db: Session, team_id: str, post_type: str) -> int:
             )
         ).all()
     )
+    return max(1, count) if post_type == "result" else count
 
 
 def enqueue_create(
@@ -684,7 +739,14 @@ def process_generation_job(
             )
             job.result_post_id = post.id
             job.post_id = post.id
+            carousel = coordinate_club_matchday_feed(
+                db,
+                post,
+                requested_by=job.requested_by,
+            )
+            db.commit()
         else:
+            carousel = ClubCarouselState()
             post = db.get(Post, job.post_id)
             if not post:
                 raise ValueError("Der zu rendernde Beitrag ist nicht mehr vorhanden.")
@@ -767,24 +829,35 @@ def process_generation_job(
         if (
             job.job_type == GenerationJobType.CREATE_POST
             and parameters.get("trigger_mode") == "automatic_fussball"
-            and parameters.get("automatic_approval_requested")
         ):
             try:
-                approve(db, post, user)
-                db.add(
-                    AuditLog(
-                        user_id=user.id,
-                        team_id=team.id,
-                        action="post.approved_automatically",
-                        entity_type="post",
-                        entity_id=post.id,
-                        details={
-                            "generation_job_id": job.id,
-                            "post_type": post.post_type,
-                            "rule_opt_in": True,
-                        },
-                    )
+                approved_count = _automatically_approve_created_outputs(
+                    db,
+                    post=post,
+                    user=user,
+                    team=team,
+                    parameters=parameters,
+                    carousel=carousel,
                 )
+                if approved_count:
+                    db.add(
+                        AuditLog(
+                            user_id=user.id,
+                            team_id=team.id,
+                            action="post.approved_automatically",
+                            entity_type="post",
+                            entity_id=post.id,
+                            details={
+                                "generation_job_id": job.id,
+                                "post_type": post.post_type,
+                                "rule_opt_in": bool(
+                                    parameters.get("automatic_approval_requested")
+                                ),
+                                "club_carousel_active": carousel.active,
+                                "club_carousel_complete": carousel.complete,
+                            },
+                        )
+                    )
                 db.commit()
             except ApprovalError as exc:
                 db.rollback()

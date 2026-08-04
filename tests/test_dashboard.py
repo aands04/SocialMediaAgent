@@ -1083,6 +1083,7 @@ def test_dashboard_admin_flow(browser):
             "sync_interval_hours": "24",
             "result_poll_interval_minutes": "15",
             "auto_approve_announcements": "true",
+            "club_matchday_feed_mode": "announcements",
         },
         follow_redirects=False,
     )
@@ -1094,6 +1095,7 @@ def test_dashboard_admin_flow(browser):
         assert saved_team.rules["sync_interval_hours"] == 24
         assert saved_team.rules["result_poll_interval_minutes"] == 15
         assert saved_team.rules["auto_approve_announcements"] is True
+        assert saved_team.rules["club_matchday_feed_mode"] == "announcements"
         assert saved_team.rules["announcement_timing_mode"] == "weekday_fixed"
         assert saved_team.rules["announcement_weekday_times"]["6"] == "09:00"
         assert saved_team.rules["announcement_weekday_targets"]["4"] == "3"
