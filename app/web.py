@@ -28,7 +28,14 @@ def check_csrf(request: Request, supplied: str) -> None:
 def current_user(request: Request, db: Session = Depends(get_db)) -> User:
     user_id = request.session.get("uid")
     current = db.get(User, user_id) if user_id else None
-    if not current or not current.active or current.archived_at:
+    session_auth_version = request.session.get("auth_version")
+    if (
+        not current
+        or not current.active
+        or current.archived_at
+        or session_auth_version != current.auth_version
+    ):
+        request.session.clear()
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
     return current
 

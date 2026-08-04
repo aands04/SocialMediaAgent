@@ -4,11 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{ title or 'Vereinszentrale' }}</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260804-post-targeting">
+  <link rel="stylesheet" href="/static/style.css?v=20260804-post-targeting&amp;feature=password-management">
 </head>
 <body class="{% if environment == 'meta-test' %}meta-test-environment{% endif %}">
 <header>
   <strong>⚽ Vereinszentrale</strong>
+  {% if user %}<span class="signed-in-user">Eingeloggt als <strong>{{ user.email }}</strong> ({{ user.role.label }})</span>{% endif %}
   {% if environment == 'meta-test' %}<span class="environment-badge">META-TEST – ECHTE VERÖFFENTLICHUNGEN MÖGLICH</span>{% endif %}
   <button aria-label="Navigation" onclick="document.querySelector('nav').classList.toggle('open')">☰</button>
 </header>
@@ -25,6 +26,7 @@
   ] %}<a href="{{ href }}">{{ label }}</a>{% endfor %}
   {% if user.role.value != 'viewer' %}<a href="/posts/manual/new">Beitrag manuell erstellen</a>{% endif %}
   {% if user.role.value == 'admin' %}<a href="/users">Benutzer & Rechte</a>{% endif %}
+  <a href="/account/password">Passwort ändern</a>
   <form method="post" action="/logout"><button>Abmelden</button></form>
 </nav>
 {% endif %}
