@@ -30,6 +30,7 @@ from app.models import (
     LogoAsset,
     MediaAsset,
     Post,
+    PostStatus,
     PromptTemplate,
     ProviderSnapshot,
     PublicationJob,
@@ -38,6 +39,7 @@ from app.models import (
     Team,
     User,
 )
+from app.web import berlin_datetime
 
 
 @pytest.fixture
@@ -181,6 +183,227 @@ def manual_post_image(size=(1080, 1350)):
     ImageDraw.Draw(image).rectangle((120, 160, 960, 1120), fill=(235, 210, 40))
     image.save(buffer, "PNG")
     return buffer.getvalue()
+
+
+def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
+    client, factory = browser
+    current_time = datetime.now(timezone.utc)
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="publication-plan",
+            display_name="SV Ehlen Instagram",
+            username="svehlen1901",
+            club="SV Ehlen",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="publication-plan-team",
+            display_name="SV Ehlen I",
+            short_name="SVE",
+            slug="publication-plan-team",
+            club="SV Ehlen",
+            fussball_url="https://www.fussball.de/publication-plan",
+            instagram_page_id=page.id,
+            media_subdir="publication-plan",
+        )
+        db.add(team)
+        db.flush()
+        game = Game(
+            team_id=team.id,
+            provider="fixture",
+            external_id="publication-plan-game",
+            home_team="SV Ehlen I",
+            away_team="TSV Kalender",
+            kickoff=current_time + timedelta(days=3),
+            competition="Kreisliga A",
+            status="scheduled",
+            source_url="fixture://publication-plan",
+        )
+        db.add(game)
+        db.flush()
+
+        recent_post = Post(
+            game_id=game.id,
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="announcement",
+            status=PostStatus.PUBLISHED,
+            text="Jüngster veröffentlichter Spielbeitrag",
+        )
+        old_post = Post(
+            game_id=game.id,
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="result",
+            status=PostStatus.PUBLISHED,
+            text="Historischer Beitrag außerhalb des Rückblicks",
+        )
+        story_post = Post(
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="manual",
+            manual_submission_id="publication-plan-story",
+            status=PostStatus.APPROVED,
+            text="Geplante Story im Standardzeitraum",
+        )
+        attention_post = Post(
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="manual",
+            manual_submission_id="publication-plan-attention",
+            status=PostStatus.PENDING,
+            text="Feed benötigt noch Freigabe",
+        )
+        carousel_post = Post(
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="manual",
+            manual_submission_id="publication-plan-carousel",
+            status=PostStatus.APPROVED,
+            text="Karussell im erweiterten Zeitraum",
+        )
+        cancelled_post = Post(
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="manual",
+            manual_submission_id="publication-plan-cancelled",
+            status=PostStatus.CANCELLED,
+            text="Abgebrochener Zukunftsbeitrag",
+        )
+        db.add_all(
+            [
+                recent_post,
+                old_post,
+                story_post,
+                attention_post,
+                carousel_post,
+                cancelled_post,
+            ]
+        )
+        db.flush()
+
+        recent_time = current_time - timedelta(hours=12)
+        old_time = current_time - timedelta(days=3)
+        story_time = current_time + timedelta(days=2)
+        attention_time = current_time + timedelta(days=4)
+        carousel_time = current_time + timedelta(days=8)
+        cancelled_time = current_time + timedelta(days=1)
+        jobs = [
+            PublicationJob(
+                post_id=recent_post.id,
+                game_id=game.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                kind="feed",
+                media_path="/tmp/recent-feed.png",
+                scheduled_at=recent_time - timedelta(hours=1),
+                approval_status="approved",
+                status=JobStatus.PUBLISHED,
+                published_at=recent_time,
+                permalink="https://www.instagram.com/p/recent",
+                idempotency_key="publication-plan-recent",
+            ),
+            PublicationJob(
+                post_id=old_post.id,
+                game_id=game.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                kind="feed",
+                media_path="/tmp/old-feed.png",
+                scheduled_at=old_time,
+                approval_status="approved",
+                status=JobStatus.PUBLISHED,
+                published_at=old_time,
+                idempotency_key="publication-plan-old",
+            ),
+            PublicationJob(
+                post_id=story_post.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                kind="story",
+                media_path="/tmp/planned-story.png",
+                scheduled_at=story_time,
+                approval_status="approved",
+                status=JobStatus.SCHEDULED,
+                idempotency_key="publication-plan-story",
+            ),
+            PublicationJob(
+                post_id=attention_post.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                kind="feed",
+                media_path="/tmp/attention-feed.png",
+                scheduled_at=attention_time,
+                approval_status="unapproved",
+                status=JobStatus.UNAPPROVED,
+                idempotency_key="publication-plan-attention",
+            ),
+            PublicationJob(
+                post_id=carousel_post.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                kind="carousel",
+                media_path="/tmp/carousel-cover.png",
+                scheduled_at=carousel_time,
+                approval_status="approved",
+                status=JobStatus.SCHEDULED,
+                idempotency_key="publication-plan-carousel",
+            ),
+            PublicationJob(
+                post_id=cancelled_post.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                kind="feed",
+                media_path="/tmp/cancelled-feed.png",
+                scheduled_at=cancelled_time,
+                approval_status="rejected",
+                status=JobStatus.CANCELLED,
+                idempotency_key="publication-plan-cancelled",
+            ),
+        ]
+        db.add_all(jobs)
+        db.flush()
+        carousel_job = jobs[4]
+        for position in range(1, 4):
+            db.add(
+                PublicationMediaItem(
+                    publication_job_id=carousel_job.id,
+                    position=position,
+                    media_path=f"/tmp/carousel-{position}.png",
+                    checksum=str(position) * 64,
+                    file_size=1024,
+                    width=1080,
+                    height=1350,
+                )
+            )
+        db.commit()
+
+    default_page = client.get("/posts")
+    assert default_page.status_code == 200
+    assert "Zentraler Veröffentlichungsplan" in default_page.text
+    assert "In den letzten 2 Tagen veröffentlicht" in default_page.text
+    assert "Geplant für die nächsten 7 Tage" in default_page.text
+    assert "Jüngster veröffentlichter Spielbeitrag" in default_page.text
+    assert "Geplante Story im Standardzeitraum" in default_page.text
+    assert "Feed benötigt noch Freigabe" in default_page.text
+    assert "Historischer Beitrag außerhalb des Rückblicks" not in default_page.text
+    assert "Abgebrochener Zukunftsbeitrag" not in default_page.text
+    assert berlin_datetime(old_time) not in default_page.text
+    assert berlin_datetime(carousel_time) not in default_page.text
+    assert "Freigabe: unapproved" in default_page.text
+
+    extended_page = client.get("/posts?days=14")
+    assert extended_page.status_code == 200
+    assert "Geplant für die nächsten 14 Tage" in extended_page.text
+    assert berlin_datetime(carousel_time) in extended_page.text
+    assert "Karussell" in extended_page.text
+    assert "3 Bilder" in extended_page.text
+    assert extended_page.text.count("Karussellbild") == 3
+
+    assert client.get("/posts?days=0").status_code == 422
+    assert client.get("/posts?days=91").status_code == 422
 
 
 def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(

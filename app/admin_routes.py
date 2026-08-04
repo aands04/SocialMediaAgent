@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete, select
@@ -1331,15 +1331,140 @@ def create_story_rule(
 
 
 @router.get("/posts", response_class=HTMLResponse)
-def posts(request: Request, current=Depends(current_user), db: Session = Depends(get_db)):
+def posts(
+    request: Request,
+    days: int = Query(default=7, ge=1, le=90),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    published_since = now - timedelta(days=2)
+    planned_until = now + timedelta(days=days)
+
+    published_jobs = [
+        job
+        for job in db.scalars(
+            select(PublicationJob)
+            .where(
+                PublicationJob.status == JobStatus.PUBLISHED,
+                PublicationJob.published_at.is_not(None),
+                PublicationJob.published_at >= published_since,
+                PublicationJob.published_at <= now,
+            )
+            .order_by(PublicationJob.published_at.desc())
+        )
+        if require_visible(db, current, job.team_id)
+    ]
+    planned_jobs = [
+        job
+        for job in db.scalars(
+            select(PublicationJob)
+            .where(
+                PublicationJob.scheduled_at >= now,
+                PublicationJob.scheduled_at <= planned_until,
+                PublicationJob.status.notin_(
+                    [JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED]
+                ),
+            )
+            .order_by(PublicationJob.scheduled_at)
+        )
+        if require_visible(db, current, job.team_id)
+    ]
+
+    calendar_jobs = [*published_jobs, *planned_jobs]
+    post_ids = {job.post_id for job in calendar_jobs}
+    game_ids = {job.game_id for job in calendar_jobs if job.game_id}
+    page_ids = {job.instagram_page_id for job in calendar_jobs}
+    calendar_posts = (
+        {
+            post.id: post
+            for post in db.scalars(select(Post).where(Post.id.in_(post_ids)))
+        }
+        if post_ids
+        else {}
+    )
+    games = (
+        {
+            game.id: game
+            for game in db.scalars(select(Game).where(Game.id.in_(game_ids)))
+        }
+        if game_ids
+        else {}
+    )
+    pages = (
+        {
+            page.id: page
+            for page in db.scalars(
+                select(InstagramPage).where(InstagramPage.id.in_(page_ids))
+            )
+        }
+        if page_ids
+        else {}
+    )
+    calendar_job_ids = {job.id for job in calendar_jobs}
+    carousel_items = {job_id: [] for job_id in calendar_job_ids}
+    if calendar_job_ids:
+        for media in db.scalars(
+            select(PublicationMediaItem)
+            .where(PublicationMediaItem.publication_job_id.in_(calendar_job_ids))
+            .order_by(
+                PublicationMediaItem.publication_job_id,
+                PublicationMediaItem.position,
+            )
+        ):
+            carousel_items[media.publication_job_id].append(media)
+
     items = [
         p
         for p in db.scalars(select(Post).order_by(Post.updated_at.desc()))
         if require_visible(db, current, p.team_id)
     ]
     teams = {x.id: x for x in db.scalars(select(Team))}
+    attention_statuses = {
+        JobStatus.DRAFT,
+        JobStatus.UNAPPROVED,
+        JobStatus.FAILED,
+        JobStatus.UNCERTAIN,
+    }
+    attention_count = sum(
+        job.approval_status != "approved"
+        or job.status in attention_statuses
+        or job.stale_time
+        or bool(job.error)
+        for job in planned_jobs
+    )
     return render(
-        request, "posts.html", current, items=items, teams=teams, title="Beiträge und Freigaben"
+        request,
+        "posts.html",
+        current,
+        items=items,
+        teams=teams,
+        published_jobs=published_jobs,
+        planned_jobs=planned_jobs,
+        calendar_posts=calendar_posts,
+        games=games,
+        pages=pages,
+        carousel_items=carousel_items,
+        future_days=days,
+        published_since=published_since,
+        planned_until=planned_until,
+        attention_count=attention_count,
+        format_labels={"feed": "Feed", "story": "Story", "carousel": "Karussell"},
+        status_labels={
+            JobStatus.DRAFT: "Entwurf",
+            JobStatus.UNAPPROVED: "Nicht freigegeben",
+            JobStatus.APPROVED: "Freigegeben",
+            JobStatus.SCHEDULED: "Geplant",
+            JobStatus.WAITING: "Wartet",
+            JobStatus.PUBLISHING: "Wird veröffentlicht",
+            JobStatus.PUBLISHED: "Veröffentlicht",
+            JobStatus.RETRY: "Wiederholung geplant",
+            JobStatus.FAILED: "Fehlgeschlagen",
+            JobStatus.CANCELLED: "Abgebrochen",
+            JobStatus.SKIPPED: "Übersprungen",
+            JobStatus.UNCERTAIN: "Manuell prüfen",
+        },
+        title="Beiträge und Freigaben",
     )
 
 
