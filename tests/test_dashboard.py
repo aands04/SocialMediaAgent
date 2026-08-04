@@ -1069,6 +1069,8 @@ def test_dashboard_admin_flow(browser):
             "announcement_friday": "18:20",
             "announcement_saturday": "10:00",
             "announcement_sunday": "09:00",
+            "announcement_target_friday": "3",
+            "announcement_target_sunday": "4",
             "late_approval": "manual",
             "result_wait_minutes": "120",
             "result_timing_mode": "result_detected",
@@ -1094,6 +1096,8 @@ def test_dashboard_admin_flow(browser):
         assert saved_team.rules["auto_approve_announcements"] is True
         assert saved_team.rules["announcement_timing_mode"] == "weekday_fixed"
         assert saved_team.rules["announcement_weekday_times"]["6"] == "09:00"
+        assert saved_team.rules["announcement_weekday_targets"]["4"] == "3"
+        assert saved_team.rules["announcement_weekday_targets"]["6"] == "4"
     assert "Vorläufige FUSSBALL.DE-Spielpläne" in client.get(
         f"/rules?team_id={team.id}"
     ).text

@@ -59,10 +59,17 @@ def _aware_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _weekday_time(game: Game, values: dict | None) -> datetime | None:
-    """Return a configured local time on the match date, normalized to UTC."""
+def _weekday_time(
+    game: Game,
+    values: dict | None,
+    target_weekdays: dict | None = None,
+    occurrence: str = "same",
+) -> datetime | None:
+    """Resolve a weekday/time mapping relative to the local match date."""
     local_kickoff = _aware_utc(game.kickoff).astimezone(BERLIN)
-    configured = (values or {}).get(str(local_kickoff.weekday()))
+    match_weekday = local_kickoff.weekday()
+    match_key = str(match_weekday)
+    configured = (values or {}).get(match_key)
     if not configured:
         return None
     try:
@@ -71,7 +78,18 @@ def _weekday_time(game: Game, values: dict | None) -> datetime | None:
         return None
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         return None
-    return local_kickoff.replace(
+    try:
+        target_weekday = int((target_weekdays or {}).get(match_key, match_weekday))
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= target_weekday <= 6:
+        return None
+    day_offset = 0
+    if occurrence == "before":
+        day_offset = -((match_weekday - target_weekday) % 7)
+    elif occurrence == "after":
+        day_offset = (target_weekday - match_weekday) % 7
+    return (local_kickoff + timedelta(days=day_offset)).replace(
         hour=hour, minute=minute, second=0, microsecond=0
     ).astimezone(timezone.utc)
 
@@ -92,7 +110,12 @@ def feed_time(team: Team, game: Game, post_type: str) -> tuple[datetime, bool]:
         )
         mode = rules.get("result_timing_mode", "result_detected")
         if mode == "weekday_fixed":
-            target = _weekday_time(game, rules.get("result_weekday_times"))
+            target = _weekday_time(
+                game,
+                rules.get("result_weekday_times"),
+                rules.get("result_weekday_targets"),
+                "after",
+            )
             return max(target or earliest, earliest), True
         if mode == "relative":
             minutes = int(rules.get("result_offset_minutes", 120))
@@ -109,7 +132,12 @@ def feed_time(team: Team, game: Game, post_type: str) -> tuple[datetime, bool]:
 
     mode = rules.get("announcement_timing_mode", "relative")
     if mode == "weekday_fixed":
-        target = _weekday_time(game, rules.get("announcement_weekday_times"))
+        target = _weekday_time(
+            game,
+            rules.get("announcement_weekday_times"),
+            rules.get("announcement_weekday_targets"),
+            "before",
+        )
         if target is not None:
             return target, True
     minutes = int(

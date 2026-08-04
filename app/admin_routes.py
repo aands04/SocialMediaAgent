@@ -1251,6 +1251,13 @@ def save_rules(
     announcement_friday: str = Form(default=""),
     announcement_saturday: str = Form(default=""),
     announcement_sunday: str = Form(default=""),
+    announcement_target_monday: str = Form(default="0"),
+    announcement_target_tuesday: str = Form(default="1"),
+    announcement_target_wednesday: str = Form(default="2"),
+    announcement_target_thursday: str = Form(default="3"),
+    announcement_target_friday: str = Form(default="4"),
+    announcement_target_saturday: str = Form(default="5"),
+    announcement_target_sunday: str = Form(default="6"),
     late_approval: str = Form(),
     result_enabled: bool = Form(default=False),
     result_wait_minutes: int = Form(),
@@ -1264,6 +1271,13 @@ def save_rules(
     result_friday: str = Form(default=""),
     result_saturday: str = Form(default=""),
     result_sunday: str = Form(default=""),
+    result_target_monday: str = Form(default="0"),
+    result_target_tuesday: str = Form(default="1"),
+    result_target_wednesday: str = Form(default="2"),
+    result_target_thursday: str = Form(default="3"),
+    result_target_friday: str = Form(default="4"),
+    result_target_saturday: str = Form(default="5"),
+    result_target_sunday: str = Form(default="6"),
     allow_provisional_games: bool = Form(default=False),
     automatic_sync_enabled: bool = Form(default=False),
     automatic_generation_enabled: bool = Form(default=False),
@@ -1350,6 +1364,42 @@ def save_rules(
         )
         if value
     }
+    announcement_weekday_targets = {
+        str(index): value
+        for index, value in enumerate(
+            [
+                announcement_target_monday,
+                announcement_target_tuesday,
+                announcement_target_wednesday,
+                announcement_target_thursday,
+                announcement_target_friday,
+                announcement_target_saturday,
+                announcement_target_sunday,
+            ]
+        )
+    }
+    result_weekday_targets = {
+        str(index): value
+        for index, value in enumerate(
+            [
+                result_target_monday,
+                result_target_tuesday,
+                result_target_wednesday,
+                result_target_thursday,
+                result_target_friday,
+                result_target_saturday,
+                result_target_sunday,
+            ]
+        )
+    }
+    if any(
+        value not in {"0", "1", "2", "3", "4", "5", "6"}
+        for value in [
+            *announcement_weekday_targets.values(),
+            *result_weekday_targets.values(),
+        ]
+    ):
+        raise HTTPException(422, "Ungueltiger Veroeffentlichungs-Wochentag")
     for value in [*announcement_weekday_times.values(), *result_weekday_times.values()]:
         try:
             parsed = datetime.strptime(value, "%H:%M")
@@ -1369,6 +1419,7 @@ def save_rules(
         "announcement_offset_direction": announcement_offset_direction,
         "announcement_offset_minutes": announcement_offset_minutes,
         "announcement_weekday_times": announcement_weekday_times,
+        "announcement_weekday_targets": announcement_weekday_targets,
         "late_approval": late_approval,
         "result_enabled": result_enabled,
         "result_wait_minutes": result_wait_minutes,
@@ -1376,6 +1427,7 @@ def save_rules(
         "result_offset_direction": result_offset_direction,
         "result_offset_minutes": result_offset_minutes,
         "result_weekday_times": result_weekday_times,
+        "result_weekday_targets": result_weekday_targets,
         "allow_provisional_games": allow_provisional_games,
         "automatic_sync_enabled": automatic_sync_enabled,
         "automatic_generation_enabled": automatic_generation_enabled,
