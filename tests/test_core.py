@@ -16,6 +16,7 @@ from app.models import (
  MediaAsset,
  PostStatus,
  PublicationJob,
+ PublicationMediaItem,
  Role,
  StoryRule,
  Team,
@@ -25,6 +26,7 @@ from app.models import (
 from app.posts.service import (
  RerenderConflict,
  create_post,
+ feed_time,
  rerender_post,
  reschedule_game,
  reserve_image,
@@ -87,6 +89,68 @@ def test_story_times_and_collision_safe_generation(db,tmp_path):
  assert post.status==PostStatus.INCOMPLETE and len(jobs)==2
  assert __import__('PIL').Image.open(post.feed_path).size==(1080,1350)
  assert __import__('PIL').Image.open([x.media_path for x in jobs if x.kind=='story'][0]).size==(1080,1920)
+
+
+def test_weekday_story_uses_configured_target_day_and_time(db,tmp_path):
+ _,team,game=graph(db,tmp_path)
+ game.kickoff=datetime(2026,8,9,13,0,tzinfo=timezone.utc)  # Sonntag, 15:00 Berlin
+ rule=StoryRule(
+  team_id=team.id,name="Freitag",post_type="announcement",reference="kickoff",
+  direction="before",offset_minutes=0,template="default-story",
+  timing_mode="weekday_fixed",weekday_times={"6":"18:30"},
+  weekday_targets={"6":"4"},media_slot=1,
+ )
+ db.add(rule); db.commit()
+ assert story_time(rule,game)==datetime(2026,8,7,16,30,tzinfo=timezone.utc)
+
+
+def test_weekday_reminder_feed_uses_configured_target_day_and_time(db,tmp_path):
+ _,team,game=graph(db,tmp_path)
+ game.kickoff=datetime(2026,8,9,13,0,tzinfo=timezone.utc)
+ team.rules={
+  **team.rules,
+  "reminder_timing_mode":"weekday_fixed",
+  "reminder_weekday_times":{"6":"19:00"},
+  "reminder_weekday_targets":{"6":"5"},
+ }
+ assert feed_time(team,game,"reminder")==(
+  datetime(2026,8,8,17,0,tzinfo=timezone.utc),True
+ )
+
+
+def test_multiple_feed_and_story_outputs_are_created_and_ordered(db,tmp_path):
+ _,team,game=graph(db,tmp_path)
+ team.rules={
+  **team.rules,
+  "announcement_feed_output_count":2,
+  "announcement_story_output_count":2,
+ }
+ db.add_all([
+  StoryRule(team_id=team.id,name="Story 1 frueh",post_type="announcement",reference="kickoff",direction="before",offset_minutes=120,template="default-story",media_slot=1),
+  StoryRule(team_id=team.id,name="Story 1 spaet",post_type="announcement",reference="kickoff",direction="before",offset_minutes=60,template="default-story",media_slot=1),
+  StoryRule(team_id=team.id,name="Story 2",post_type="announcement",reference="kickoff",direction="before",offset_minutes=30,template="default-story",media_slot=2),
+ ]); db.commit()
+
+ post=create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"out"))
+ feed=db.query(PublicationJob).filter_by(post_id=post.id,kind="carousel").one()
+ items=db.query(PublicationMediaItem).filter_by(publication_job_id=feed.id).order_by(PublicationMediaItem.position).all()
+ stories=db.query(PublicationJob).filter_by(post_id=post.id,kind="story").all()
+
+ assert [item.position for item in items]==[1,2]
+ assert all(Path(item.media_path).is_file() for item in items)
+ assert len(stories)==3
+ assert len({story.media_path for story in stories})==2
+ assert len(post.design_snapshot["media"]["feed_outputs"])==2
+
+ old_paths=[item.media_path for item in items]
+ rerender_post(db,post,Renderer(tmp_path/"out"),[],rerender_feed=True)
+ db.commit()
+ rerendered=db.query(PublicationMediaItem).filter_by(publication_job_id=feed.id).order_by(PublicationMediaItem.position).all()
+ assert [item.position for item in rerendered]==[1,2]
+ assert [item.media_path for item in rerendered]!=old_paths
+ assert all(Path(path).is_file() for path in old_paths)
+ assert all(Path(item.media_path).is_file() for item in rerendered)
+ assert post.feed_version==2
 def test_image_reserved_once_per_matchday(db,tmp_path):
  _,team,game=graph(db,tmp_path); p=tmp_path/"a.jpg";p.write_bytes(b"x"); asset=MediaAsset(team_id=team.id,relative_path="a.jpg",filename="a.jpg",mime_type="image/jpeg",size=1,checksum="x",mtime=datetime.now(timezone.utc));db.add(asset);db.commit()
  assert reserve_image(db,team.id,game.id).id==asset.id; assert reserve_image(db,team.id,game.id).id==asset.id and asset.uses==1

@@ -1,190 +1,311 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Veröffentlichungsregeln und Story-Zeitpunkte</h1>
+<p>Lege getrennt fest, welche Ausgaben erzeugt werden und wann Feed- und Story-Inhalte veröffentlicht werden.</p>
 <form method="get">
-  <select name="team_id" onchange="this.form.submit()">
-    {% for t in teams %}<option value="{{t.id}}" {% if selected and t.id==selected.id %}selected{% endif %}>{{t.display_name}}</option>{% endfor %}
-  </select>
+  <label>Mannschaft
+    <select name="team_id" onchange="this.form.submit()">
+      {% for t in teams %}<option value="{{t.id}}" {% if selected and t.id==selected.id %}selected{% endif %}>{{t.display_name}}</option>{% endfor %}
+    </select>
+  </label>
 </form>
+
 {% if selected %}
-<section>
-  <h2>Ankündigungs-, Ergebnis- und KI-Regeln</h2>
-  <form method="post" action="/rules/{{selected.id}}/defaults" class="gridform">
-    <input type="hidden" name="csrf_token" value="{{csrf}}">
-    <label><input type="checkbox" name="announcement_enabled" value="true" {% if selected.rules.get('announcement_enabled') %}checked{% endif %}> Ankündigung aktiv</label>
-    <input type="hidden" name="feed_before_minutes" value="{{selected.rules.get('feed_before_minutes',1440)}}">
-    <label>Feed-Zeitpunkt Ankündigung
-      <select name="announcement_timing_mode">
-        <option value="relative" {% if selected.rules.get('announcement_timing_mode','relative')=='relative' %}selected{% endif %}>Relativ zum Anpfiff</option>
-        <option value="weekday_fixed" {% if selected.rules.get('announcement_timing_mode')=='weekday_fixed' %}selected{% endif %}>Feste Uhrzeit je Spiel-Wochentag</option>
-      </select>
-    </label>
-    <label>Richtung zum Anpfiff<select name="announcement_offset_direction"><option value="before" {% if selected.rules.get('announcement_offset_direction','before')=='before' %}selected{% endif %}>vorher</option><option value="after" {% if selected.rules.get('announcement_offset_direction')=='after' %}selected{% endif %}>nachher</option></select></label>
-    <label>Abstand in Minuten<input type="number" name="announcement_offset_minutes" min="0" max="43200" value="{{selected.rules.get('announcement_offset_minutes',selected.rules.get('feed_before_minutes',1440))}}"></label>
-    <label>Verspätete Freigabe<select name="late_approval">{% for v,n in [('publish_now','Sofort'),('manual','Manuelle Entscheidung'),('skip','Überspringen'),('next_story','Nächste Story')] %}<option value="{{v}}" {% if selected.rules.get('late_approval')==v %}selected{% endif %}>{{n}}</option>{% endfor %}</select></label>
-    <label><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Ergebnismeldung aktiv</label>
-    <label>Optionale Mindestwartezeit bei geplantem Ergebniszeitpunkt<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',0)}}"><small>Im Sofort-Modus wird keine zusätzliche Wartezeit angewendet.</small></label>
-    <label>Feed-Zeitpunkt Ergebnis
-      <select name="result_timing_mode">
-        <option value="result_detected" {% if selected.rules.get('result_timing_mode','result_detected')=='result_detected' %}selected{% endif %}>Sofort nach bestätigter Erkennung</option>
-        <option value="relative" {% if selected.rules.get('result_timing_mode')=='relative' %}selected{% endif %}>Relativ zum Anpfiff</option>
-        <option value="weekday_fixed" {% if selected.rules.get('result_timing_mode')=='weekday_fixed' %}selected{% endif %}>Feste Uhrzeit je Spiel-Wochentag</option>
-      </select>
-    </label>
-    <label>Ergebnis-Richtung<select name="result_offset_direction"><option value="before" {% if selected.rules.get('result_offset_direction')=='before' %}selected{% endif %}>vor Anpfiff</option><option value="after" {% if selected.rules.get('result_offset_direction','after')=='after' %}selected{% endif %}>nach Anpfiff</option></select></label>
-    <label>Ergebnis-Abstand in Minuten<input type="number" name="result_offset_minutes" min="0" max="43200" value="{{selected.rules.get('result_offset_minutes',120)}}"></label>
-    <label><input type="checkbox" name="allow_provisional_games" value="true" {% if selected.rules.get('allow_provisional_games') %}checked{% endif %}> Vorläufige FUSSBALL.DE-Spielpläne für Ankündigungen zulassen</label>
-    <label><input type="checkbox" name="automatic_sync_enabled" value="true" {% if selected.rules.get('automatic_sync_enabled') %}checked{% endif %}> FUSSBALL.DE-Spielplan automatisch abrufen</label>
-    <label>Normaler FUSSBALL.DE-Abruf alle<input type="number" name="sync_interval_hours" min="1" max="168" value="{{selected.rules.get('sync_interval_hours',24)}}"> Stunden</label>
-    <label>Am Spieltag Ergebnis prüfen alle<input type="number" name="result_poll_interval_minutes" min="5" max="120" value="{{selected.rules.get('result_poll_interval_minutes',15)}}"> Minuten</label>
-    <label><input type="checkbox" name="automatic_generation_enabled" value="true" {% if selected.rules.get('automatic_generation_enabled') %}checked{% endif %}> Beiträge und Storys automatisch erzeugen</label>
-    <input type="hidden" name="generation_lead_minutes" value="{{selected.rules.get('generation_lead_minutes',120)}}">
-    <label>Automatisch erzeugen<input type="number" name="generation_lead_days" min="0" max="30" value="{{selected.rules.get('generation_lead_days',4)}}"> Tage vor dem Spiel</label>
-    <label><input type="checkbox" name="auto_approve_announcements" value="true" {% if selected.rules.get('auto_approve_announcements') %}checked{% endif %}> Automatisch erzeugte Ankündigungen freigeben</label>
-    <label><input type="checkbox" name="auto_approve_results" value="true" {% if selected.rules.get('auto_approve_results') %}checked{% endif %}> Automatisch erzeugte Ergebnisbeiträge freigeben</label>
-    <label>Feed-Bündelung für mehrere Vereinsteams am selben Spieltag
-      <select name="club_matchday_feed_mode">
-        <option value="separate" {% if selected.rules.get('club_matchday_feed_mode','separate')=='separate' %}selected{% endif %}>Alle Feed-Beiträge getrennt</option>
-        <option value="announcements" {% if selected.rules.get('club_matchday_feed_mode')=='announcements' %}selected{% endif %}>Ankündigungen als gemeinsames Karussell</option>
-        <option value="announcements_and_results" {% if selected.rules.get('club_matchday_feed_mode')=='announcements_and_results' %}selected{% endif %}>Ankündigungen und Ergebnisse als gemeinsame Karussells</option>
-      </select>
-      <small>Die Einstellung gilt automatisch für alle aktiven Mannschaften desselben Vereins auf dieser Instagram-Seite. Storys bleiben immer pro Spiel getrennt. Gemeinsame Ergebnis-Feeds warten auf die bestätigten Ergebnisse aller erkannten Vereinsspiele dieses Tages; für echte Ad-hoc-Ergebnisse daher „nur Ankündigungen“ wählen.</small>
-    </label>
-    <label><input type="checkbox" name="reminder_enabled" value="true" {% if selected.rules.get('reminder_enabled') %}checked{% endif %}> Separaten Erinnerungsbeitrag automatisch erzeugen</label>
-    <label>Erinnerungs-Feed Minuten vor Anpfiff<input type="number" name="reminder_feed_before_minutes" min="0" max="10080" value="{{selected.rules.get('reminder_feed_before_minutes',360)}}"></label>
-    <p class="warning">Automatische Freigaben können bei aktivierter Instagram-Automatik ohne weitere manuelle Prüfung veröffentlicht werden. Fehlende Medien, Logos, Rechte oder Sicherheitsprüfungen blockieren die Freigabe weiterhin. Absagen und Verlegungen bleiben gesperrt.</p>
-    <fieldset>
-      <legend>Feste Feed-Uhrzeiten nach Wochentag des Spiels</legend>
-      {% set announcement_times=selected.rules.get('announcement_weekday_times',{}) %}
-      {% set result_times=selected.rules.get('result_weekday_times',{}) %}
-      {% set announcement_targets=selected.rules.get('announcement_weekday_targets',{}) %}
-      {% set result_targets=selected.rules.get('result_weekday_targets',{}) %}
-      {% set weekday_names=['monday','tuesday','wednesday','thursday','friday','saturday','sunday'] %}
-      {% set weekday_options=[('0','Montag'),('1','Dienstag'),('2','Mittwoch'),('3','Donnerstag'),('4','Freitag'),('5','Samstag'),('6','Sonntag')] %}
+{% set weekday_names=['monday','tuesday','wednesday','thursday','friday','saturday','sunday'] %}
+{% set weekday_options=[('0','Montag'),('1','Dienstag'),('2','Mittwoch'),('3','Donnerstag'),('4','Freitag'),('5','Samstag'),('6','Sonntag')] %}
+{% set announcement_times=selected.rules.get('announcement_weekday_times',{}) %}
+{% set result_times=selected.rules.get('result_weekday_times',{}) %}
+{% set reminder_times=selected.rules.get('reminder_weekday_times',{}) %}
+{% set announcement_targets=selected.rules.get('announcement_weekday_targets',{}) %}
+{% set result_targets=selected.rules.get('result_weekday_targets',{}) %}
+{% set reminder_targets=selected.rules.get('reminder_weekday_targets',{}) %}
+
+<form method="post" action="/rules/{{selected.id}}/defaults" id="publishing-rules-form">
+  <input type="hidden" name="csrf_token" value="{{csrf}}">
+  <input type="hidden" name="feed_before_minutes" value="{{selected.rules.get('feed_before_minutes',1440)}}">
+  <input type="hidden" name="generation_lead_minutes" value="{{selected.rules.get('generation_lead_minutes',120)}}">
+
+  <section>
+    <h2>1. Spielankündigungen</h2>
+    <div class="gridform">
+      <label><input type="checkbox" name="announcement_enabled" value="true" {% if selected.rules.get('announcement_enabled') %}checked{% endif %}> Spielankündigungen erzeugen</label>
+      <label>Feed-Zeitmodell
+        <select name="announcement_timing_mode" id="announcement-timing-mode">
+          <option value="relative" {% if selected.rules.get('announcement_timing_mode','relative')=='relative' %}selected{% endif %}>Relativ zum Anpfiff</option>
+          <option value="weekday_fixed" {% if selected.rules.get('announcement_timing_mode')=='weekday_fixed' %}selected{% endif %}>Zieltag und Uhrzeit je Spiel-Wochentag</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="announcement-relative" class="gridform timing-panel">
+      <label>Richtung zum Anpfiff
+        <select name="announcement_offset_direction">
+          <option value="before" {% if selected.rules.get('announcement_offset_direction','before')=='before' %}selected{% endif %}>vor dem Anpfiff</option>
+          <option value="after" {% if selected.rules.get('announcement_offset_direction')=='after' %}selected{% endif %}>nach dem Anpfiff</option>
+        </select>
+      </label>
+      <label>Abstand in Minuten<input type="number" name="announcement_offset_minutes" min="0" max="43200" value="{{selected.rules.get('announcement_offset_minutes',selected.rules.get('feed_before_minutes',1440))}}"></label>
+    </div>
+
+    <div id="announcement-weekday" class="timing-panel">
+      <h3>Feed-Termin nach Wochentag des Spiels</h3>
+      <div class="schedule-grid">
       {% for key,label in weekday_options %}
-      <fieldset>
-        <legend>Wenn das Spiel am {{label}} stattfindet</legend>
-        <label>Ankündigung veröffentlichen am
-          <select name="announcement_target_{{weekday_names[key|int]}}">
-            {% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if announcement_targets.get(key,key)==target_key %}selected{% endif %}>{{target_label}}</option>{% endfor %}
-          </select>
-        </label>
-        <label>Ankündigung um<input type="time" name="announcement_{{weekday_names[key|int]}}" value="{{announcement_times.get(key,'')}}"></label>
-        <label>Ergebnis veröffentlichen am
-          <select name="result_target_{{weekday_names[key|int]}}">
-            {% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if result_targets.get(key,key)==target_key %}selected{% endif %}>{{target_label}}</option>{% endfor %}
-          </select>
-        </label>
-        <label>Ergebnis um<input type="time" name="result_{{weekday_names[key|int]}}" value="{{result_times.get(key,'')}}"></label>
-      </fieldset>
+        <fieldset>
+          <legend>Spiel am {{label}}</legend>
+          <label>Veröffentlichen am
+            <select name="announcement_target_{{weekday_names[key|int]}}">
+              {% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if announcement_targets.get(key,key)==target_key %}selected{% endif %}>{{target_label}}</option>{% endfor %}
+            </select>
+          </label>
+          <label>Uhrzeit<input type="time" name="announcement_{{weekday_names[key|int]}}" value="{{announcement_times.get(key,'')}}"></label>
+        </fieldset>
       {% endfor %}
-      <p>Für Ankündigungen wird der gewählte Veröffentlichungs-Wochentag vor oder am Spieltag verwendet. Für Ergebnisse wird er nach oder am Spieltag verwendet. Die Zuordnung gilt nur bei „Feste Uhrzeit je Spiel-Wochentag“; dann müssen alle sieben Uhrzeiten ausgefüllt sein.</p>
-    </fieldset>
-    <label>KI-Bildprompt Feed
-      <select name="image_prompt_feed">
-        <option value="default-image-feed">Standard-KI-Prompt Feed</option>
-        {% for p in prompts if p.prompt_kind=='image' and p.media_kind=='feed' %}
-        <option value="{{p.name}}" {% if selected.rules.get('image_prompt_feed')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}} · {{p.post_type}}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>KI-Bildprompt Story
-      <select name="image_prompt_story">
-        <option value="default-image-story">Standard-KI-Prompt Story</option>
-        {% for p in prompts if p.prompt_kind=='image' and p.media_kind=='story' %}
-        <option value="{{p.name}}" {% if selected.rules.get('image_prompt_story')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}} · {{p.post_type}}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>KI-Textprompt
-      <select name="text_prompt">
-        <option value="default-text-announcement">Standard-KI-Textprompt</option>
-        {% for p in prompts if p.prompt_kind=='text' %}
-        <option value="{{p.name}}" {% if selected.rules.get('text_prompt')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}} · {{p.post_type}}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Ergebnis-KI-Bildprompt Feed
-      <select name="result_image_prompt_feed">
-        <option value="default-image-feed">Standard-KI-Prompt Feed</option>
-        {% for p in prompts if p.prompt_kind=='image' and p.media_kind=='feed' and p.post_type=='result' %}
-        <option value="{{p.name}}" {% if selected.rules.get('image_prompt_feed_result')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Ergebnis-KI-Bildprompt Story
-      <select name="result_image_prompt_story">
-        <option value="default-image-story">Standard-KI-Prompt Story</option>
-        {% for p in prompts if p.prompt_kind=='image' and p.media_kind=='story' and p.post_type=='result' %}
-        <option value="{{p.name}}" {% if selected.rules.get('image_prompt_story_result')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Ergebnis-KI-Textprompt
-      <select name="result_text_prompt">
-        <option value="default-text-result">Standard-KI-Ergebnistext</option>
-        {% for p in prompts if p.prompt_kind=='text' and p.post_type=='result' %}
-        <option value="{{p.name}}" {% if selected.rules.get('text_prompt_result')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Stilrichtung für diese Mannschaft
-      <textarea name="style_direction" rows="4" placeholder="z. B. emotional, modern, tiefe Schatten, dynamische Flutlichtexposition">{{selected.rules.get('style_direction','')}}</textarea>
-    </label>
-    <button>Regeln speichern</button>
-  </form>
-  <p>Promptvorlagen werden unter <a href="/prompts">KI-Promptvorlagen</a> versioniert verwaltet. HTML/CSS bleibt nur als Offline-Fallback aktiv.</p>
-</section>
+      </div>
+      <p><small>Der Zieltag wird vor oder spätestens am Spieltag gewählt. Beispiel: Spiel Sonntag → Veröffentlichung Freitag 18:00 Uhr.</small></p>
+    </div>
+
+    <div class="gridform">
+      <label>Feed-Bilder pro Spiel
+        <input type="number" name="announcement_feed_output_count" min="0" max="10" value="{{selected.rules.get('announcement_feed_output_count',1)}}">
+        <small>0 = kein Feed. Ab 2 Bildern wird ein geordnetes Instagram-Karussell erzeugt.</small>
+      </label>
+      <label>Story-Ausgaben pro Spiel
+        <input type="number" name="announcement_story_output_count" min="0" max="10" value="{{selected.rules.get('announcement_story_output_count',story_output_defaults.get('announcement',1))}}">
+        <small>Jeder Story-Zeitpunkt wählt unten eine dieser Ausgaben aus.</small>
+      </label>
+      <label>Verspätete Freigabe
+        <select name="late_approval">{% for v,n in [('publish_now','Sofort veröffentlichen'),('manual','Manuelle Entscheidung'),('skip','Überspringen'),('next_story','Nächste Story')] %}<option value="{{v}}" {% if selected.rules.get('late_approval')==v %}selected{% endif %}>{{n}}</option>{% endfor %}</select>
+      </label>
+      <label><input type="checkbox" name="auto_approve_announcements" value="true" {% if selected.rules.get('auto_approve_announcements') %}checked{% endif %}> Automatisch erzeugte Ankündigungen freigeben</label>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. Erinnerungsbeitrag</h2>
+    <p>Der Erinnerungs-Feed ist ein zusätzlicher, eigenständiger Beitrag kurz vor dem Spiel. Er ist nicht die erste oder zweite Story.</p>
+    <div class="gridform">
+      <label><input type="checkbox" name="reminder_enabled" value="true" {% if selected.rules.get('reminder_enabled') %}checked{% endif %}> Separaten Erinnerungsbeitrag automatisch erzeugen</label>
+      <label>Feed-Zeitmodell<select name="reminder_timing_mode" id="reminder-timing-mode"><option value="relative" {% if selected.rules.get('reminder_timing_mode','relative')=='relative' %}selected{% endif %}>Relativ zum Anpfiff</option><option value="weekday_fixed" {% if selected.rules.get('reminder_timing_mode')=='weekday_fixed' %}selected{% endif %}>Zieltag und Uhrzeit je Spiel-Wochentag</option></select></label>
+    </div>
+    <div id="reminder-relative" class="timing-panel gridform">
+      <label>Feed-Veröffentlichung vor Anpfiff (Minuten)<input type="number" name="reminder_feed_before_minutes" min="0" max="10080" value="{{selected.rules.get('reminder_feed_before_minutes',360)}}"></label>
+    </div>
+    <div id="reminder-weekday" class="timing-panel">
+      <h3>Feed-Termin nach Wochentag des Spiels</h3>
+      <div class="schedule-grid">
+      {% for key,label in weekday_options %}
+        <fieldset><legend>Spiel am {{label}}</legend>
+          <label>Veröffentlichen am<select name="reminder_target_{{weekday_names[key|int]}}">{% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if reminder_targets.get(key,key)==target_key %}selected{% endif %}>{{target_label}}</option>{% endfor %}</select></label>
+          <label>Uhrzeit<input type="time" name="reminder_{{weekday_names[key|int]}}" value="{{reminder_times.get(key,'')}}"></label>
+        </fieldset>
+      {% endfor %}
+      </div>
+    </div>
+    <div class="gridform">
+      <label>Feed-Bilder für Erinnerung<input type="number" name="reminder_feed_output_count" min="0" max="10" value="{{selected.rules.get('reminder_feed_output_count',1)}}"></label>
+      <label>Story-Ausgaben für Erinnerung<input type="number" name="reminder_story_output_count" min="0" max="10" value="{{selected.rules.get('reminder_story_output_count',story_output_defaults.get('reminder',1))}}"></label>
+    </div>
+  </section>
+
+  <section>
+    <h2>3. Ergebnismeldungen</h2>
+    <div class="gridform">
+      <label><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Ergebnismeldungen erzeugen</label>
+      <label>Feed-Zeitmodell
+        <select name="result_timing_mode" id="result-timing-mode">
+          <option value="result_detected" {% if selected.rules.get('result_timing_mode','result_detected')=='result_detected' %}selected{% endif %}>Sofort nach bestätigter Erkennung</option>
+          <option value="relative" {% if selected.rules.get('result_timing_mode')=='relative' %}selected{% endif %}>Relativ zum Anpfiff</option>
+          <option value="weekday_fixed" {% if selected.rules.get('result_timing_mode')=='weekday_fixed' %}selected{% endif %}>Zieltag und Uhrzeit je Spiel-Wochentag</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="result-relative" class="gridform timing-panel">
+      <label>Richtung zum Anpfiff
+        <select name="result_offset_direction"><option value="before" {% if selected.rules.get('result_offset_direction')=='before' %}selected{% endif %}>vor dem Anpfiff</option><option value="after" {% if selected.rules.get('result_offset_direction','after')=='after' %}selected{% endif %}>nach dem Anpfiff</option></select>
+      </label>
+      <label>Abstand in Minuten<input type="number" name="result_offset_minutes" min="0" max="43200" value="{{selected.rules.get('result_offset_minutes',120)}}"></label>
+    </div>
+
+    <div id="result-weekday" class="timing-panel">
+      <h3>Feed-Termin nach Wochentag des Spiels</h3>
+      <div class="schedule-grid">
+      {% for key,label in weekday_options %}
+        <fieldset>
+          <legend>Spiel am {{label}}</legend>
+          <label>Veröffentlichen am
+            <select name="result_target_{{weekday_names[key|int]}}">
+              {% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if result_targets.get(key,key)==target_key %}selected{% endif %}>{{target_label}}</option>{% endfor %}
+            </select>
+          </label>
+          <label>Uhrzeit<input type="time" name="result_{{weekday_names[key|int]}}" value="{{result_times.get(key,'')}}"></label>
+        </fieldset>
+      {% endfor %}
+      </div>
+      <p><small>Der Zieltag wird am oder nach dem Spieltag gewählt. Ergebnisse werden niemals vor ihrer bestätigten Erkennung veröffentlicht.</small></p>
+    </div>
+
+    <div class="gridform">
+      <label id="result-minimum-wait">Mindestwartezeit nach Erkennung (Minuten)<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',0)}}"><small>Gilt nur bei relativem oder festem Zeitplan; „Sofort“ bleibt tatsächlich sofort.</small></label>
+      <label>Feed-Bilder pro Ergebnis<input type="number" name="result_feed_output_count" min="0" max="10" value="{{selected.rules.get('result_feed_output_count',1)}}"></label>
+      <label>Story-Ausgaben pro Ergebnis<input type="number" name="result_story_output_count" min="0" max="10" value="{{selected.rules.get('result_story_output_count',story_output_defaults.get('result',1))}}"></label>
+      <label><input type="checkbox" name="auto_approve_results" value="true" {% if selected.rules.get('auto_approve_results') %}checked{% endif %}> Automatisch erzeugte Ergebnisbeiträge freigeben</label>
+    </div>
+  </section>
+
+  <section>
+    <h2>4. FUSSBALL.DE-Automatik und Vereinsbündelung</h2>
+    <div class="gridform">
+      <label><input type="checkbox" name="allow_provisional_games" value="true" {% if selected.rules.get('allow_provisional_games') %}checked{% endif %}> Vorläufige FUSSBALL.DE-Spielpläne für Ankündigungen zulassen</label>
+      <label><input type="checkbox" name="automatic_sync_enabled" value="true" {% if selected.rules.get('automatic_sync_enabled') %}checked{% endif %}> Spielplan automatisch abrufen</label>
+      <label>Normaler Abruf alle<input type="number" name="sync_interval_hours" min="1" max="168" value="{{selected.rules.get('sync_interval_hours',24)}}"> Stunden</label>
+      <label>Am Spieltag Ergebnis prüfen alle<input type="number" name="result_poll_interval_minutes" min="5" max="120" value="{{selected.rules.get('result_poll_interval_minutes',15)}}"> Minuten</label>
+      <label><input type="checkbox" name="automatic_generation_enabled" value="true" {% if selected.rules.get('automatic_generation_enabled') %}checked{% endif %}> Beiträge und Storys automatisch erzeugen</label>
+      <label>Automatisch erzeugen<input type="number" name="generation_lead_days" min="0" max="30" value="{{selected.rules.get('generation_lead_days',4)}}"> Tage vor dem Spiel</label>
+      <label>Feed-Bündelung am gemeinsamen Spieltag
+        <select name="club_matchday_feed_mode">
+          <option value="separate" {% if selected.rules.get('club_matchday_feed_mode','separate')=='separate' %}selected{% endif %}>Feed-Beiträge getrennt</option>
+          <option value="announcements" {% if selected.rules.get('club_matchday_feed_mode')=='announcements' %}selected{% endif %}>Ankündigungen als gemeinsames Karussell</option>
+          <option value="announcements_and_results" {% if selected.rules.get('club_matchday_feed_mode')=='announcements_and_results' %}selected{% endif %}>Ankündigungen und Ergebnisse als gemeinsame Karussells</option>
+        </select>
+        <small>Eine Vereinsbündelung verwendet genau ein Feed-Bild pro Spiel. Storys bleiben pro Spiel getrennt.</small>
+      </label>
+    </div>
+    <p class="warning">Automatische Freigaben können bei aktivierter Instagram-Automatik ohne weitere manuelle Prüfung veröffentlicht werden. Fehlende Medien, Logos, Rechte oder Sicherheitsprüfungen blockieren weiterhin.</p>
+  </section>
+
+  <section>
+    <h2>5. KI- und Designregeln</h2>
+    <div class="gridform">
+      <label>Ankündigung – KI-Bildprompt Feed<select name="image_prompt_feed"><option value="default-image-feed">Standard-KI-Prompt Feed</option>{% for p in prompts if p.prompt_kind=='image' and p.media_kind=='feed' %}<option value="{{p.name}}" {% if selected.rules.get('image_prompt_feed')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}} · {{p.post_type}}</option>{% endfor %}</select></label>
+      <label>Ankündigung – KI-Bildprompt Story<select name="image_prompt_story"><option value="default-image-story">Standard-KI-Prompt Story</option>{% for p in prompts if p.prompt_kind=='image' and p.media_kind=='story' %}<option value="{{p.name}}" {% if selected.rules.get('image_prompt_story')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}} · {{p.post_type}}</option>{% endfor %}</select></label>
+      <label>Ankündigung – KI-Textprompt<select name="text_prompt"><option value="default-text-announcement">Standard-KI-Textprompt</option>{% for p in prompts if p.prompt_kind=='text' %}<option value="{{p.name}}" {% if selected.rules.get('text_prompt')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}} · {{p.post_type}}</option>{% endfor %}</select></label>
+      <label>Ergebnis – KI-Bildprompt Feed<select name="result_image_prompt_feed"><option value="default-image-feed">Standard-KI-Prompt Feed</option>{% for p in prompts if p.prompt_kind=='image' and p.media_kind=='feed' and p.post_type=='result' %}<option value="{{p.name}}" {% if selected.rules.get('image_prompt_feed_result')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}}</option>{% endfor %}</select></label>
+      <label>Ergebnis – KI-Bildprompt Story<select name="result_image_prompt_story"><option value="default-image-story">Standard-KI-Prompt Story</option>{% for p in prompts if p.prompt_kind=='image' and p.media_kind=='story' and p.post_type=='result' %}<option value="{{p.name}}" {% if selected.rules.get('image_prompt_story_result')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}}</option>{% endfor %}</select></label>
+      <label>Ergebnis – KI-Textprompt<select name="result_text_prompt"><option value="default-text-result">Standard-KI-Ergebnistext</option>{% for p in prompts if p.prompt_kind=='text' and p.post_type=='result' %}<option value="{{p.name}}" {% if selected.rules.get('text_prompt_result')==p.name %}selected{% endif %}>{{p.name}} · v{{p.version}}</option>{% endfor %}</select></label>
+      <label>Stilrichtung für diese Mannschaft<textarea name="style_direction" rows="4" placeholder="z. B. emotional, modern, dynamische Flutlichtatmosphäre">{{selected.rules.get('style_direction','')}}</textarea></label>
+    </div>
+    <p>Promptvorlagen werden unter <a href="/prompts">KI-Promptvorlagen</a> versioniert verwaltet. HTML/CSS bleibt nur als Offline-Fallback aktiv.</p>
+  </section>
+
+  <button>Alle Regeln speichern</button>
+</form>
+
 <section>
-  <h2>Story-Zeitpunkt hinzufügen</h2>
-  <form method="post" action="/rules/{{selected.id}}/stories" class="gridform">
+  <h2>Story-Veröffentlichungszeitpunkt hinzufügen</h2>
+  <p>Ein Zeitpunkt legt fest, <strong>welche Story-Ausgabe</strong> wann veröffentlicht wird. Mehrere Zeitpunkte dürfen dieselbe Ausgabe wiederverwenden.</p>
+  <form method="post" action="/rules/{{selected.id}}/stories" class="gridform" id="story-rule-form">
     <input type="hidden" name="csrf_token" value="{{csrf}}">
-    <label>Name<input name="name" required></label>
-    <label>Beitragstyp<select name="post_type"><option value="announcement">Ankündigung</option><option value="reminder">Erinnerung</option><option value="result">Ergebnis</option></select></label>
-    <label>Bezug<select name="reference"><option value="kickoff">Anpfiff</option><option value="planned_end">Geplantes Ende</option><option value="result_detected">Ergebniserkennung</option><option value="approval">Freigabe</option><option value="next_day">Folgetag</option></select></label>
-    <label>Richtung<select name="direction"><option value="before">vorher</option><option value="after">nachher</option></select></label>
-    <label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" value="0"></label>
-    <label>Feste Uhrzeit<input name="fixed_time" type="time"></label>
-    <label>Zeitmodell<select name="timing_mode"><option value="relative">Relativ / gemeinsame feste Uhrzeit</option><option value="weekday_fixed">Feste Uhrzeit je Spiel-Wochentag</option></select></label>
-    <fieldset>
-      <legend>Optionale Story-Uhrzeiten je Spiel-Wochentag</legend>
-      <label>Montag<input name="weekday_monday" type="time"></label>
-      <label>Dienstag<input name="weekday_tuesday" type="time"></label>
-      <label>Mittwoch<input name="weekday_wednesday" type="time"></label>
-      <label>Donnerstag<input name="weekday_thursday" type="time"></label>
-      <label>Freitag<input name="weekday_friday" type="time"></label>
-      <label>Samstag<input name="weekday_saturday" type="time"></label>
-      <label>Sonntag<input name="weekday_sunday" type="time"></label>
-    </fieldset>
-    <label><input type="checkbox" name="next_day" value="true"> Folgetag</label>
-    <label>HTML/CSS-Fallbackvorlage<input name="template" value="default-story" required></label>
-    <label>KI-Bildprompt
-      <select name="prompt_template">
-        <option value="default-image-story">Mannschaftsstandard / Standard-KI-Prompt</option>
-        {% for p in prompts if p.prompt_kind=='image' and p.media_kind=='story' %}
-        <option value="{{p.name}}">{{p.name}} · v{{p.version}} · {{p.post_type}}</option>
-        {% endfor %}
+    <label>Name<input name="name" required placeholder="z. B. Freitag 18:30 – Story 1"></label>
+    <label>Beitragstyp<select name="post_type" id="story-post-type"><option value="announcement">Ankündigung</option><option value="reminder">Erinnerung</option><option value="result">Ergebnis</option></select></label>
+    <label>Zu veröffentlichende Story-Ausgabe
+      <select name="media_slot" id="story-media-slot">
+        {% for slot in range(1,11) %}<option value="{{slot}}">Story-Ausgabe {{slot}}</option>{% endfor %}
       </select>
+      <small>Die maximal verfügbare Zahl wird oben je Beitragstyp festgelegt.</small>
     </label>
+    <label>Zeitmodell<select name="timing_mode" id="story-timing-mode"><option value="relative">Relativ zum Bezugspunkt</option><option value="weekday_fixed">Zieltag und Uhrzeit je Spiel-Wochentag</option></select></label>
+
+    <div id="story-relative" class="timing-panel gridform full-span">
+      <label>Bezug<select name="reference"><option value="kickoff">Anpfiff</option><option value="planned_end">Geplantes Ende</option><option value="result_detected">Ergebniserkennung</option><option value="approval">Freigabe</option></select></label>
+      <label>Richtung<select name="direction"><option value="before">vorher</option><option value="after">nachher</option></select></label>
+      <label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" value="0"></label>
+      <label>Optionale feste Uhrzeit<input name="fixed_time" type="time"><small>Ersetzt nur die Uhrzeit des relativ berechneten Tages.</small></label>
+      <label><input type="checkbox" name="next_day" value="true"> Zusätzlich auf den Folgetag verschieben</label>
+    </div>
+
+    <fieldset id="story-weekday" class="timing-panel full-span">
+      <legend>Zieltag und Uhrzeit je Wochentag des Spiels</legend>
+      <div class="schedule-grid">
+      {% for key,label in weekday_options %}
+        <fieldset>
+          <legend>Spiel am {{label}}</legend>
+          <label>Story veröffentlichen am
+            <select name="target_{{weekday_names[key|int]}}">
+              {% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if target_key==key %}selected{% endif %}>{{target_label}}</option>{% endfor %}
+            </select>
+          </label>
+          <label>Uhrzeit<input name="weekday_{{weekday_names[key|int]}}" type="time"></label>
+        </fieldset>
+      {% endfor %}
+      </div>
+    </fieldset>
+
+    <label>HTML/CSS-Fallbackvorlage<input name="template" value="default-story" required></label>
+    <label>KI-Bildprompt<select name="prompt_template"><option value="default-image-story">Mannschaftsstandard / Standard-KI-Prompt</option>{% for p in prompts if p.prompt_kind=='image' and p.media_kind=='story' %}<option value="{{p.name}}">{{p.name}} · v{{p.version}} · {{p.post_type}}</option>{% endfor %}</select></label>
     <label>Zielseite<select name="instagram_page_id"><option value="">Mannschaftsstandard</option>{% for p in pages %}<option value="{{p.id}}">{{p.display_name}}</option>{% endfor %}</select></label>
-    <label><input type="checkbox" name="reuse_media" value="true"> Datei wiederverwenden</label>
+    <label><input type="checkbox" name="reuse_media" value="true"> Dieselbe Datei bei wiederholter Verwendung dieser Ausgabe nutzen</label>
     <label>Sortierung<input type="number" name="sort_order" value="0"></label>
     <button>Zeitpunkt hinzufügen</button>
   </form>
+
   <table>
-    <tr><th>Name</th><th>Typ</th><th>Bezug</th><th>Offset</th><th>KI-Prompt</th><th>Fallback</th><th>Aktion</th></tr>
+    <tr><th>Name</th><th>Typ</th><th>Story</th><th>Zeitmodell</th><th>KI-Prompt</th><th>Fallback</th><th>Aktion</th></tr>
     {% for x in stories %}
     <tr>
-      <td>{{x.name}}</td><td>{{x.post_type}}</td><td>{{x.reference}} / {{x.direction}}</td><td>{% if x.timing_mode=='weekday_fixed' %}je Wochentag{% else %}{{x.offset_minutes}} min{% if x.fixed_time %}, {{x.fixed_time}}{% endif %}{% endif %}</td><td>{{x.prompt_template}}</td><td>{{x.template}}</td>
-      <td>
-        <form method="post" action="/rules/{{selected.id}}/stories/{{x.id}}/delete" onsubmit="return confirm('Story-Zeitpunkt wirklich löschen? Bereits erzeugte Beiträge und Veröffentlichungsaufträge bleiben unverändert.');">
-          <input type="hidden" name="csrf_token" value="{{csrf}}">
-          <button class="danger">Löschen</button>
-        </form>
-      </td>
+      <td>{{x.name}}</td><td>{{x.post_type}}</td><td>Ausgabe {{x.media_slot or 1}}</td>
+      <td>{% if x.timing_mode=='weekday_fixed' %}Zieltag/Uhrzeit je Spieltag{% else %}{{x.reference}} / {{x.direction}} / {{x.offset_minutes}} min{% if x.fixed_time %}, {{x.fixed_time}} Uhr{% endif %}{% endif %}</td>
+      <td>{{x.prompt_template}}</td><td>{{x.template}}</td>
+      <td><form method="post" action="/rules/{{selected.id}}/stories/{{x.id}}/delete" onsubmit="return confirm('Story-Zeitpunkt wirklich löschen? Bereits erzeugte Beiträge und Veröffentlichungsaufträge bleiben unverändert.');"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Löschen</button></form></td>
     </tr>
     {% endfor %}
   </table>
 </section>
+
+<style>
+  .timing-panel[hidden] { display: none !important; }
+  .schedule-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: .75rem; }
+  .schedule-grid fieldset { margin: 0; }
+  .full-span { grid-column: 1 / -1; }
+  #publishing-rules-form > section { margin-top: 1rem; }
+</style>
+<script>
+(() => {
+  const toggle = (id, visible) => {
+    const node = document.getElementById(id);
+    if (!node) return;
+    node.hidden = !visible;
+  };
+  const refreshAnnouncement = () => {
+    const mode = document.getElementById('announcement-timing-mode').value;
+    toggle('announcement-relative', mode === 'relative');
+    toggle('announcement-weekday', mode === 'weekday_fixed');
+  };
+  const refreshResult = () => {
+    const mode = document.getElementById('result-timing-mode').value;
+    toggle('result-relative', mode === 'relative');
+    toggle('result-weekday', mode === 'weekday_fixed');
+    toggle('result-minimum-wait', mode !== 'result_detected');
+  };
+  const refreshReminder = () => {
+    const mode = document.getElementById('reminder-timing-mode').value;
+    toggle('reminder-relative', mode === 'relative');
+    toggle('reminder-weekday', mode === 'weekday_fixed');
+  };
+  const counts = {
+    announcement: {{selected.rules.get('announcement_story_output_count',story_output_defaults.get('announcement',1))}},
+    reminder: {{selected.rules.get('reminder_story_output_count',story_output_defaults.get('reminder',1))}},
+    result: {{selected.rules.get('result_story_output_count',story_output_defaults.get('result',1))}}
+  };
+  const refreshStory = () => {
+    const mode = document.getElementById('story-timing-mode').value;
+    toggle('story-relative', mode === 'relative');
+    toggle('story-weekday', mode === 'weekday_fixed');
+    const type = document.getElementById('story-post-type').value;
+    const max = counts[type] || 0;
+    const select = document.getElementById('story-media-slot');
+    [...select.options].forEach(option => option.hidden = Number(option.value) > max);
+    if (Number(select.value) > max) select.value = max > 0 ? '1' : '';
+    select.disabled = max === 0;
+  };
+  document.getElementById('announcement-timing-mode').addEventListener('change', refreshAnnouncement);
+  document.getElementById('result-timing-mode').addEventListener('change', refreshResult);
+  document.getElementById('reminder-timing-mode').addEventListener('change', refreshReminder);
+  document.getElementById('story-timing-mode').addEventListener('change', refreshStory);
+  document.getElementById('story-post-type').addEventListener('change', refreshStory);
+  refreshAnnouncement(); refreshReminder(); refreshResult(); refreshStory();
+})();
+</script>
 {% endif %}
 {% endblock %}

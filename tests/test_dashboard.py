@@ -1084,6 +1084,12 @@ def test_dashboard_admin_flow(browser):
             "result_poll_interval_minutes": "15",
             "auto_approve_announcements": "true",
             "club_matchday_feed_mode": "announcements",
+            "announcement_feed_output_count": "1",
+            "announcement_story_output_count": "2",
+            "reminder_feed_output_count": "1",
+            "reminder_story_output_count": "1",
+            "result_feed_output_count": "1",
+            "result_story_output_count": "1",
         },
         follow_redirects=False,
     )
@@ -1121,6 +1127,14 @@ def test_dashboard_admin_flow(browser):
             "weekday_friday": "18:20",
             "weekday_saturday": "10:00",
             "weekday_sunday": "09:00",
+            "target_monday": "0",
+            "target_tuesday": "1",
+            "target_wednesday": "2",
+            "target_thursday": "3",
+            "target_friday": "4",
+            "target_saturday": "5",
+            "target_sunday": "4",
+            "media_slot": "2",
             "template": "default-story",
             "sort_order": "1",
         },
@@ -1131,6 +1145,8 @@ def test_dashboard_admin_flow(browser):
         story = db.query(StoryRule).one()
         assert story.timing_mode == "weekday_fixed"
         assert story.weekday_times["6"] == "09:00"
+        assert story.weekday_targets["6"] == "4"
+        assert story.media_slot == 2
     assert "24 Stunden" in client.get(f"/rules?team_id={team.id}").text
     result = client.post(
         "/games/mock",

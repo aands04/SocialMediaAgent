@@ -1280,6 +1280,12 @@ def rules(
         latest.setdefault(
             (prompt.name, prompt.prompt_kind, prompt.post_type, prompt.media_kind), prompt
         )
+    story_output_defaults = {"announcement": 1, "reminder": 1, "result": 1}
+    for story in stories:
+        story_output_defaults[story.post_type] = max(
+            story_output_defaults.get(story.post_type, 1),
+            int(getattr(story, "media_slot", 1) or 1),
+        )
     return render(
         request,
         "rules.html",
@@ -1289,6 +1295,7 @@ def rules(
         stories=stories,
         pages=pages,
         prompts=list(latest.values()),
+        story_output_defaults=story_output_defaults,
         title="Veröffentlichungsregeln",
     )
 
@@ -1349,6 +1356,27 @@ def save_rules(
     auto_approve_results: bool = Form(default=False),
     club_matchday_feed_mode: str = Form(default="separate"),
     reminder_feed_before_minutes: int = Form(default=360),
+    reminder_timing_mode: str = Form(default="relative"),
+    reminder_monday: str = Form(default=""),
+    reminder_tuesday: str = Form(default=""),
+    reminder_wednesday: str = Form(default=""),
+    reminder_thursday: str = Form(default=""),
+    reminder_friday: str = Form(default=""),
+    reminder_saturday: str = Form(default=""),
+    reminder_sunday: str = Form(default=""),
+    reminder_target_monday: str = Form(default="0"),
+    reminder_target_tuesday: str = Form(default="1"),
+    reminder_target_wednesday: str = Form(default="2"),
+    reminder_target_thursday: str = Form(default="3"),
+    reminder_target_friday: str = Form(default="4"),
+    reminder_target_saturday: str = Form(default="5"),
+    reminder_target_sunday: str = Form(default="6"),
+    announcement_feed_output_count: int = Form(default=1),
+    announcement_story_output_count: int = Form(default=1),
+    reminder_feed_output_count: int = Form(default=1),
+    reminder_story_output_count: int = Form(default=1),
+    result_feed_output_count: int = Form(default=1),
+    result_story_output_count: int = Form(default=1),
     image_prompt_feed: str = Form(default="default-image-feed"),
     image_prompt_story: str = Form(default="default-image-story"),
     text_prompt: str = Form(default="default-text-announcement"),
@@ -1370,6 +1398,8 @@ def save_rules(
         raise HTTPException(422, "Ungueltiger Zeitpunkt fuer Ankuendigungen")
     if result_timing_mode not in {"result_detected", "relative", "weekday_fixed"}:
         raise HTTPException(422, "Ungueltiger Zeitpunkt fuer Ergebnisse")
+    if reminder_timing_mode not in {"relative", "weekday_fixed"}:
+        raise HTTPException(422, "Ungültiger Zeitpunkt für Erinnerungsbeiträge")
     if club_matchday_feed_mode not in {
         "separate",
         "announcements",
@@ -1395,6 +1425,81 @@ def save_rules(
         raise HTTPException(422, "Das Ergebnisintervall muss zwischen 5 und 120 Minuten liegen")
     if not 0 <= reminder_feed_before_minutes <= 10080:
         raise HTTPException(422, "Der Erinnerungszeitpunkt ist ungültig")
+    output_counts = {
+        "announcement_feed_output_count": announcement_feed_output_count,
+        "announcement_story_output_count": announcement_story_output_count,
+        "reminder_feed_output_count": reminder_feed_output_count,
+        "reminder_story_output_count": reminder_story_output_count,
+        "result_feed_output_count": result_feed_output_count,
+        "result_story_output_count": result_story_output_count,
+    }
+    if any(not 0 <= value <= 10 for value in output_counts.values()):
+        raise HTTPException(422, "Ausgabeanzahlen müssen zwischen 0 und 10 liegen")
+    for enabled, post_type, feed_count, story_count in (
+        (
+            announcement_enabled,
+            "Ankündigung",
+            announcement_feed_output_count,
+            announcement_story_output_count,
+        ),
+        (
+            reminder_enabled,
+            "Erinnerung",
+            reminder_feed_output_count,
+            reminder_story_output_count,
+        ),
+        (
+            result_enabled,
+            "Ergebnis",
+            result_feed_output_count,
+            result_story_output_count,
+        ),
+    ):
+        if enabled and feed_count == 0 and story_count == 0:
+            raise HTTPException(
+                422,
+                f"Für {post_type} muss mindestens eine Feed- oder Story-Ausgabe aktiv sein",
+            )
+    grouped_announcements = club_matchday_feed_mode in {
+        "announcements",
+        "announcements_and_results",
+    }
+    grouped_results = club_matchday_feed_mode == "announcements_and_results"
+    if (grouped_announcements and announcement_feed_output_count != 1) or (
+        grouped_results and result_feed_output_count != 1
+    ):
+        raise HTTPException(
+            422,
+            "Für gebündelte Vereins-Karussells muss je beteiligtem Beitragstyp "
+            "genau ein Feed-Bild pro Spiel eingestellt sein",
+        )
+    active_story_slots = {
+        post_type: max(
+            [
+                int(getattr(item, "media_slot", 1) or 1)
+                for item in db.scalars(
+                    select(StoryRule).where(
+                        StoryRule.team_id == team.id,
+                        StoryRule.post_type == post_type,
+                        StoryRule.active.is_(True),
+                    )
+                )
+            ]
+            or [0]
+        )
+        for post_type in ("announcement", "reminder", "result")
+    }
+    for post_type, configured in {
+        "announcement": announcement_story_output_count,
+        "reminder": reminder_story_output_count,
+        "result": result_story_output_count,
+    }.items():
+        if active_story_slots[post_type] > configured:
+            raise HTTPException(
+                422,
+                f"Story-Ausgabe {active_story_slots[post_type]} wird für {post_type} "
+                "noch von einem aktiven Story-Zeitpunkt verwendet",
+            )
     if automatic_generation_enabled and not automatic_sync_enabled:
         raise HTTPException(
             422,
@@ -1430,6 +1535,21 @@ def save_rules(
         )
         if value
     }
+    reminder_weekday_times = {
+        str(index): value
+        for index, value in enumerate(
+            [
+                reminder_monday,
+                reminder_tuesday,
+                reminder_wednesday,
+                reminder_thursday,
+                reminder_friday,
+                reminder_saturday,
+                reminder_sunday,
+            ]
+        )
+        if value
+    }
     announcement_weekday_targets = {
         str(index): value
         for index, value in enumerate(
@@ -1458,15 +1578,34 @@ def save_rules(
             ]
         )
     }
+    reminder_weekday_targets = {
+        str(index): value
+        for index, value in enumerate(
+            [
+                reminder_target_monday,
+                reminder_target_tuesday,
+                reminder_target_wednesday,
+                reminder_target_thursday,
+                reminder_target_friday,
+                reminder_target_saturday,
+                reminder_target_sunday,
+            ]
+        )
+    }
     if any(
         value not in {"0", "1", "2", "3", "4", "5", "6"}
         for value in [
             *announcement_weekday_targets.values(),
+            *reminder_weekday_targets.values(),
             *result_weekday_targets.values(),
         ]
     ):
         raise HTTPException(422, "Ungueltiger Veroeffentlichungs-Wochentag")
-    for value in [*announcement_weekday_times.values(), *result_weekday_times.values()]:
+    for value in [
+        *announcement_weekday_times.values(),
+        *reminder_weekday_times.values(),
+        *result_weekday_times.values(),
+    ]:
         try:
             parsed = datetime.strptime(value, "%H:%M")
         except ValueError as exc:
@@ -1475,6 +1614,11 @@ def save_rules(
             raise HTTPException(422, "Ungueltige feste Uhrzeit")
     if announcement_timing_mode == "weekday_fixed" and len(announcement_weekday_times) != 7:
         raise HTTPException(422, "Fuer feste Ankuendigungszeiten sind alle sieben Wochentage erforderlich")
+    if reminder_timing_mode == "weekday_fixed" and len(reminder_weekday_times) != 7:
+        raise HTTPException(
+            422,
+            "Für feste Erinnerungszeiten sind alle sieben Wochentage erforderlich",
+        )
     if result_timing_mode == "weekday_fixed" and len(result_weekday_times) != 7:
         raise HTTPException(422, "Fuer feste Ergebniszeiten sind alle sieben Wochentage erforderlich")
     team.rules = {
@@ -1498,6 +1642,9 @@ def save_rules(
         "automatic_sync_enabled": automatic_sync_enabled,
         "automatic_generation_enabled": automatic_generation_enabled,
         "reminder_enabled": reminder_enabled,
+        "reminder_timing_mode": reminder_timing_mode,
+        "reminder_weekday_times": reminder_weekday_times,
+        "reminder_weekday_targets": reminder_weekday_targets,
         "generation_lead_minutes": generation_lead_minutes,
         "generation_lead_days": generation_lead_days,
         "sync_interval_hours": sync_interval_hours,
@@ -1506,6 +1653,7 @@ def save_rules(
         "auto_approve_results": auto_approve_results,
         "club_matchday_feed_mode": club_matchday_feed_mode,
         "reminder_feed_before_minutes": reminder_feed_before_minutes,
+        **output_counts,
         "image_prompt_feed": image_prompt_feed,
         "image_prompt_story": image_prompt_story,
         "text_prompt": text_prompt,
@@ -1585,6 +1733,14 @@ def create_story_rule(
     weekday_friday: str = Form(default=""),
     weekday_saturday: str = Form(default=""),
     weekday_sunday: str = Form(default=""),
+    target_monday: str = Form(default="0"),
+    target_tuesday: str = Form(default="1"),
+    target_wednesday: str = Form(default="2"),
+    target_thursday: str = Form(default="3"),
+    target_friday: str = Form(default="4"),
+    target_saturday: str = Form(default="5"),
+    target_sunday: str = Form(default="6"),
+    media_slot: int = Form(default=1),
     next_day: bool = Form(default=False),
     template: str = Form(),
     prompt_template: str = Form(default="default-image-story"),
@@ -1612,6 +1768,19 @@ def create_story_rule(
         raise HTTPException(422, "Ungültiger Bezugspunkt")
     if timing_mode not in {"relative", "weekday_fixed"}:
         raise HTTPException(422, "Ungueltiger Story-Zeitmodus")
+    if post_type not in {"announcement", "reminder", "result"}:
+        raise HTTPException(422, "Ungültiger Beitragstyp")
+    configured_story_count = int(
+        (team.rules or {}).get(
+            f"{post_type}_story_output_count",
+            max(1, media_slot),
+        )
+    )
+    if not 1 <= media_slot <= configured_story_count:
+        raise HTTPException(
+            422,
+            f"Story-Ausgabe muss zwischen 1 und {configured_story_count} liegen",
+        )
     weekday_times = {
         str(index): value
         for index, value in enumerate(
@@ -1634,6 +1803,25 @@ def create_story_rule(
             raise HTTPException(422, "Ungueltige Story-Uhrzeit") from exc
     if timing_mode == "weekday_fixed" and len(weekday_times) != 7:
         raise HTTPException(422, "Fuer feste Story-Zeiten sind alle sieben Wochentage erforderlich")
+    weekday_targets = {
+        str(index): value
+        for index, value in enumerate(
+            [
+                target_monday,
+                target_tuesday,
+                target_wednesday,
+                target_thursday,
+                target_friday,
+                target_saturday,
+                target_sunday,
+            ]
+        )
+    }
+    if any(
+        value not in {"0", "1", "2", "3", "4", "5", "6"}
+        for value in weekday_targets.values()
+    ):
+        raise HTTPException(422, "Ungültiger Story-Veröffentlichungs-Wochentag")
     item = db.scalar(
         select(StoryRule).where(StoryRule.team_id == team_id, StoryRule.name == name)
     )
@@ -1651,6 +1839,8 @@ def create_story_rule(
     item.fixed_time = fixed_time or None
     item.timing_mode = timing_mode
     item.weekday_times = weekday_times
+    item.weekday_targets = weekday_targets
+    item.media_slot = media_slot
     item.next_day = next_day
     item.template = template
     item.prompt_template = prompt_template
