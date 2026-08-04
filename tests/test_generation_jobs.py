@@ -92,6 +92,47 @@ def test_worker_claim_and_success_are_persistent(db, monkeypatch, tmp_path):
     assert result.active_key is None
 
 
+def test_automatic_generation_can_use_existing_approval_service(db, monkeypatch, tmp_path):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    job.parameters = {
+        **(job.parameters or {}),
+        "trigger_mode": "automatic_fussball",
+        "automatic_approval_requested": True,
+    }
+    db.commit()
+    claimed = generation.claim_next(db, "worker-auto-approval")
+    monkeypatch.setattr(generation, "build_renderer", lambda settings: object())
+    monkeypatch.setattr(generation, "build_text_generator", lambda settings: object())
+
+    def fake_create(
+        session, game_arg, team_arg, generator, renderer, post_type, logo_snapshot=None
+    ):
+        post = Post(
+            game_id=game_arg.id,
+            team_id=team_arg.id,
+            instagram_page_id=team_arg.instagram_page_id,
+            post_type=post_type,
+            status=PostStatus.PENDING,
+        )
+        session.add(post)
+        session.commit()
+        return post
+
+    approved = []
+    monkeypatch.setattr(generation, "create_post", fake_create)
+    monkeypatch.setattr(
+        generation,
+        "approve",
+        lambda session, post, actor: approved.append((post.id, actor.id)),
+    )
+    result = generation.process_generation_job(
+        db, claimed, Settings(generated_root=tmp_path, media_root=tmp_path)
+    )
+    assert result.status == GenerationJobStatus.SUCCEEDED
+    assert approved == [(result.result_post_id, user.id)]
+
+
 def test_progress_renderer_passes_persistent_job_identity(db, tmp_path):
     _, team, game, user = graph(db)
     job, _ = generation.enqueue_create(db, game, team, user, "announcement")

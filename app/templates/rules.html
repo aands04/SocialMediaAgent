@@ -12,17 +12,50 @@
   <form method="post" action="/rules/{{selected.id}}/defaults" class="gridform">
     <input type="hidden" name="csrf_token" value="{{csrf}}">
     <label><input type="checkbox" name="announcement_enabled" value="true" {% if selected.rules.get('announcement_enabled') %}checked{% endif %}> Ankündigung aktiv</label>
-    <label>Feed Minuten vor Anpfiff<input type="number" name="feed_before_minutes" min="0" value="{{selected.rules.get('feed_before_minutes',1440)}}"></label>
+    <input type="hidden" name="feed_before_minutes" value="{{selected.rules.get('feed_before_minutes',1440)}}">
+    <label>Feed-Zeitpunkt Ankündigung
+      <select name="announcement_timing_mode">
+        <option value="relative" {% if selected.rules.get('announcement_timing_mode','relative')=='relative' %}selected{% endif %}>Relativ zum Anpfiff</option>
+        <option value="weekday_fixed" {% if selected.rules.get('announcement_timing_mode')=='weekday_fixed' %}selected{% endif %}>Feste Uhrzeit je Spiel-Wochentag</option>
+      </select>
+    </label>
+    <label>Richtung zum Anpfiff<select name="announcement_offset_direction"><option value="before" {% if selected.rules.get('announcement_offset_direction','before')=='before' %}selected{% endif %}>vorher</option><option value="after" {% if selected.rules.get('announcement_offset_direction')=='after' %}selected{% endif %}>nachher</option></select></label>
+    <label>Abstand in Minuten<input type="number" name="announcement_offset_minutes" min="0" max="43200" value="{{selected.rules.get('announcement_offset_minutes',selected.rules.get('feed_before_minutes',1440))}}"></label>
     <label>Verspätete Freigabe<select name="late_approval">{% for v,n in [('publish_now','Sofort'),('manual','Manuelle Entscheidung'),('skip','Überspringen'),('next_story','Nächste Story')] %}<option value="{{v}}" {% if selected.rules.get('late_approval')==v %}selected{% endif %}>{{n}}</option>{% endfor %}</select></label>
     <label><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Ergebnismeldung aktiv</label>
-    <label>Wartezeit nach Ergebnis<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',15)}}"></label>
+    <label>Wartezeit nach bestätigter Ergebniserkennung<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',0)}}"></label>
+    <label>Feed-Zeitpunkt Ergebnis
+      <select name="result_timing_mode">
+        <option value="result_detected" {% if selected.rules.get('result_timing_mode','result_detected')=='result_detected' %}selected{% endif %}>Sofort nach bestätigter Erkennung</option>
+        <option value="relative" {% if selected.rules.get('result_timing_mode')=='relative' %}selected{% endif %}>Relativ zum Anpfiff</option>
+        <option value="weekday_fixed" {% if selected.rules.get('result_timing_mode')=='weekday_fixed' %}selected{% endif %}>Feste Uhrzeit je Spiel-Wochentag</option>
+      </select>
+    </label>
+    <label>Ergebnis-Richtung<select name="result_offset_direction"><option value="before" {% if selected.rules.get('result_offset_direction')=='before' %}selected{% endif %}>vor Anpfiff</option><option value="after" {% if selected.rules.get('result_offset_direction','after')=='after' %}selected{% endif %}>nach Anpfiff</option></select></label>
+    <label>Ergebnis-Abstand in Minuten<input type="number" name="result_offset_minutes" min="0" max="43200" value="{{selected.rules.get('result_offset_minutes',120)}}"></label>
     <label><input type="checkbox" name="allow_provisional_games" value="true" {% if selected.rules.get('allow_provisional_games') %}checked{% endif %}> Vorläufige FUSSBALL.DE-Spielpläne für Ankündigungen zulassen</label>
     <label><input type="checkbox" name="automatic_sync_enabled" value="true" {% if selected.rules.get('automatic_sync_enabled') %}checked{% endif %}> FUSSBALL.DE-Spielplan automatisch abrufen</label>
-    <label><input type="checkbox" name="automatic_generation_enabled" value="true" {% if selected.rules.get('automatic_generation_enabled') %}checked{% endif %}> Freigabepflichtige Entwürfe automatisch erzeugen</label>
-    <label>Generierungsvorlauf in Minuten<input type="number" name="generation_lead_minutes" min="0" max="10080" value="{{selected.rules.get('generation_lead_minutes',120)}}"></label>
+    <label>Normaler FUSSBALL.DE-Abruf alle<input type="number" name="sync_interval_hours" min="1" max="168" value="{{selected.rules.get('sync_interval_hours',24)}}"> Stunden</label>
+    <label>Am Spieltag Ergebnis prüfen alle<input type="number" name="result_poll_interval_minutes" min="5" max="120" value="{{selected.rules.get('result_poll_interval_minutes',15)}}"> Minuten</label>
+    <label><input type="checkbox" name="automatic_generation_enabled" value="true" {% if selected.rules.get('automatic_generation_enabled') %}checked{% endif %}> Beiträge und Storys automatisch erzeugen</label>
+    <input type="hidden" name="generation_lead_minutes" value="{{selected.rules.get('generation_lead_minutes',120)}}">
+    <label>Automatisch erzeugen<input type="number" name="generation_lead_days" min="0" max="30" value="{{selected.rules.get('generation_lead_days',4)}}"> Tage vor dem Spiel</label>
+    <label><input type="checkbox" name="auto_approve_announcements" value="true" {% if selected.rules.get('auto_approve_announcements') %}checked{% endif %}> Automatisch erzeugte Ankündigungen freigeben</label>
+    <label><input type="checkbox" name="auto_approve_results" value="true" {% if selected.rules.get('auto_approve_results') %}checked{% endif %}> Automatisch erzeugte Ergebnisbeiträge freigeben</label>
     <label><input type="checkbox" name="reminder_enabled" value="true" {% if selected.rules.get('reminder_enabled') %}checked{% endif %}> Separaten Erinnerungsbeitrag automatisch erzeugen</label>
     <label>Erinnerungs-Feed Minuten vor Anpfiff<input type="number" name="reminder_feed_before_minutes" min="0" max="10080" value="{{selected.rules.get('reminder_feed_before_minutes',360)}}"></label>
-    <p class="warning">Der vorläufige Providerstatus bleibt sichtbar. Absagen und Verlegungen bleiben immer gesperrt. Nach einer Änderung den Diagnose-Snapshot erneut importieren.</p>
+    <p class="warning">Automatische Freigaben können bei aktivierter Instagram-Automatik ohne weitere manuelle Prüfung veröffentlicht werden. Fehlende Medien, Logos, Rechte oder Sicherheitsprüfungen blockieren die Freigabe weiterhin. Absagen und Verlegungen bleiben gesperrt.</p>
+    <fieldset>
+      <legend>Feste Feed-Uhrzeiten nach Wochentag des Spiels</legend>
+      {% set announcement_times=selected.rules.get('announcement_weekday_times',{}) %}
+      {% set result_times=selected.rules.get('result_weekday_times',{}) %}
+      {% set weekday_names=['monday','tuesday','wednesday','thursday','friday','saturday','sunday'] %}
+      {% for key,label in [('0','Montag'),('1','Dienstag'),('2','Mittwoch'),('3','Donnerstag'),('4','Freitag'),('5','Samstag'),('6','Sonntag')] %}
+      <label>{{label}} – Ankündigung<input type="time" name="announcement_{{weekday_names[key|int]}}" value="{{announcement_times.get(key,'')}}"></label>
+      <label>{{label}} – Ergebnis<input type="time" name="result_{{weekday_names[key|int]}}" value="{{result_times.get(key,'')}}"></label>
+      {% endfor %}
+      <p>Diese Zeiten werden nur bei „Feste Uhrzeit je Spiel-Wochentag“ verwendet. Dann müssen alle sieben Tage ausgefüllt sein.</p>
+    </fieldset>
     <label>KI-Bildprompt Feed
       <select name="image_prompt_feed">
         <option value="default-image-feed">Standard-KI-Prompt Feed</option>
@@ -88,6 +121,17 @@
     <label>Richtung<select name="direction"><option value="before">vorher</option><option value="after">nachher</option></select></label>
     <label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" value="0"></label>
     <label>Feste Uhrzeit<input name="fixed_time" type="time"></label>
+    <label>Zeitmodell<select name="timing_mode"><option value="relative">Relativ / gemeinsame feste Uhrzeit</option><option value="weekday_fixed">Feste Uhrzeit je Spiel-Wochentag</option></select></label>
+    <fieldset>
+      <legend>Optionale Story-Uhrzeiten je Spiel-Wochentag</legend>
+      <label>Montag<input name="weekday_monday" type="time"></label>
+      <label>Dienstag<input name="weekday_tuesday" type="time"></label>
+      <label>Mittwoch<input name="weekday_wednesday" type="time"></label>
+      <label>Donnerstag<input name="weekday_thursday" type="time"></label>
+      <label>Freitag<input name="weekday_friday" type="time"></label>
+      <label>Samstag<input name="weekday_saturday" type="time"></label>
+      <label>Sonntag<input name="weekday_sunday" type="time"></label>
+    </fieldset>
     <label><input type="checkbox" name="next_day" value="true"> Folgetag</label>
     <label>HTML/CSS-Fallbackvorlage<input name="template" value="default-story" required></label>
     <label>KI-Bildprompt
@@ -105,7 +149,7 @@
   </form>
   <table>
     <tr><th>Name</th><th>Typ</th><th>Bezug</th><th>Offset</th><th>KI-Prompt</th><th>Fallback</th></tr>
-    {% for x in stories %}<tr><td>{{x.name}}</td><td>{{x.post_type}}</td><td>{{x.reference}} / {{x.direction}}</td><td>{{x.offset_minutes}} min{% if x.fixed_time %}, {{x.fixed_time}}{% endif %}</td><td>{{x.prompt_template}}</td><td>{{x.template}}</td></tr>{% endfor %}
+    {% for x in stories %}<tr><td>{{x.name}}</td><td>{{x.post_type}}</td><td>{{x.reference}} / {{x.direction}}</td><td>{% if x.timing_mode=='weekday_fixed' %}je Wochentag{% else %}{{x.offset_minutes}} min{% if x.fixed_time %}, {{x.fixed_time}}{% endif %}{% endif %}</td><td>{{x.prompt_template}}</td><td>{{x.template}}</td></tr>{% endfor %}
   </table>
 </section>
 {% endif %}

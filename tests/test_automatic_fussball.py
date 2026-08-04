@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 
 from app.config import Settings
 from app.games.automatic import (
+    _next_interval,
     _observe_results,
     claim_due_team,
     plan_generation_jobs,
@@ -18,9 +19,11 @@ from app.models import (
     InstagramPage,
     ProviderSnapshot,
     Role,
+    StoryRule,
     Team,
     User,
 )
+from app.posts.service import feed_time, story_time
 
 
 def _digit_font() -> bytes:
@@ -182,6 +185,89 @@ def test_announcement_is_queued_once_and_stays_unapproved(db):
     job = db.query(GenerationJob).one()
     assert job.parameters["trigger_mode"] == "automatic_fussball"
     assert job.status.value == "queued"
+
+
+def test_announcement_generation_uses_configured_day_lead(db):
+    now = datetime.now(timezone.utc)
+    team, game = _base(db, now)
+    team.rules = {**team.rules, "generation_lead_days": 4}
+    game.kickoff = now + timedelta(days=5)
+    db.commit()
+    settings = Settings(automatic_post_generation_enabled=True)
+    assert plan_generation_jobs(db, team, settings, now=now) == 0
+    assert plan_generation_jobs(db, team, settings, now=now + timedelta(days=1)) == 1
+
+
+def test_result_is_queued_immediately_after_confirmation(db):
+    now = datetime.now(timezone.utc)
+    team, game = _base(db, now)
+    team.rules = {**team.rules, "generation_lead_days": 4}
+    game.kickoff = now - timedelta(hours=3)
+    game.result_confirmed = True
+    game.status = "finished"
+    game.overrides = {"result_detected_at": now.isoformat()}
+    db.commit()
+    settings = Settings(automatic_post_generation_enabled=True)
+    assert plan_generation_jobs(db, team, settings, now=now) == 1
+    job = db.query(GenerationJob).one()
+    assert job.post_type == "result"
+
+
+def test_matchday_uses_team_result_poll_interval_and_normal_days_are_daily(db):
+    now = datetime(2026, 8, 9, 8, 0, tzinfo=timezone.utc)
+    team, game = _base(db, now)
+    team.rules = {
+        **team.rules,
+        "sync_interval_hours": 24,
+        "result_poll_interval_minutes": 15,
+    }
+    game.kickoff = datetime(2026, 8, 9, 13, 0, tzinfo=timezone.utc)
+    db.commit()
+    assert _next_interval(db, team.id, Settings(), now) == 15 * 60
+    assert _next_interval(db, team.id, Settings(), now - timedelta(days=2)) == 24 * 3600
+
+
+def test_weekday_fixed_feed_and_story_times_use_berlin_match_date(db):
+    now = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+    team, game = _base(db, now)
+    game.kickoff = datetime(2026, 8, 9, 13, 0, tzinfo=timezone.utc)
+    team.rules = {
+        **team.rules,
+        "announcement_timing_mode": "weekday_fixed",
+        "announcement_weekday_times": {"6": "09:00"},
+    }
+    story = StoryRule(
+        team_id=team.id,
+        name="Sonntag fest",
+        post_type="announcement",
+        reference="kickoff",
+        direction="before",
+        offset_minutes=0,
+        timing_mode="weekday_fixed",
+        weekday_times={"6": "10:30"},
+        template="default-story",
+    )
+    db.add(story)
+    db.commit()
+    feed_at, absolute = feed_time(team, game, "announcement")
+    assert absolute is True
+    assert feed_at == datetime(2026, 8, 9, 7, 0, tzinfo=timezone.utc)
+    assert story_time(story, game) == datetime(2026, 8, 9, 8, 30, tzinfo=timezone.utc)
+
+
+def test_automatic_approval_choice_is_frozen_into_generation_job(db):
+    now = datetime.now(timezone.utc)
+    team, _ = _base(db, now)
+    team.rules = {
+        **team.rules,
+        "generation_lead_days": 4,
+        "auto_approve_announcements": True,
+    }
+    db.commit()
+    settings = Settings(automatic_post_generation_enabled=True)
+    assert plan_generation_jobs(db, team, settings, now=now) == 1
+    job = db.query(GenerationJob).one()
+    assert job.parameters["automatic_approval_requested"] is True
 
 
 def test_result_requires_two_stable_observations(db):

@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -49,10 +50,90 @@ def reserve_image(db:Session,team_id:str,game_id:str)->MediaAsset|None:
     asset=db.scalar(select(MediaAsset).where(MediaAsset.team_id==team_id,MediaAsset.active.is_(True),MediaAsset.available.is_(True),MediaAsset.reserved_game_id.is_(None),MediaAsset.uses==0).order_by(MediaAsset.size.desc(),MediaAsset.filename).with_for_update(skip_locked=True))
     if asset: asset.reserved_game_id=game_id; asset.uses+=1; db.flush()
     return asset
+BERLIN = ZoneInfo("Europe/Berlin")
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _weekday_time(game: Game, values: dict | None) -> datetime | None:
+    """Return a configured local time on the match date, normalized to UTC."""
+    local_kickoff = _aware_utc(game.kickoff).astimezone(BERLIN)
+    configured = (values or {}).get(str(local_kickoff.weekday()))
+    if not configured:
+        return None
+    try:
+        hour, minute = map(int, configured.split(":"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return None
+    return local_kickoff.replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    ).astimezone(timezone.utc)
+
+
+def feed_time(team: Team, game: Game, post_type: str) -> tuple[datetime, bool]:
+    """Resolve the feed publication time and whether it is an absolute schedule."""
+    rules = team.rules or {}
+    kickoff = _aware_utc(game.kickoff)
+    if post_type == "result":
+        detected = (game.overrides or {}).get("result_detected_at")
+        detected_at = (
+            _aware_utc(datetime.fromisoformat(detected))
+            if detected
+            else _aware_utc(game.checked_at)
+        )
+        earliest = detected_at + timedelta(
+            minutes=int(rules.get("result_wait_minutes", 15))
+        )
+        mode = rules.get("result_timing_mode", "result_detected")
+        if mode == "weekday_fixed":
+            target = _weekday_time(game, rules.get("result_weekday_times"))
+            return max(target or earliest, earliest), True
+        if mode == "relative":
+            minutes = int(rules.get("result_offset_minutes", 120))
+            direction = rules.get("result_offset_direction", "after")
+            target = kickoff + timedelta(
+                minutes=minutes if direction == "after" else -minutes
+            )
+            return max(target, earliest), False
+        return earliest, False
+    if post_type == "reminder":
+        return kickoff - timedelta(
+            minutes=int(rules.get("reminder_feed_before_minutes", 360))
+        ), False
+
+    mode = rules.get("announcement_timing_mode", "relative")
+    if mode == "weekday_fixed":
+        target = _weekday_time(game, rules.get("announcement_weekday_times"))
+        if target is not None:
+            return target, True
+    minutes = int(
+        rules.get(
+            "announcement_offset_minutes", rules.get("feed_before_minutes", 1440)
+        )
+    )
+    direction = rules.get("announcement_offset_direction", "before")
+    return kickoff + timedelta(
+        minutes=minutes if direction == "after" else -minutes
+    ), False
+
+
 def story_time(rule:StoryRule,game:Game,approved_at:datetime|None=None)->datetime:
     detected=(game.overrides or {}).get("result_detected_at")
     result_detected=datetime.fromisoformat(detected) if detected else game.checked_at
     refs={"kickoff":game.kickoff,"planned_end":game.kickoff+timedelta(minutes=120),"result_detected":result_detected,"approval":approved_at}
+    if getattr(rule, "timing_mode", "relative") == "weekday_fixed":
+        configured = _weekday_time(game, getattr(rule, "weekday_times", None))
+        if configured is not None:
+            if rule.post_type == "result":
+                detected_at = _aware_utc(result_detected)
+                return max(configured, detected_at)
+            return configured
     base=refs.get(rule.reference) or game.checked_at
     delta=timedelta(minutes=rule.offset_minutes)*(1 if rule.direction=="after" else -1)
     result=base+delta
@@ -186,15 +267,8 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
     post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v1.png",{**facts,"template":feed_design,"image_prompt":feed_prompt}))
     if hasattr(renderer,"metadata_for"):
         post.design_snapshot={**post.design_snapshot,"media":{"feed":renderer.metadata_for(post.feed_path)}}
-    if post_type=="result":
-        detected=(game.overrides or {}).get("result_detected_at")
-        result_detected=datetime.fromisoformat(detected) if detected else game.checked_at
-        feed_at=result_detected+timedelta(minutes=int(team.rules.get("result_wait_minutes",15)))
-    elif post_type=="reminder":
-        feed_at=game.kickoff-timedelta(minutes=int(team.rules.get("reminder_feed_before_minutes",360)))
-    else:
-        feed_at=game.kickoff-timedelta(minutes=int(team.rules.get("feed_before_minutes",1440)))
-    db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=page.id,kind="feed",media_path=post.feed_path,text_snapshot=post.text,scheduled_at=feed_at,idempotency_key=f"{post.id}:feed:v1"))
+    feed_at, feed_is_absolute = feed_time(team, game, post_type)
+    db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=page.id,kind="feed",media_path=post.feed_path,text_snapshot=post.text,scheduled_at=feed_at,absolute_time=feed_is_absolute,idempotency_key=f"{post.id}:feed:v1"))
     rules=db.scalars(select(StoryRule).where(StoryRule.team_id==team.id,StoryRule.post_type==post_type,StoryRule.active.is_(True)).order_by(StoryRule.sort_order)).all(); seen=set()
     story_snapshots=[]
     for rule in rules:
@@ -212,7 +286,7 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
         else:
             path=str(renderer.render("story",f"{post.id}/story-{rule.id}-v1.png",{**facts,"template":story_design}))
         story_snapshots.append({"rule_id":rule.id,"template":story_design,"prompt":story_prompt.snapshot() if story_prompt else None,"media_version":1,"rendering":renderer.metadata_for(path) if hasattr(renderer,"metadata_for") else {}})
-        db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=rule.instagram_page_id or page.id,story_rule_id=rule.id,kind="story",media_path=path,text_snapshot=post.text if rule.text_variant else None,scheduled_at=at,idempotency_key=f"{post.id}:story:{rule.id}:v1"))
+        db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=rule.instagram_page_id or page.id,story_rule_id=rule.id,kind="story",media_path=path,text_snapshot=post.text if rule.text_variant else None,scheduled_at=at,absolute_time=getattr(rule,"timing_mode","relative")=="weekday_fixed",idempotency_key=f"{post.id}:story:{rule.id}:v1"))
     post.design_snapshot={**post.design_snapshot,"stories":story_snapshots}
     post.critical_warnings=warnings; post.status=PostStatus.INCOMPLETE if warnings else PostStatus.PENDING; db.commit(); return post
 
