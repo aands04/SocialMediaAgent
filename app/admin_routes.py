@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.approvals.service import ApprovalError, approve, edit_text
-from app.auth.service import allowed, hash_password, validate_new_password
+from app.auth.service import allowed, hash_password, normalize_email, validate_new_password
 from app.config import get_settings
 from app.db import get_db
 from app.games.identity import team_name_variants
@@ -545,14 +545,66 @@ def create_user(
     password_error = validate_new_password(password)
     if password_error:
         raise HTTPException(422, password_error)
+    try:
+        normalized_email = normalize_email(email)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     item = User(
-        email=email.lower(), password_hash=hash_password(password), role=role, all_teams=all_teams
+        email=normalized_email,
+        password_hash=hash_password(password),
+        role=role,
+        all_teams=all_teams,
+        active=True,
+        registration_status="approved",
+        registration_reviewed_at=datetime.now(timezone.utc),
+        registration_reviewed_by=current.id,
     )
     db.add(item)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "E-Mail-Adresse wird bereits verwendet") from exc
     audit(db, current, "user.created", "user", item.id, details={"role": role.value})
     db.commit()
     return redirect("/users")
+
+
+@router.post("/users/{user_id}/registration")
+def review_registration(
+    user_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    action: str = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    item = db.get(User, user_id)
+    if not item or item.archived_at is not None:
+        raise HTTPException(404)
+    if item.registration_status != "pending":
+        raise HTTPException(409, "Registrierung wurde bereits bearbeitet")
+    now = datetime.now(timezone.utc)
+    if action == "approve":
+        item.registration_status = "approved"
+        item.active = True
+        message = f"Registrierung von {item.email} wurde freigegeben"
+        audit_action = "registration.approved"
+    elif action == "reject":
+        item.registration_status = "rejected"
+        item.active = False
+        item.auth_version += 1
+        message = f"Registrierung von {item.email} wurde abgelehnt"
+        audit_action = "registration.rejected"
+    else:
+        raise HTTPException(422, "Unbekannte Aktion")
+    item.registration_reviewed_at = now
+    item.registration_reviewed_by = current.id
+    audit(db, current, audit_action, "user", item.id)
+    db.commit()
+    return redirect("/users", message)
 
 
 @router.post("/users/{user_id}/teams")
@@ -570,6 +622,8 @@ def assign_user_teams(
     item = db.get(User, user_id)
     if not item:
         raise HTTPException(404)
+    if item.registration_status == "pending":
+        raise HTTPException(409, "Registrierung muss zuerst freigegeben werden")
     db.query(UserTeam).filter(UserTeam.user_id == user_id).delete()
     item.all_teams = all_teams
     if not all_teams:
@@ -603,6 +657,8 @@ def assign_user_role(
     item = db.get(User, user_id)
     if not item or item.archived_at is not None:
         raise HTTPException(404)
+    if item.registration_status == "pending":
+        raise HTTPException(409, "Registrierung muss zuerst freigegeben werden")
     if item.role == Role.ADMIN and role != Role.ADMIN:
         active_admin_ids = list(
             db.scalars(

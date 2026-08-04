@@ -51,7 +51,9 @@ PUBLISHER_MODE=dry-run GLOBAL_PUBLISH_ENABLED=false docker compose -f docker-com
 
 Rollen und Mannschaftszuordnungen werden unabhängig voneinander geprüft. Ein
 Redakteur oder Autor kann daher nur für die ihm ausdrücklich zugewiesenen
-Mannschaften handeln. Nur Administratoren dürfen Konten anlegen oder Rollen
+Mannschaften handeln. Neue Benutzer können auf der Anmeldeseite eine
+Registrierung beantragen, bleiben aber bis zur ausdrücklichen Freigabe durch
+einen Administrator gesperrt. Nur Administratoren dürfen Konten direkt anlegen oder Rollen
 ändern; der letzte aktive Administrator kann nicht herabgestuft werden.
 4. **Zeitregeln:** Feed als Minuten vor Anpfiff; Story-Regeln referenzieren Anpfiff, geplantes Ende, Ergebniserkennung, Freigabe oder Folgetag, mit Offset/fester Uhrzeit. Jede Regel erzeugt einen Job; Kollisionen werden nicht unbemerkt dupliziert.
 5. **Medien:** Spielerbilder können in der Medienbibliothek als JPG, PNG oder WebP mehrfach hochgeladen oder aus einem read-only eingebundenen Team-Unterordner eingelesen werden. Dashboard-Uploads liegen getrennt im persistenten Upload-Volume; die externe Medienwurzel bleibt schreibgeschützt. Ein Bild wird atomar einem Spiel reserviert und darf in dessen Feed/Storys wiederverwendet werden. Ohne Bild entsteht eine neutrale Grafik mit Prüfhinweis.

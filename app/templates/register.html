@@ -1,0 +1,15 @@
+{% extends 'base.html' %}{% block content %}
+<section class="login">
+  <h1>Registrierung beantragen</h1>
+  <p>Neue Konten werden erst nach Prüfung durch die Administration freigeschaltet.</p>
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>E-Mail<input name="email" type="email" value="{{ email or '' }}" autocomplete="email" required></label>
+    <label>Passwort<input name="password" type="password" minlength="8" maxlength="256" autocomplete="new-password" required></label>
+    <label>Passwort wiederholen<input name="password_confirmation" type="password" minlength="8" maxlength="256" autocomplete="new-password" required></label>
+    <button>Registrierung einreichen</button>
+  </form>
+  <p><a href="/login">Zurück zur Anmeldung</a></p>
+</section>
+{% endblock %}

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{ title or 'Vereinszentrale' }}</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260804-post-targeting&amp;feature=password-management">
+  <link rel="stylesheet" href="/static/style.css?v=20260804-post-targeting&amp;feature=account-registration">
 </head>
 <body class="{% if environment == 'meta-test' %}meta-test-environment{% endif %}">
 <header>
@@ -27,6 +27,7 @@
   {% if user.role.value != 'viewer' %}<a href="/posts/manual/new">Beitrag manuell erstellen</a>{% endif %}
   {% if user.role.value == 'admin' %}<a href="/users">Benutzer & Rechte</a>{% endif %}
   <a href="/account/password">Passwort ändern</a>
+  <a href="/account/email">E-Mail-Adresse ändern</a>
   <form method="post" action="/logout"><button>Abmelden</button></form>
 </nav>
 {% endif %}

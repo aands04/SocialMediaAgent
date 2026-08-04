@@ -36,6 +36,26 @@ aktuelles Passwort angeben. Nach erfolgreicher Änderung werden durch die
 erhöhte Authentifizierungsversion alle bestehenden Sitzungen des Kontos
 ungültig und eine erneute Anmeldung ist erforderlich.
 
+Passwörter müssen mindestens acht und dürfen höchstens 256 Zeichen lang sein.
+
+## Registrierung und administrative Freigabe
+
+Auf der Anmeldeseite können neue Benutzer über `Registrierung beantragen` ein
+Konto anfordern. Solche Konten erhalten zunächst ausschließlich die Rolle
+`Betrachter`, besitzen keine Mannschaftsrechte und sind technisch inaktiv. Eine
+Anmeldung ist erst möglich, nachdem ein Administrator den Antrag unter
+`Benutzer & Rechte` ausdrücklich freigegeben hat. Ablehnung und Freigabe werden
+auditiert. Rollen und Mannschaftsrechte werden anschließend getrennt vergeben.
+
+## E-Mail-Adresse ändern
+
+Jeder angemeldete Benutzer kann unter `E-Mail-Adresse ändern` nach Eingabe des
+aktuellen Passworts eine neue Adresse anfordern. Die Adresse wird nicht sofort
+geändert: Die Anwendung sendet einen einmal verwendbaren Bestätigungslink an
+die **bisherige** E-Mail-Adresse. Erst die zusätzliche Bestätigung übernimmt die
+neue Adresse, widerruft offene Passwort-Reset-Links und beendet alle bestehenden
+Sitzungen des Kontos. Der Token wird nur als SHA-256-Hash gespeichert.
+
 ## Passwort vergessen per E-Mail aktivieren
 
 1. SMTP-Passwort als eingeschränkte Secret-Datei anlegen:
@@ -57,6 +77,7 @@ ungültig und eine erneute Anmeldung ist erforderlich.
    PASSWORD_RESET_ENABLED=true
    PASSWORD_RESET_TOKEN_TTL_SECONDS=1800
    PASSWORD_RESET_REQUEST_COOLDOWN_SECONDS=60
+   EMAIL_CHANGE_TOKEN_TTL_SECONDS=1800
    SMTP_HOST=smtp.example.org
    SMTP_PORT=587
    SMTP_STARTTLS=true

@@ -56,12 +56,26 @@ class Timestamped:
     updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now)
     version: Mapped[int]=mapped_column(Integer,default=1,nullable=False)
 class User(Base,Timestamped):
-    __tablename__="users"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); email:Mapped[str]=mapped_column(String(255),unique=True,index=True); password_hash:Mapped[str]=mapped_column(String(255)); role:Mapped[Role]=mapped_column(Enum(Role),default=Role.VIEWER); all_teams:Mapped[bool]=mapped_column(Boolean,default=False); active:Mapped[bool]=mapped_column(Boolean,default=True); archived_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); failed_logins:Mapped[int]=mapped_column(Integer,default=0); locked_until:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); auth_version:Mapped[int]=mapped_column(Integer,default=1,server_default="1",nullable=False)
+    __tablename__="users"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); email:Mapped[str]=mapped_column(String(255),unique=True,index=True); password_hash:Mapped[str]=mapped_column(String(255)); role:Mapped[Role]=mapped_column(Enum(Role),default=Role.VIEWER); all_teams:Mapped[bool]=mapped_column(Boolean,default=False); active:Mapped[bool]=mapped_column(Boolean,default=True); archived_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); failed_logins:Mapped[int]=mapped_column(Integer,default=0); locked_until:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); auth_version:Mapped[int]=mapped_column(Integer,default=1,server_default="1",nullable=False); registration_status:Mapped[str]=mapped_column(String(20),default="approved",server_default="approved",nullable=False,index=True); registration_requested_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); registration_reviewed_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); registration_reviewed_by:Mapped[str|None]=mapped_column(ForeignKey("users.id",ondelete="SET NULL"))
 class PasswordResetToken(Base):
     __tablename__="password_reset_tokens"
     id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
     user_id:Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True)
     token_hash:Mapped[str]=mapped_column(String(64),unique=True,index=True)
+    expires_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),index=True)
+    used_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    requested_ip:Mapped[str|None]=mapped_column(String(80))
+    delivery_status:Mapped[str]=mapped_column(String(20),default="pending")
+    delivery_error:Mapped[str|None]=mapped_column(String(160))
+    created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+class EmailChangeToken(Base):
+    __tablename__="email_change_tokens"
+    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
+    user_id:Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True)
+    token_hash:Mapped[str]=mapped_column(String(64),unique=True,index=True)
+    old_email:Mapped[str]=mapped_column(String(255))
+    new_email:Mapped[str]=mapped_column(String(255),index=True)
+    auth_version:Mapped[int]=mapped_column(Integer)
     expires_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),index=True)
     used_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
     requested_ip:Mapped[str|None]=mapped_column(String(80))

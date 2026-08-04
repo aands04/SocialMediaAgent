@@ -7,7 +7,7 @@
   <form method="post" class="gridform">
     <input type="hidden" name="csrf_token" value="{{csrf}}">
     <label>E-Mail<input type="email" name="email" required></label>
-    <label>Initialpasswort<input type="password" name="password" minlength="12" required></label>
+    <label>Initialpasswort<input type="password" name="password" minlength="8" maxlength="256" required></label>
     <label>Rolle
       <select name="role" required>
         {% for role in roles %}<option value="{{role.value}}">{{role.label}}</option>{% endfor %}
@@ -29,7 +29,19 @@
 {% for x in items %}
 <article class="panel">
   <h2>{{x.email}} <small>{{x.role.label}}</small></h2>
+  <p><strong>Registrierung:</strong>
+    {% if x.registration_status == 'pending' %}<span class="warning">wartet auf Freigabe</span>
+    {% elif x.registration_status == 'rejected' %}<span class="alert">abgelehnt</span>
+    {% else %}<span class="notice">freigegeben</span>{% endif %}
+  </p>
   <p>{{x.role.description}}</p>
+  {% if x.registration_status == 'pending' %}
+  <form method="post" action="/users/{{x.id}}/registration" class="inline-actions">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <button name="action" value="approve">Registrierung freigeben</button>
+    <button name="action" value="reject" class="danger">Registrierung ablehnen</button>
+  </form>
+  {% else %}
   <form method="post" action="/users/{{x.id}}/role" class="gridform">
     <input type="hidden" name="csrf_token" value="{{csrf}}">
     <label>Rolle ändern
@@ -47,6 +59,7 @@
     {% endfor %}
     <button>Zuordnung speichern</button>
   </form>
+  {% endif %}
 </article>
 {% endfor %}
 {% endblock %}
