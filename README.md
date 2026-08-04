@@ -48,10 +48,14 @@ PUBLISHER_MODE=dry-run GLOBAL_PUBLISH_ENABLED=false docker compose -f docker-com
 
 ### Manuell erstellte Beiträge
 
-Unter **Beitrag manuell erstellen** können berechtigte Benutzer einen bereits
-gestalteten Feed (1080 × 1350), ein Karussell aus 2 bis 10 geordneten Bildern
-(je 1080 × 1350) oder eine Story (1080 × 1920) als JPG, PNG oder WebP
-hochladen. Die Karussell-Reihenfolge lässt sich vor dem Absenden mit den
+Unter **Beitrag manuell erstellen** können berechtigte Benutzer einen Feed,
+ein Karussell aus 2 bis 10 geordneten Bildern oder eine Story als JPG, PNG oder
+WebP hochladen. Die Ausgangsbilder müssen nicht bereits das Instagram-Format
+besitzen: Eine lokale Canvas-Vorschau erlaubt pro Bild Zoom sowie horizontale
+und vertikale Ausrichtung. Das Backend validiert den gewählten Bereich erneut
+und erzeugt daraus versionierte PNGs mit 1080 × 1350 Pixel für Feed und
+Karussell beziehungsweise 1080 × 1920 Pixel für Storys. Die unveränderten
+Originaldateien bleiben privat erhalten. Die Karussell-Reihenfolge lässt sich vor dem Absenden mit den
 Pfeiltasten festlegen; ein gemeinsamer Text und ein Veröffentlichungszeitpunkt
 in der Mannschaftszeitzone gelten für das gesamte Karussell. Die Anwendung
 verändert die Motive nicht und legt genau einen unfreigegebenen

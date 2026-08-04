@@ -1,4 +1,6 @@
 import hashlib
+import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +28,8 @@ from app.models import (
 from app.rendering.service import Renderer, RenderValidationError
 
 MAX_MANUAL_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_MANUAL_SOURCE_PIXELS = 50_000_000
+MAX_MANUAL_SOURCE_DIMENSION = 12_000
 MAX_MANUAL_TEXT_CHARS = 2200
 MANUAL_IMAGE_TYPES = {
     ".jpg": ("JPEG", "image/jpeg"),
@@ -51,10 +55,94 @@ class ValidatedManualImage:
     original_filename: str
     original_mime_type: str
     original_checksum: str
+    original: bytes
+    original_extension: str
+    source_width: int
+    source_height: int
+    crop: dict[str, float]
     png: bytes
     png_checksum: str
     width: int
     height: int
+
+
+def parse_manual_crop_specs(value: str | None, image_count: int) -> list[dict[str, float] | None]:
+    if not value or not value.strip():
+        return [None] * image_count
+    try:
+        raw = json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise ManualPostError(
+            "Zuschneidedaten sind ungültig; Bilder bitte erneut ausrichten"
+        ) from exc
+    if not isinstance(raw, list) or len(raw) != image_count:
+        raise ManualPostError("Zuschneidedaten passen nicht zu den ausgewählten Bildern")
+    result: list[dict[str, float] | None] = []
+    for item in raw:
+        if item is None:
+            result.append(None)
+            continue
+        if not isinstance(item, dict):
+            raise ManualPostError("Zuschneidedaten sind ungültig")
+        try:
+            crop = {key: float(item[key]) for key in ("x", "y", "width", "height")}
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ManualPostError("Zuschneidedaten sind unvollständig") from exc
+        if not all(math.isfinite(number) for number in crop.values()):
+            raise ManualPostError("Zuschneidedaten enthalten ungültige Werte")
+        if (
+            crop["x"] < 0
+            or crop["y"] < 0
+            or crop["width"] <= 0
+            or crop["height"] <= 0
+            or crop["x"] + crop["width"] > 1.000001
+            or crop["y"] + crop["height"] > 1.000001
+        ):
+            raise ManualPostError("Zuschneidebereich liegt außerhalb des Bildes")
+        result.append(crop)
+    return result
+
+
+def _crop_box(
+    source_size: tuple[int, int],
+    target_size: tuple[int, int],
+    crop: dict[str, float] | None,
+) -> tuple[tuple[int, int, int, int], dict[str, float]]:
+    source_width, source_height = source_size
+    target_width, target_height = target_size
+    target_ratio = target_width / target_height
+    if crop is None:
+        if source_width / source_height > target_ratio:
+            crop_height = source_height
+            crop_width = crop_height * target_ratio
+        else:
+            crop_width = source_width
+            crop_height = crop_width / target_ratio
+        left = (source_width - crop_width) / 2
+        top = (source_height - crop_height) / 2
+        normalized = {
+            "x": left / source_width,
+            "y": top / source_height,
+            "width": crop_width / source_width,
+            "height": crop_height / source_height,
+        }
+    else:
+        normalized = crop.copy()
+        supplied_ratio = (normalized["width"] * source_width) / (
+            normalized["height"] * source_height
+        )
+        if not math.isclose(supplied_ratio, target_ratio, rel_tol=0.01, abs_tol=0.01):
+            raise ManualPostError("Zuschneidebereich besitzt nicht das gewählte Instagram-Format")
+    left = max(0, round(normalized["x"] * source_width))
+    top = max(0, round(normalized["y"] * source_height))
+    right = min(source_width, round((normalized["x"] + normalized["width"]) * source_width))
+    bottom = min(
+        source_height,
+        round((normalized["y"] + normalized["height"]) * source_height),
+    )
+    if right - left < 2 or bottom - top < 2:
+        raise ManualPostError("Zuschneidebereich ist zu klein")
+    return (left, top, right, bottom), normalized
 
 
 def validate_manual_image(
@@ -62,6 +150,7 @@ def validate_manual_image(
     content_type: str | None,
     content: bytes,
     kind: str,
+    crop: dict[str, float] | None = None,
 ) -> ValidatedManualImage:
     if kind not in MANUAL_IMAGE_SIZES:
         raise ManualPostError("Medienart muss Feed, Karussell oder Story sein")
@@ -88,18 +177,24 @@ def validate_manual_image(
             raise ManualPostError("Animierte Bilder sind nicht zulässig")
         with Image.open(BytesIO(content)) as source:
             image = ImageOps.exif_transpose(source)
+            if (
+                image.width > MAX_MANUAL_SOURCE_DIMENSION
+                or image.height > MAX_MANUAL_SOURCE_DIMENSION
+                or image.width * image.height > MAX_MANUAL_SOURCE_PIXELS
+            ):
+                raise ManualPostError("Bildabmessungen sind zu groß")
             image.load()
-            if image.size != MANUAL_IMAGE_SIZES[kind]:
-                width, height = MANUAL_IMAGE_SIZES[kind]
-                raise ManualPostError(
-                    f"Falsche Auflösung; für {kind} werden genau {width} × {height} Pixel benötigt"
-                )
             if "A" in image.getbands():
                 normalized = image.convert("RGBA")
                 if normalized.getchannel("A").getextrema() == (0, 0):
                     raise ManualPostError("Bild ist vollständig transparent")
             else:
                 normalized = image.convert("RGB")
+            source_width, source_height = normalized.size
+            box, effective_crop = _crop_box(normalized.size, MANUAL_IMAGE_SIZES[kind], crop)
+            normalized = normalized.crop(box).resize(
+                MANUAL_IMAGE_SIZES[kind], Image.Resampling.LANCZOS
+            )
             target = BytesIO()
             normalized.save(target, format="PNG", optimize=True)
             png = target.getvalue()
@@ -111,6 +206,11 @@ def validate_manual_image(
         original_filename=safe_name,
         original_mime_type=expected_mime,
         original_checksum=hashlib.sha256(content).hexdigest(),
+        original=content,
+        original_extension=suffix,
+        source_width=source_width,
+        source_height=source_height,
+        crop=effective_crop,
         png=png,
         png_checksum=hashlib.sha256(png).hexdigest(),
         width=MANUAL_IMAGE_SIZES[kind][0],
@@ -162,18 +262,14 @@ def create_manual_post(
     if not body:
         raise ManualPostError("Text darf nicht leer sein")
     if len(body) > MAX_MANUAL_TEXT_CHARS:
-        raise ManualPostError(
-            f"Text darf höchstens {MAX_MANUAL_TEXT_CHARS} Zeichen enthalten"
-        )
+        raise ManualPostError(f"Text darf höchstens {MAX_MANUAL_TEXT_CHARS} Zeichen enthalten")
     if kind not in MANUAL_IMAGE_SIZES:
         raise ManualPostError("Medienart muss Feed, Karussell oder Story sein")
     if kind == "carousel" and not 2 <= len(images) <= MAX_CAROUSEL_IMAGES:
         raise ManualPostError("Ein Karussell benötigt 2 bis 10 Bilder")
     if kind != "carousel" and len(images) != 1:
         raise ManualPostError("Feed und Story benötigen genau ein Bild")
-    existing = db.scalar(
-        select(Post).where(Post.manual_submission_id == submission_id)
-    )
+    existing = db.scalar(select(Post).where(Post.manual_submission_id == submission_id))
     if existing:
         return existing, False
     page = db.get(InstagramPage, team.instagram_page_id)
@@ -200,27 +296,36 @@ def create_manual_post(
         db.flush()
     except IntegrityError as exc:
         db.rollback()
-        existing = db.scalar(
-            select(Post).where(Post.manual_submission_id == submission_id)
-        )
+        existing = db.scalar(select(Post).where(Post.manual_submission_id == submission_id))
         if existing:
             return existing, False
         raise ManualPostError("Beitrag konnte nicht eindeutig angelegt werden") from exc
 
     root = settings.generated_root.resolve()
     targets: list[Path] = []
+    original_targets: list[Path] = []
     try:
         renderer = Renderer(root, settings.media_root, settings.upload_root)
         for position, image in enumerate(images, start=1):
-            filename = (
-                f"carousel-{position:02d}-v1.png"
-                if kind == "carousel"
-                else f"{kind}-v1.png"
-            )
+            filename = f"carousel-{position:02d}-v1.png" if kind == "carousel" else f"{kind}-v1.png"
             target = (root / "manual" / post.id / filename).resolve()
             if root not in target.parents:
                 raise ManualPostError("Unsicherer Zielpfad wurde blockiert")
             targets.append(target)
+            original_target = (
+                root
+                / "manual"
+                / post.id
+                / "originals"
+                / f"original-{position:02d}-{image.original_checksum[:12]}{image.original_extension}"
+            ).resolve()
+            if root not in original_target.parents:
+                raise ManualPostError("Unsicherer Originalpfad wurde blockiert")
+            original_targets.append(original_target)
+            original_target.parent.mkdir(parents=True, exist_ok=True)
+            original_temporary = original_target.with_suffix(original_target.suffix + ".tmp")
+            original_temporary.write_bytes(image.original)
+            original_temporary.replace(original_target)
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_suffix(".tmp")
             temporary.write_bytes(image.png)
@@ -230,6 +335,9 @@ def create_manual_post(
         for target in targets:
             target.unlink(missing_ok=True)
             target.with_suffix(".tmp").unlink(missing_ok=True)
+        for target in original_targets:
+            target.unlink(missing_ok=True)
+            target.with_suffix(target.suffix + ".tmp").unlink(missing_ok=True)
         db.rollback()
         raise ManualPostError(f"Bild konnte nicht sicher gespeichert werden: {exc}") from exc
 
@@ -249,6 +357,12 @@ def create_manual_post(
                     "final_checksum": image.png_checksum,
                     "width": image.width,
                     "height": image.height,
+                }
+                | {
+                    "source_width": image.source_width,
+                    "source_height": image.source_height,
+                    "crop": image.crop,
+                    "original_path": str(original_targets[position - 1]),
                 }
                 for position, image in enumerate(images, start=1)
             ],
@@ -273,9 +387,7 @@ def create_manual_post(
     )
     db.add(publication)
     db.flush()
-    for position, (image, target) in enumerate(
-        zip(images, targets, strict=True), start=1
-    ):
+    for position, (image, target) in enumerate(zip(images, targets, strict=True), start=1):
         db.add(
             PublicationMediaItem(
                 publication_job_id=publication.id,
@@ -309,6 +421,8 @@ def create_manual_post(
     except Exception:
         db.rollback()
         for target in targets:
+            target.unlink(missing_ok=True)
+        for target in original_targets:
             target.unlink(missing_ok=True)
         raise
     return post, True

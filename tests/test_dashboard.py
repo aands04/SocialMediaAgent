@@ -221,6 +221,8 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
     form = client.get("/posts/manual/new")
     assert form.status_code == 200
     assert "Beitrag manuell erstellen" in form.text
+    assert "manual-crop-canvas" in form.text
+    assert "Zoom" in form.text
     csrf_token = re.search(r'name="csrf_token" value="([^"]+)', form.text).group(1)
     submission_id = re.search(
         r'name="submission_id" value="([^"]+)', form.text
@@ -235,18 +237,19 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
         "kind": "feed",
         "text": "Heute gibt es Neuigkeiten direkt aus dem Verein.",
         "scheduled_at": local_publish_at,
+        "crop_specs": '[{"x":0.2,"y":0,"width":0.6,"height":1}]',
     }
     blocked = client.post(
         "/posts/manual/new",
         data={**data, "csrf_token": "wrong"},
-        files={"images": ("beitrag.png", manual_post_image(), "image/png")},
+        files={"images": ("beitrag.png", manual_post_image((1600, 1200)), "image/png")},
     )
     assert blocked.status_code == 403
 
     response = client.post(
         "/posts/manual/new",
         data=data,
-        files={"images": ("beitrag.png", manual_post_image(), "image/png")},
+        files={"images": ("beitrag.png", manual_post_image((1600, 1200)), "image/png")},
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -257,6 +260,18 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
         assert post.post_type == "manual"
         assert post.text == data["text"]
         assert post.design_snapshot["source"] == "manual_upload"
+        uploaded = post.design_snapshot["manual_upload"]["images"][0]
+        assert uploaded["source_width"] == 1600
+        assert uploaded["source_height"] == 1200
+        assert uploaded["crop"] == {
+            "x": 0.2,
+            "y": 0.0,
+            "width": 0.6,
+            "height": 1.0,
+        }
+        assert Path(uploaded["original_path"]).read_bytes() == manual_post_image(
+            (1600, 1200)
+        )
         assert job.game_id is None
         assert job.kind == "feed"
         assert job.status == JobStatus.UNAPPROVED
