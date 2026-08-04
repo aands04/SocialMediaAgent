@@ -199,17 +199,38 @@ def _audit(
     )
 
 
-def _story_count(db: Session, team_id: str, post_type: str) -> int:
-    count = len(
+def _story_count(db: Session, team: Team, post_type: str) -> int:
+    rows = list(
         db.scalars(
-            select(StoryRule.id).where(
-                StoryRule.team_id == team_id,
+            select(StoryRule).where(
+                StoryRule.team_id == team.id,
                 StoryRule.post_type == post_type,
                 StoryRule.active.is_(True),
-            )
+            ).order_by(StoryRule.sort_order, StoryRule.created_at, StoryRule.id)
         ).all()
     )
-    return max(1, count) if post_type == "result" else count
+    count_key = f"{post_type}_story_output_count"
+    if count_key not in (team.rules or {}):
+        return len(rows) or (1 if post_type == "result" else 0)
+
+    slots = {int(row.media_slot or 1) for row in rows}
+    default_count = max(slots or ({1} if post_type == "result" else {0}))
+    configured = max(
+        0,
+        min(
+            10,
+            int((team.rules or {}).get(f"{post_type}_story_output_count", default_count)),
+        ),
+    )
+    rendered = len({slot for slot in slots if slot <= configured})
+    return max(1, rendered) if post_type == "result" and configured else rendered
+
+
+def _feed_count(team: Team, post_type: str) -> int:
+    return max(
+        0,
+        min(10, int((team.rules or {}).get(f"{post_type}_feed_output_count", 1))),
+    )
 
 
 def enqueue_create(
@@ -244,7 +265,7 @@ def enqueue_create(
         requested_by=user.id,
         status=GenerationJobStatus.QUEUED,
         phase="preparing",
-        planned_outputs=1 + _story_count(db, team.id, post_type),
+        planned_outputs=_feed_count(team, post_type) + _story_count(db, team, post_type),
         idempotency_key=key,
         active_key=key,
         parameters={"post_type": post_type, "logos": frozen_logo_set(db, game, team)},

@@ -1084,6 +1084,12 @@ def test_dashboard_admin_flow(browser):
             "result_poll_interval_minutes": "15",
             "auto_approve_announcements": "true",
             "club_matchday_feed_mode": "announcements",
+            "announcement_feed_output_count": "1",
+            "announcement_story_output_count": "2",
+            "reminder_feed_output_count": "1",
+            "reminder_story_output_count": "1",
+            "result_feed_output_count": "1",
+            "result_story_output_count": "1",
         },
         follow_redirects=False,
     )
@@ -1121,6 +1127,14 @@ def test_dashboard_admin_flow(browser):
             "weekday_friday": "18:20",
             "weekday_saturday": "10:00",
             "weekday_sunday": "09:00",
+            "target_monday": "0",
+            "target_tuesday": "1",
+            "target_wednesday": "2",
+            "target_thursday": "3",
+            "target_friday": "4",
+            "target_saturday": "5",
+            "target_sunday": "4",
+            "media_slot": "2",
             "template": "default-story",
             "sort_order": "1",
         },
@@ -1131,6 +1145,8 @@ def test_dashboard_admin_flow(browser):
         story = db.query(StoryRule).one()
         assert story.timing_mode == "weekday_fixed"
         assert story.weekday_times["6"] == "09:00"
+        assert story.weekday_targets["6"] == "4"
+        assert story.media_slot == 2
     assert "24 Stunden" in client.get(f"/rules?team_id={team.id}").text
     result = client.post(
         "/games/mock",
@@ -1359,6 +1375,94 @@ def test_csrf_and_non_admin_are_rejected(browser):
         ).status_code
         == 403
     )
+
+
+def test_story_rule_can_be_deleted_and_restored_without_removing_history(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="story-rule-page",
+            display_name="Story Rule Page",
+            username="storyrules",
+            club="SV Test",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="story-rule-team",
+            display_name="SV Test I",
+            short_name="SVT",
+            slug="story-rule-team",
+            club="SV Test",
+            fussball_url="https://www.fussball.de/story-rule-team",
+            instagram_page_id=page.id,
+            media_subdir="story-rule-team",
+        )
+        db.add(team)
+        db.flush()
+        item = StoryRule(
+            team_id=team.id,
+            name="24 Stunden vorher",
+            post_type="announcement",
+            reference="kickoff",
+            direction="before",
+            offset_minutes=1440,
+            template="default-story",
+            prompt_template="default-image-story",
+            sort_order=1,
+        )
+        db.add(item)
+        db.commit()
+        team_id, story_rule_id = team.id, item.id
+
+    rejected = client.post(
+        f"/rules/{team_id}/stories/{story_rule_id}/delete",
+        data={"csrf_token": "ungueltig"},
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 403
+
+    token = session_csrf(client)
+    response = client.post(
+        f"/rules/{team_id}/stories/{story_rule_id}/delete",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert f"team_id={team_id}&notice=" in response.headers["location"]
+    assert "24 Stunden vorher" not in client.get(f"/rules?team_id={team_id}").text
+    with factory() as db:
+        item = db.get(StoryRule, story_rule_id)
+        assert item is not None
+        assert item.active is False
+        deleted = db.query(AuditLog).filter_by(action="story_rule.deleted").one()
+        assert deleted.entity_id == story_rule_id
+        assert deleted.details["deletion_mode"] == "deactivated"
+
+    response = client.post(
+        f"/rules/{team_id}/stories",
+        data={
+            "csrf_token": token,
+            "name": "24 Stunden vorher",
+            "post_type": "announcement",
+            "reference": "kickoff",
+            "direction": "before",
+            "offset_minutes": "720",
+            "template": "default-story",
+            "prompt_template": "default-image-story",
+            "sort_order": "2",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with factory() as db:
+        items = db.query(StoryRule).filter_by(team_id=team_id).all()
+        assert len(items) == 1
+        assert items[0].id == story_rule_id
+        assert items[0].active is True
+        assert items[0].offset_minutes == 720
+        assert db.query(AuditLog).filter_by(action="story_rule.restored").count() == 1
 
 
 def test_admin_assigns_editorial_roles_and_last_admin_is_protected(browser):

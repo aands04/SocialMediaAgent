@@ -1,9 +1,11 @@
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from PIL import Image
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -19,6 +21,7 @@ from app.models import (
     Post,
     PostStatus,
     PublicationJob,
+    PublicationMediaItem,
     StoryRule,
     Team,
 )
@@ -43,6 +46,14 @@ class _SyntheticResultStoryRule:
     text_variant: str | None = None
     post_type: str = "result"
     timing_mode: str = "result_detected"
+    reference: str = "result_detected"
+    direction: str = "after"
+    offset_minutes: int = 0
+    fixed_time: str | None = None
+    weekday_times: dict | None = None
+    weekday_targets: dict | None = None
+    next_day: bool = False
+    media_slot: int = 1
 
 
 def _revision_prompt(prompt, instruction: str | None):
@@ -146,6 +157,15 @@ def feed_time(team: Team, game: Game, post_type: str) -> tuple[datetime, bool]:
             return max(target, earliest), False
         return earliest, False
     if post_type == "reminder":
+        if rules.get("reminder_timing_mode", "relative") == "weekday_fixed":
+            target = _weekday_time(
+                game,
+                rules.get("reminder_weekday_times"),
+                rules.get("reminder_weekday_targets"),
+                "before",
+            )
+            if target is not None:
+                return target, True
         return kickoff - timedelta(
             minutes=int(rules.get("reminder_feed_before_minutes", 360))
         ), False
@@ -176,7 +196,12 @@ def story_time(rule:StoryRule,game:Game,approved_at:datetime|None=None)->datetim
     result_detected=datetime.fromisoformat(detected) if detected else game.checked_at
     refs={"kickoff":game.kickoff,"planned_end":game.kickoff+timedelta(minutes=120),"result_detected":result_detected,"approval":approved_at}
     if getattr(rule, "timing_mode", "relative") == "weekday_fixed":
-        configured = _weekday_time(game, getattr(rule, "weekday_times", None))
+        configured = _weekday_time(
+            game,
+            getattr(rule, "weekday_times", None),
+            getattr(rule, "weekday_targets", None),
+            "after" if rule.post_type == "result" else "before",
+        )
         if configured is not None:
             if rule.post_type == "result":
                 detected_at = _aware_utc(result_detected)
@@ -189,6 +214,33 @@ def story_time(rule:StoryRule,game:Game,approved_at:datetime|None=None)->datetim
     if rule.fixed_time:
         h,m=map(int,rule.fixed_time.split(":")); result=result.replace(hour=h,minute=m,second=0,microsecond=0)
     return result
+
+
+def _effective_story_rules(
+    team: Team,
+    rules: list[StoryRule],
+    post_type: str,
+) -> tuple[list[tuple[StoryRule, int]], int]:
+    """Resolve Story output slots while retaining legacy rule semantics.
+
+    Before media slots existed, every active Story rule rendered its own image.
+    Teams that have not saved an explicit output count therefore keep that
+    behaviour, even when the database default on older rows is ``1``.
+    """
+    settings = team.rules or {}
+    count_key = f"{post_type}_story_output_count"
+    if count_key not in settings:
+        planned = [(rule, index) for index, rule in enumerate(rules, start=1)]
+        default_count = len(planned) or (1 if post_type == "result" else 0)
+        return planned, default_count
+
+    configured = max(0, min(10, int(settings.get(count_key, 0))))
+    planned = [
+        (rule, max(1, int(getattr(rule, "media_slot", 1) or 1)))
+        for rule in rules
+        if max(1, int(getattr(rule, "media_slot", 1) or 1)) <= configured
+    ]
+    return planned, configured
 
 
 def _design(db: Session, name: str, post_type: str, kind: str) -> dict:
@@ -245,6 +297,11 @@ def _upload_path(relative: str | None) -> str | None:
 
 def _normalize_design_snapshot(value: object) -> dict:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _render_metadata(renderer: Renderer, path: str) -> dict:
+    metadata = renderer.metadata_for(path) if hasattr(renderer, "metadata_for") else {}
+    return {**(metadata or {}), "path": path}
 
 
 def _story_snapshot_map(value: object) -> dict[str, dict]:
@@ -312,36 +369,57 @@ def create_post(db:Session,game:Game,team:Team,generator:TextGenerator,renderer:
     post=Post(game_id=game.id,team_id=team.id,instagram_page_id=page.id,post_type=post_type,status=PostStatus.CREATING,media_asset_id=asset.id if asset else None,critical_warnings=warnings,design_snapshot={"mode":{"image":"openai" if feed_prompt else "playwright","text":"openai" if text_prompt else "fixture","manual_approval_required":True},"feed":feed_design,"prompts":{"feed":feed_prompt.snapshot() if feed_prompt else None,"text":text_prompt.snapshot() if text_prompt else None},"stories":[],"logos":logos,"media":{},"fonts":{"primary":primary_font or {"family":team.primary_font,"fallback":True},"secondary":secondary_font or {"family":team.secondary_font,"fallback":True}},"colors":team.colors})
     db.add(post); db.flush(); generated_text=generator.generate(facts); post.text=generated_text.text
     post.design_snapshot={**post.design_snapshot,"text_generation":{"model":generated_text.model,"prompt_version":generated_text.prompt_version,"tokens":generated_text.tokens}}
-    post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v1.png",{**facts,"template":feed_design,"image_prompt":feed_prompt}))
-    if hasattr(renderer,"metadata_for"):
-        post.design_snapshot={**post.design_snapshot,"media":{"feed":renderer.metadata_for(post.feed_path)}}
     feed_at, feed_is_absolute = feed_time(team, game, post_type)
-    db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=page.id,kind="feed",media_path=post.feed_path,text_snapshot=post.text,scheduled_at=feed_at,absolute_time=feed_is_absolute,idempotency_key=f"{post.id}:feed:v1"))
-    rules=list(db.scalars(select(StoryRule).where(StoryRule.team_id==team.id,StoryRule.post_type==post_type,StoryRule.active.is_(True)).order_by(StoryRule.sort_order)).all())
-    if post_type=="result" and not rules:
-        rules=[_SyntheticResultStoryRule(instagram_page_id=page.id)]
+    feed_output_count=max(0,min(10,int((team.rules or {}).get(f"{post_type}_feed_output_count",1))))
+    feed_paths=[]
+    for output_index in range(1,feed_output_count+1):
+        relative=(
+            f"{post.id}/feed-v1.png"
+            if output_index==1
+            else f"{post.id}/feed-{output_index}-v1.png"
+        )
+        feed_paths.append(str(renderer.render("feed",relative,{**facts,"template":feed_design,"image_prompt":feed_prompt,"feed_output_index":output_index,"feed_output_count":feed_output_count})))
+    post.feed_path=feed_paths[0] if feed_paths else None
+    post.design_snapshot={**post.design_snapshot,"media":{"feed":_render_metadata(renderer,post.feed_path) if post.feed_path else None,"feed_outputs":[_render_metadata(renderer,path) for path in feed_paths]}}
+    if feed_paths:
+        feed_job=PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=page.id,kind="carousel" if len(feed_paths)>1 else "feed",media_path=feed_paths[0],text_snapshot=post.text,scheduled_at=feed_at,absolute_time=feed_is_absolute,idempotency_key=f"{post.id}:{'carousel' if len(feed_paths)>1 else 'feed'}:v1")
+        db.add(feed_job)
+        db.flush()
+        if len(feed_paths)>1:
+            for position,path_value in enumerate(feed_paths,start=1):
+                path=Path(path_value)
+                payload=path.read_bytes()
+                with Image.open(path) as image:
+                    width,height=image.size
+                db.add(PublicationMediaItem(publication_job_id=feed_job.id,position=position,media_path=path_value,checksum=sha256(payload).hexdigest(),mime_type="image/png",file_size=len(payload),width=width,height=height))
+    rules=list(db.scalars(select(StoryRule).where(StoryRule.team_id==team.id,StoryRule.post_type==post_type,StoryRule.active.is_(True)).order_by(StoryRule.sort_order,StoryRule.created_at,StoryRule.id)).all())
+    planned_rules,story_output_count=_effective_story_rules(team,rules,post_type)
+    if post_type=="result" and not planned_rules and story_output_count>0:
+        planned_rules=[(_SyntheticResultStoryRule(instagram_page_id=page.id),1)]
     seen=set()
+    rendered_slots={}
     story_snapshots=[]
-    for rule in rules:
-        # Result feed and result stories deliberately share the selected
-        # ad-hoc/fixed publication model. This makes a detected result a single
-        # coherent release instead of leaving a story behind on an unrelated
-        # legacy StoryRule schedule.
-        at=feed_at if post_type=="result" else story_time(rule,game)
-        collision=(at,rule.template)
+    for rule,media_slot in planned_rules:
+        at=story_time(rule,game)
+        collision=(at,media_slot)
         if collision in seen: warnings.append(f"Story-Regel {rule.name} kollidiert und wurde nicht doppelt geplant"); continue
-        story_design=_design(db,rule.template,post_type,"story")
-        story_prompt_name=rule.prompt_template
-        if not story_prompt_name or story_prompt_name=="default-image-story":
-            story_prompt_name=team.rules.get(f"image_prompt_story_{post_type}",team.rules.get("image_prompt_story","default-image-story"))
-        story_prompt=resolve_prompt(db,story_prompt_name,"image",post_type,"story",facts) if getattr(renderer,"is_ai",False) else None
         seen.add(collision)
-        if story_prompt:
-            path=str(renderer.render("story",f"{post.id}/story-{rule.id}-v1.png",{**facts,"template":story_design,"image_prompt":story_prompt}))
-        else:
-            path=str(renderer.render("story",f"{post.id}/story-{rule.id}-v1.png",{**facts,"template":story_design}))
-        story_snapshots.append({"rule_id":rule.id,"template":story_design,"prompt":story_prompt.snapshot() if story_prompt else None,"media_version":1,"rendering":renderer.metadata_for(path) if hasattr(renderer,"metadata_for") else {}})
-        db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=rule.instagram_page_id or page.id,story_rule_id=None if isinstance(rule,_SyntheticResultStoryRule) else rule.id,kind="story",media_path=path,text_snapshot=post.text if rule.text_variant else None,scheduled_at=at,absolute_time=feed_is_absolute if post_type=="result" else getattr(rule,"timing_mode","relative")=="weekday_fixed",idempotency_key=f"{post.id}:story:{rule.id}:v1"))
+        rendered=rendered_slots.get(media_slot)
+        if rendered is None:
+            story_design=_design(db,rule.template,post_type,"story")
+            story_prompt_name=rule.prompt_template
+            if not story_prompt_name or story_prompt_name=="default-image-story":
+                story_prompt_name=team.rules.get(f"image_prompt_story_{post_type}",team.rules.get("image_prompt_story","default-image-story"))
+            story_prompt=resolve_prompt(db,story_prompt_name,"image",post_type,"story",facts) if getattr(renderer,"is_ai",False) else None
+            render_context={**facts,"template":story_design,"story_output_index":media_slot}
+            if story_prompt:
+                render_context["image_prompt"]=story_prompt
+            path=str(renderer.render("story",f"{post.id}/story-slot-{media_slot}-v1.png",render_context))
+            rendered=(path,story_design,story_prompt)
+            rendered_slots[media_slot]=rendered
+        path,story_design,story_prompt=rendered
+        story_snapshots.append({"rule_id":rule.id,"media_slot":media_slot,"path":path,"template":story_design,"prompt":story_prompt.snapshot() if story_prompt else None,"media_version":1,"rendering":renderer.metadata_for(path) if hasattr(renderer,"metadata_for") else {}})
+        db.add(PublicationJob(post_id=post.id,game_id=game.id,team_id=team.id,instagram_page_id=rule.instagram_page_id or page.id,story_rule_id=None if isinstance(rule,_SyntheticResultStoryRule) else rule.id,kind="story",media_path=path,text_snapshot=post.text if rule.text_variant else None,scheduled_at=at,absolute_time=getattr(rule,"timing_mode","relative")=="weekday_fixed",idempotency_key=f"{post.id}:story:{rule.id}:v1"))
     post.design_snapshot={**post.design_snapshot,"stories":story_snapshots}
     post.critical_warnings=warnings; post.status=PostStatus.INCOMPLETE if warnings else PostStatus.PENDING; db.commit(); return post
 
@@ -353,7 +431,7 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
     story_jobs={job.id:job for job in jobs if job.kind=="story"}
     if not selected.issubset(story_jobs): raise RerenderConflict("Mindestens eine ausgewählte Story gehört nicht zu diesem Beitrag")
     if not rerender_feed and not selected: raise RerenderConflict("Bitte mindestens Feed oder eine Story auswählen")
-    if rerender_feed and any(job.status==JobStatus.PUBLISHED for job in jobs if job.kind=="feed"):
+    if rerender_feed and any(job.status==JobStatus.PUBLISHED for job in jobs if job.kind in {"feed","carousel"}):
         raise RerenderConflict("Der Feed wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
     if any(story_jobs[job_id].status==JobStatus.PUBLISHED for job_id in selected):
         raise RerenderConflict("Eine ausgewählte Story wurde bereits veröffentlicht und darf nicht neu erzeugt werden")
@@ -387,15 +465,36 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
     snapshots=_story_snapshot_map(old_snapshot.get("stories"))
     feed_design=old_snapshot.get("feed")
     feed_prompt=None
+    feed_paths=[]
     if rerender_feed:
         feed_design=_design(db,team.feed_template,post.post_type,"feed"); post.feed_version+=1
         feed_prompt_name=team.rules.get(f"image_prompt_feed_{post.post_type}",team.rules.get("image_prompt_feed","default-image-feed"))
         feed_prompt=resolve_prompt(db,feed_prompt_name,"image",post.post_type,"feed",facts) if getattr(renderer,"is_ai",False) else None
         feed_prompt=_revision_prompt(feed_prompt,revision_instruction)
-        post.feed_path=str(renderer.render("feed",f"{post.id}/feed-v{post.feed_version}.png",{**facts,"template":feed_design,"image_prompt":feed_prompt}))
+        previous_feed_outputs=(old_snapshot.get("media") or {}).get("feed_outputs") or []
+        feed_output_count=max(1,len(previous_feed_outputs))
+        if any(job.kind=="carousel" for job in jobs) and feed_output_count==1:
+            raise RerenderConflict(
+                "Ein gebündelter Vereins-Karussellbeitrag kann nicht über die normale Feed-Neugenerierung geändert werden"
+            )
+        for output_index in range(1,feed_output_count+1):
+            relative=(
+                f"{post.id}/feed-v{post.feed_version}.png"
+                if output_index==1
+                else f"{post.id}/feed-{output_index}-v{post.feed_version}.png"
+            )
+            feed_paths.append(str(renderer.render("feed",relative,{**facts,"template":feed_design,"image_prompt":feed_prompt,"feed_output_index":output_index,"feed_output_count":feed_output_count})))
+        post.feed_path=feed_paths[0]
     for job in jobs:
-        if job.kind=="feed" and rerender_feed:
-            job.media_path=post.feed_path; job.version+=1; job.idempotency_key=f"{post.id}:feed:v{post.feed_version}"
+        if job.kind in {"feed","carousel"} and rerender_feed:
+            job.media_path=post.feed_path; job.version+=1; job.idempotency_key=f"{post.id}:{job.kind}:v{post.feed_version}"
+            if job.kind=="carousel":
+                db.execute(delete(PublicationMediaItem).where(PublicationMediaItem.publication_job_id==job.id))
+                for position,path_value in enumerate(feed_paths,start=1):
+                    media_path=Path(path_value); payload=media_path.read_bytes()
+                    with Image.open(media_path) as image:
+                        width,height=image.size
+                    db.add(PublicationMediaItem(publication_job_id=job.id,position=position,media_path=path_value,checksum=sha256(payload).hexdigest(),mime_type="image/png",file_size=len(payload),width=width,height=height))
         elif job.id in selected:
             rule=db.get(StoryRule,job.story_rule_id) if job.story_rule_id else None
             design=_design(db,rule.template if rule else "default-story",post.post_type,"story"); media_version=int(snapshots.get(job.story_rule_id,{}).get("media_version",1))+1
@@ -411,8 +510,9 @@ def rerender_post(db:Session,post:Post,renderer:Renderer,story_job_ids:list[str]
     if rerender_feed:
         prompt_snapshot["feed"]=feed_prompt.snapshot() if feed_prompt else None
     media_snapshot=dict(old_snapshot.get("media") or {})
-    if rerender_feed and hasattr(renderer,"metadata_for"):
-        media_snapshot["feed"]=renderer.metadata_for(post.feed_path)
+    if rerender_feed:
+        media_snapshot["feed"]=_render_metadata(renderer,post.feed_path)
+        media_snapshot["feed_outputs"]=[_render_metadata(renderer,path) for path in feed_paths]
     post.design_snapshot={**old_snapshot,"feed":feed_design,"prompts":prompt_snapshot,"stories":list(snapshots.values()),"logos":logos,"media":media_snapshot,"player_asset":{"id":asset.id,"filename":asset.filename,"checksum":asset.checksum} if asset else None,"fonts":{"primary":facts["primary_font_asset"] or {"family":team.primary_font,"fallback":True},"secondary":facts["secondary_font_asset"] or {"family":team.secondary_font,"fallback":True}},"colors":team.colors}
     if logos.get("team"):
         post.critical_warnings=[
