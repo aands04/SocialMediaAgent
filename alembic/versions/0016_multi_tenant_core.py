@@ -368,6 +368,11 @@ def upgrade() -> None:
         )
 
     account_type = sa.Enum("CLUB_USER", "PLATFORM_ADMIN", name="accounttype")
+    # ``account_type`` is added with ALTER TABLE rather than CREATE TABLE.
+    # PostgreSQL therefore does not receive SQLAlchemy's automatic enum-type
+    # creation event and requires the native type to be created explicitly
+    # before the column references it.  SQLite treats this as a no-op.
+    account_type.create(bind, checkfirst=True)
     with op.batch_alter_table("users") as batch:
         batch.add_column(sa.Column("club_id", sa.String(36), nullable=True))
         batch.add_column(
@@ -527,6 +532,7 @@ def downgrade() -> None:
         batch.drop_constraint("fk_users_club_id", type_="foreignkey")
         batch.drop_column("account_type")
         batch.drop_column("club_id")
+    sa.Enum("CLUB_USER", "PLATFORM_ADMIN", name="accounttype").drop(bind, checkfirst=True)
     op.drop_table("tenant_migration_reports")
     op.drop_table("feature_flags")
     op.drop_table("club_branding_configurations")
