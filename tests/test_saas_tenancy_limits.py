@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, text
 
-from app.auth.service import allowed
+from app.auth.service import allowed, authenticate, hash_password
 from app.branding.service import BrandingValidationError, validate_branding_settings
+from app.db import settings as database_settings
 from app.limits.service import LimitExceeded, assert_resource_capacity
 from app.models import (
     AccountType,
@@ -20,7 +21,7 @@ from app.models import (
     User,
 )
 from app.tenancy.context import TenantContext, TenantContextError
-from app.tenancy.state import system_scope, tenant_scope
+from app.tenancy.state import active_scope, clear_scope, reset_scope, system_scope, tenant_scope
 from app.usage.service import QuotaExceeded, complete_usage, reserve_usage, usage_summary
 
 
@@ -106,6 +107,37 @@ def test_account_type_and_tenant_context_invariants(db):
         db.commit()
     with pytest.raises(TenantContextError):
         TenantContext.from_user(platform)
+
+
+def test_authentication_updates_lockout_state_without_preexisting_tenant_scope(
+    db, monkeypatch
+):
+    club_id = db.info["test_club_id"]
+    member = User(
+        email="login@test.invalid",
+        password_hash=hash_password("Correct-Password"),
+        role=Role.VIEWER,
+        account_type=AccountType.CLUB_USER,
+        club_id=club_id,
+    )
+    db.add(member)
+    db.commit()
+
+    monkeypatch.setattr(database_settings, "multi_tenant_enabled", True)
+    token = clear_scope()
+    try:
+        assert active_scope() is None
+        assert authenticate(db, member.email, "Wrong-Password") is None
+        assert member.failed_logins == 1
+        assert active_scope() is None
+
+        authenticated = authenticate(db, member.email, "Correct-Password")
+        assert authenticated is not None
+        assert authenticated.id == member.id
+        assert authenticated.failed_logins == 0
+        assert active_scope() is None
+    finally:
+        reset_scope(token)
 
 
 def test_cross_tenant_query_and_write_are_denied(db):
