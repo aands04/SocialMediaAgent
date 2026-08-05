@@ -52,10 +52,17 @@ from app.platform.service import (
 from app.storage.providers import ObjectStorageError, build_object_storage_provider
 from app.storage.service import reconcile_storage
 from app.usage.service import usage_summary
-from app.web import check_csrf, csrf_token, current_user, require_platform_admin
+from app.web import (
+    berlin_datetime,
+    check_csrf,
+    csrf_token,
+    current_user,
+    require_platform_admin,
+)
 
 router = APIRouter(prefix="/platform")
 templates = Jinja2Templates(directory="app/templates")
+templates.env.filters["berlin"] = berlin_datetime
 
 
 def render(request: Request, name: str, current: User, **context):
