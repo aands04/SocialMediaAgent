@@ -430,7 +430,11 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
         post.design_snapshot["prompts"]["feed"]["policy_version"]
         == "verified-logo-ai-references-v1"
     )
-    assert "SV Ehlen gegen SG Beispiel" in post.design_snapshot["prompts"]["feed"]["rendered"]
+    prompt_snapshot = post.design_snapshot["prompts"]["feed"]
+    assert "rendered" not in prompt_snapshot
+    assert "body" not in prompt_snapshot
+    assert len(prompt_snapshot["template_checksum"]) == 64
+    assert len(prompt_snapshot["rendered_checksum"]) == 64
     assert post.design_snapshot["stories"][0]["prompt"]["name"] == "default-image-story"
     assert (
         post.design_snapshot["media"]["feed"]["logo_integration"]["mode"]

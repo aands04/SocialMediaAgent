@@ -31,9 +31,27 @@ from app.auth.service import (
 )
 from app.config import get_settings
 from app.db import get_db
+from app.limits.service import effective_limits
 from app.meta.routes import router as meta_router
-from app.models import AuditLog, Game, GenerationJob, Post, PublicationJob, Role, Team, User
+from app.models import (
+    AccountType,
+    AuditLog,
+    Club,
+    Game,
+    GenerationJob,
+    PlanProfile,
+    Post,
+    PublicationJob,
+    Role,
+    StorageObject,
+    Team,
+    User,
+)
 from app.monitoring.service import system_status
+from app.platform.routes import router as platform_router
+from app.storage.routes import router as storage_router
+from app.tenancy.state import clear_scope, reset_scope
+from app.usage.service import usage_summary
 from app.web import berlin_datetime, csrf_token, current_user, optional_current_user
 
 settings = get_settings()
@@ -58,6 +76,17 @@ app.add_middleware(
     https_only=settings.environment == "production",
     same_site="lax",
 )
+
+
+@app.middleware("http")
+async def isolate_tenant_context(request: Request, call_next):
+    token = clear_scope()
+    try:
+        return await call_next(request)
+    finally:
+        reset_scope(token)
+
+
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 templates.env.filters["berlin"] = berlin_datetime
@@ -65,6 +94,9 @@ templates.env.globals["environment"] = settings.environment
 templates.env.globals["meta_test_enabled"] = settings.meta_test_enabled
 templates.env.globals["password_reset_enabled"] = settings.password_reset_enabled
 templates.env.globals["minimum_password_length"] = 8
+templates.env.globals["self_registration_enabled"] = (
+    settings.self_registration_enabled and not settings.multi_tenant_enabled
+)
 
 
 def csrf(request: Request):
@@ -143,12 +175,16 @@ def login(
     request.session.clear()
     request.session["uid"] = current.id
     request.session["auth_version"] = current.auth_version
+    request.session["account_type"] = current.account_type.value
+    request.session["club_id"] = current.club_id
     csrf(request)
     return RedirectResponse("/", 303)
 
 
 @app.get("/register", response_class=HTMLResponse)
 def register_form(request: Request):
+    if not settings.self_registration_enabled or settings.multi_tenant_enabled:
+        raise HTTPException(404)
     return no_store(
         templates.TemplateResponse(
             request,
@@ -167,6 +203,8 @@ def register(
     csrf_token_value: str = Form(alias="csrf_token"),
     db: Session = Depends(get_db),
 ):
+    if not settings.self_registration_enabled or settings.multi_tenant_enabled:
+        raise HTTPException(404)
     if not secrets.compare_digest(csrf_token_value, request.session.get("csrf", "")):
         raise HTTPException(403, "CSRF-Prüfung fehlgeschlagen")
     try:
@@ -379,7 +417,12 @@ def change_password(
             templates.TemplateResponse(
                 request,
                 "change_password.html",
-                {"user": current, "csrf": csrf(request), "title": "Passwort ändern", "error": error},
+                {
+                    "user": current,
+                    "csrf": csrf(request),
+                    "title": "Passwort ändern",
+                    "error": error,
+                },
                 status_code=422,
             )
         )
@@ -428,9 +471,7 @@ def change_email(
         error = "Aktuelles Passwort ist nicht korrekt"
     else:
         try:
-            result = request_email_change(
-                db, settings, current, new_email, request_ip(request)
-            )
+            result = request_email_change(db, settings, current, new_email, request_ip(request))
         except ValueError as exc:
             error = str(exc)
         else:
@@ -527,20 +568,82 @@ def dashboard(
 ):
     if current is None:
         return RedirectResponse("/login", 303)
+    if current.account_type == AccountType.PLATFORM_ADMIN:
+        return RedirectResponse("/platform", 303)
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
     counts = {
-        "teams": db.scalar(select(func.count()).select_from(Team)),
-        "games": db.scalar(select(func.count()).select_from(Game)),
-        "posts": db.scalar(select(func.count()).select_from(Post)),
-        "jobs": db.scalar(select(func.count()).select_from(PublicationJob)),
-        "generation_jobs": db.scalar(select(func.count()).select_from(GenerationJob)),
+        "teams": db.scalar(
+            select(func.count()).select_from(Team).where(Team.club_id == current.club_id)
+        ),
+        "games": db.scalar(
+            select(func.count()).select_from(Game).where(Game.club_id == current.club_id)
+        ),
+        "posts": db.scalar(
+            select(func.count()).select_from(Post).where(Post.club_id == current.club_id)
+        ),
+        "jobs": db.scalar(
+            select(func.count())
+            .select_from(PublicationJob)
+            .where(PublicationJob.club_id == current.club_id)
+        ),
+        "generation_jobs": db.scalar(
+            select(func.count())
+            .select_from(GenerationJob)
+            .where(GenerationJob.club_id == current.club_id)
+        ),
     }
-    posts = db.scalars(select(Post).order_by(Post.updated_at.desc()).limit(10)).all()
+    posts = db.scalars(
+        select(Post)
+        .where(Post.club_id == current.club_id)
+        .order_by(Post.updated_at.desc())
+        .limit(10)
+    ).all()
+    club = db.get(Club, current.club_id)
+    if club is None:
+        raise HTTPException(403, "Verein ist nicht vorhanden")
+    limits = effective_limits(db, current.club_id)
+    text_usage = usage_summary(db, current.club_id, "text")
+    image_usage = usage_summary(db, current.club_id, "image")
+    storage_used = int(
+        db.scalar(
+            select(func.coalesce(func.sum(StorageObject.size_bytes), 0)).where(
+                StorageObject.club_id == current.club_id,
+                StorageObject.deleted_at.is_(None),
+                StorageObject.billable.is_(True),
+            )
+        )
+        or 0
+    )
+    usage_cards = {
+        "plan": db.get(PlanProfile, club.plan_profile_id),
+        "storage": {
+            "used": storage_used,
+            "limit": limits["storage_bytes"].value,
+            "percent": round(storage_used * 100 / max(1, limits["storage_bytes"].value)),
+        },
+        "text": text_usage,
+        "image": image_usage,
+        "teams": {
+            "used": int(counts["teams"] or 0),
+            "limit": limits["teams"].value,
+        },
+    }
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        {"user": current, "counts": counts, "posts": posts, "csrf": csrf(request)},
+        {
+            "user": current,
+            "club": club,
+            "counts": counts,
+            "posts": posts,
+            "usage_cards": usage_cards,
+            "csrf": csrf(request),
+        },
     )
 
 
 app.include_router(admin_router)
 app.include_router(meta_router)
+app.include_router(platform_router)
+app.include_router(storage_router)

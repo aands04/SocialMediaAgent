@@ -147,9 +147,7 @@ def iter_player_images_from_zip(
                 raw_name = entry.filename.replace("\\", "/")
                 archive_path = PurePosixPath(raw_name)
                 if archive_path.is_absolute() or ".." in archive_path.parts:
-                    raise PlayerImageUploadError(
-                        f"{entry.filename}: unsicherer Pfad im ZIP-Archiv"
-                    )
+                    raise PlayerImageUploadError(f"{entry.filename}: unsicherer Pfad im ZIP-Archiv")
                 if entry.is_dir():
                     continue
                 if "__MACOSX" in archive_path.parts or archive_path.name in {

@@ -98,14 +98,11 @@ def delete_unpublished_post(
 
     publications = list(
         db.scalars(
-            select(PublicationJob)
-            .where(PublicationJob.post_id == locked.id)
-            .with_for_update()
+            select(PublicationJob).where(PublicationJob.post_id == locked.id).with_for_update()
         )
     )
     if any(
-        publication.status
-        in {JobStatus.PUBLISHING, JobStatus.PUBLISHED, JobStatus.UNCERTAIN}
+        publication.status in {JobStatus.PUBLISHING, JobStatus.PUBLISHED, JobStatus.UNCERTAIN}
         or publication.platform_id
         or publication.published_at
         for publication in publications
@@ -147,7 +144,8 @@ def delete_unpublished_post(
         attempt.active_key
         or attempt.meta_container_id
         or attempt.meta_media_id
-        or attempt.phase in {"creating_container", "waiting_for_container", "publishing", "reconciling", "uncertain"}
+        or attempt.phase
+        in {"creating_container", "waiting_for_container", "publishing", "reconciling", "uncertain"}
         for attempt in attempts
     ):
         raise PostDeletionConflict(
@@ -177,9 +175,7 @@ def delete_unpublished_post(
 
     if locked.media_asset_id and locked.game_id:
         asset = db.scalar(
-            select(MediaAsset)
-            .where(MediaAsset.id == locked.media_asset_id)
-            .with_for_update()
+            select(MediaAsset).where(MediaAsset.id == locked.media_asset_id).with_for_update()
         )
         other_post = db.scalar(
             select(Post.id).where(
@@ -199,31 +195,21 @@ def delete_unpublished_post(
                 MetaPublishConfirmation.attempt_id.in_(attempt_ids)
             )
         )
-        db.execute(
-            delete(MetaCarouselItem).where(MetaCarouselItem.attempt_id.in_(attempt_ids))
-        )
-        db.execute(
-            delete(MetaPublishingAttempt).where(MetaPublishingAttempt.id.in_(attempt_ids))
-        )
+        db.execute(delete(MetaCarouselItem).where(MetaCarouselItem.attempt_id.in_(attempt_ids)))
+        db.execute(delete(MetaPublishingAttempt).where(MetaPublishingAttempt.id.in_(attempt_ids)))
     if publication_ids:
         db.execute(
-            delete(PublicMediaGrant).where(
-                PublicMediaGrant.publication_job_id.in_(publication_ids)
-            )
+            delete(PublicMediaGrant).where(PublicMediaGrant.publication_job_id.in_(publication_ids))
         )
         db.execute(
             delete(PublicationMediaItem).where(
                 PublicationMediaItem.publication_job_id.in_(publication_ids)
             )
         )
-        db.execute(
-            delete(PublicationJob).where(PublicationJob.id.in_(publication_ids))
-        )
+        db.execute(delete(PublicationJob).where(PublicationJob.id.in_(publication_ids)))
     if generation_jobs:
         db.execute(
-            delete(GenerationJob).where(
-                GenerationJob.id.in_([job.id for job in generation_jobs])
-            )
+            delete(GenerationJob).where(GenerationJob.id.in_([job.id for job in generation_jobs]))
         )
 
     db.add(

@@ -1,4 +1,5 @@
 import re
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -13,13 +14,15 @@ from sqlalchemy.orm import sessionmaker
 
 from app.auth.service import hash_password
 from app.config import get_settings
-from app.db import Base, get_db
+from app.db import Base, TenantSession, get_db
 from app.games.live_test import serialize
 from app.games.provider import FussballDeProvider
 from app.jobs.generation import claim_next, process_generation_job
 from app.main import app
 from app.models import (
     AuditLog,
+    Club,
+    ClubStatus,
     Game,
     GenerationJob,
     GenerationJobStatus,
@@ -29,9 +32,9 @@ from app.models import (
     JobStatus,
     LogoAsset,
     MediaAsset,
+    PlanProfile,
     Post,
     PostStatus,
-    PromptTemplate,
     ProviderSnapshot,
     PublicationJob,
     PublicationMediaItem,
@@ -40,6 +43,7 @@ from app.models import (
     Team,
     User,
 )
+from app.tenancy.state import system_scope, tenant_scope
 from app.web import berlin_datetime
 
 
@@ -56,19 +60,37 @@ def browser(tmp_path):
         cursor.close()
 
     Base.metadata.create_all(engine)
-    factory = sessionmaker(engine, expire_on_commit=False)
-    with factory() as db:
-        db.add(
-            User(
+    raw_factory = sessionmaker(engine, class_=TenantSession, expire_on_commit=False)
+    with raw_factory() as db, system_scope("Dashboard-Testmandant anlegen"):
+        profile = PlanProfile(name="Dashboard-Test", description="Testprofil", version=1)
+        db.add(profile)
+        db.flush()
+        club = Club(
+            name="Dashboard Testverein",
+            short_name="Dashboard",
+            slug="dashboard-testverein",
+            status=ClubStatus.ACTIVE,
+            timezone="Europe/Berlin",
+            plan_profile_id=profile.id,
+        )
+        db.add(club)
+        db.flush()
+        admin = User(
                 email="admin@test.invalid",
                 password_hash=hash_password("Very-Secure-Test-Password"),
                 role=Role.ADMIN,
                 all_teams=True,
+                club_id=club.id,
             )
-        )
+        db.add(admin)
         db.commit()
 
-    def override():
+    @contextmanager
+    def factory():
+        with tenant_scope(club.id, admin.id), raw_factory() as db:
+            yield db
+
+    async def override():
         with factory() as db:
             yield db
 
@@ -102,6 +124,72 @@ def csrf(client):
 def session_csrf(client):
     response = client.get("/teams")
     return re.search(r'name="csrf_token" value="([^"]+)', response.text).group(1)
+
+
+def test_suspended_club_keeps_reads_but_blocks_dashboard_mutations(browser):
+    client, factory = browser
+    with factory() as db:
+        club = db.query(Club).one()
+        club.status = ClubStatus.SUSPENDED
+        db.commit()
+
+    page = client.get("/teams")
+    assert page.status_code == 200
+    token = re.search(r'name="csrf_token" value="([^"]+)', page.text).group(1)
+    blocked = client.post(
+        "/teams",
+        data={
+            "csrf_token": token,
+            "internal_name": "gesperrt",
+            "display_name": "Gesperrt",
+            "short_name": "G",
+            "slug": "gesperrt",
+            "club": "Testverein",
+            "fussball_url": "https://www.fussball.de/gesperrt",
+            "instagram_page_id": "unzulässig",
+            "media_subdir": "gesperrt",
+        },
+        follow_redirects=False,
+    )
+    assert blocked.status_code == 403
+    assert "derzeit gesperrt" in blocked.json()["detail"]
+
+
+def test_setup_pending_club_can_complete_dashboard_setup(browser):
+    client, factory = browser
+    with factory() as db:
+        club = db.query(Club).one()
+        club.status = ClubStatus.SETUP_PENDING
+        page = InstagramPage(
+            internal_name="setup-page",
+            display_name="Setup-Seite",
+            username="setup-page",
+            club="Dashboard Testverein",
+            active=True,
+            publishing_enabled=False,
+        )
+        db.add(page)
+        db.commit()
+        page_id = page.id
+
+    form = client.get("/teams")
+    token = re.search(r'name="csrf_token" value="([^"]+)', form.text).group(1)
+    response = client.post(
+        "/teams",
+        data={
+            "csrf_token": token,
+            "internal_name": "setup-team",
+            "display_name": "Setup-Mannschaft",
+            "short_name": "Setup",
+            "slug": "setup-team",
+            "club": "Dashboard Testverein",
+            "fussball_url": "https://www.fussball.de/setup-team",
+            "instagram_page_id": page_id,
+            "media_subdir": "setup-team",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
 
 
 def test_instagram_meta_test_dashboard_is_explicit_and_blocks_mock_connect(
@@ -1482,7 +1570,10 @@ def test_admin_assigns_editorial_roles_and_last_admin_is_protected(browser):
     )
     assert response.status_code == 303
     page = client.get("/users")
-    assert all(label in page.text for label in ("Administrator", "Redakteur", "Autor", "Betrachter"))
+    assert all(
+        label in page.text
+        for label in ("Vereinsadministrator", "Redakteur", "Autor", "Nur Lesen")
+    )
     with factory() as db:
         author = db.query(User).filter_by(email="author@test.invalid").one()
         administrator = db.query(User).filter_by(email="admin@test.invalid").one()
@@ -1505,13 +1596,11 @@ def test_admin_assigns_editorial_roles_and_last_admin_is_protected(browser):
     assert response.status_code == 409
 
 
-def test_prompt_dashboard_previews_without_api_and_versions_templates(browser):
-    client, factory = browser
+def test_club_admin_cannot_access_protected_prompt_dashboard(browser):
+    client, _factory = browser
     token = session_csrf(client)
-    page = client.get("/prompts")
-    assert page.status_code == 200 and "KI-Promptvorlagen" in page.text
-    body = "Dynamische Grafik: {{ home_team }} gegen {{ away_team }} in {{ venue_display }}"
-    preview = client.post(
+    assert client.get("/prompts").status_code == 403
+    response = client.post(
         "/prompts/preview",
         data={
             "csrf_token": token,
@@ -1519,51 +1608,10 @@ def test_prompt_dashboard_previews_without_api_and_versions_templates(browser):
             "post_type": "announcement",
             "media_kind": "feed",
             "style_direction": "dramatisch",
-            "prompt_body": body,
+            "prompt_body": "Geheimer Plattformprompt: {{ home_team }}",
         },
     )
-    assert preview.status_code == 200
-    assert "SV Ehlen gegen SG Beispiel" in preview.text
-    for _version in (1, 2):
-        response = client.post(
-            "/prompts",
-            data={
-                "csrf_token": token,
-                "name": "sve-feed",
-                "prompt_kind": "image",
-                "post_type": "announcement",
-                "media_kind": "feed",
-                "prompt_body": body,
-                "style_direction": "dramatisch",
-                "model": "gpt-image-2",
-                "quality": "medium",
-            },
-            follow_redirects=False,
-        )
-        assert response.status_code == 303
-    with factory() as db:
-        items = (
-            db.query(PromptTemplate)
-            .filter_by(name="sve-feed")
-            .order_by(PromptTemplate.version)
-            .all()
-        )
-        assert [item.version for item in items] == [1, 2]
-        assert db.query(AuditLog).filter_by(action="prompt.created").count() == 2
-    rejected = client.post(
-        "/prompts",
-        data={
-            "csrf_token": token,
-            "name": "bad",
-            "prompt_kind": "image",
-            "post_type": "announcement",
-            "media_kind": "feed",
-            "prompt_body": "{{ invented }}",
-            "model": "gpt-image-2",
-            "quality": "medium",
-        },
-    )
-    assert rejected.status_code == 422
+    assert response.status_code == 403
 
 
 def test_mock_game_uses_opponent_and_side_and_can_be_deleted(browser):

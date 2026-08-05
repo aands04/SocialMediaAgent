@@ -1,0 +1,69 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Plattformübersicht</h1>
+{% if request.query_params.get('notice') %}<div class="success">{{request.query_params.get('notice')}}</div>{% endif %}
+<div class="notice"><strong>Getrennter PlatformAdmin-Bereich.</strong> Vereinsdaten werden hier nur für Plattformverwaltung und Support aggregiert.</div>
+<div class="cards">
+  <div><strong>{{club_count}}</strong><span>Vereine insgesamt</span></div>
+  <div><strong>{{statuses.get('active',0)}}</strong><span>aktive Vereine</span></div>
+  <div><strong>{{statuses.get('trial',0)}}</strong><span>Testphase</span></div>
+  <div><strong>{{statuses.get('suspended',0)}}</strong><span>gesperrt</span></div>
+  <div><strong>{{statuses.get('archived',0)}}</strong><span>archiviert</span></div>
+  <div><strong>{{team_count}}</strong><span>Mannschaften</span></div>
+  <div><strong>{{storage_bytes}}</strong><span>Speicher in Byte</span></div>
+  <div><strong>{{usage.text}}</strong><span>KI-Texte im Monat</span></div>
+  <div><strong>{{usage.image}}</strong><span>KI-Bilder im Monat</span></div>
+  <div><strong>{{near_limit_count}}</strong><span>Vereine nahe am Limit (ab 75 %)</span></div>
+  <div><strong>{{over_limit_count}}</strong><span>Vereine über einem Limit</span></div>
+  <div><strong>{{failed_jobs}}</strong><span>fehlgeschlagene / zu prüfende Generierungen</span></div>
+  <div><strong>{{reconciliation_alerts}}</strong><span>offene Speicherabweichungen</span></div>
+</div>
+<h2>Vereine</h2>
+<table><tr><th>Verein</th><th>Status</th><th>Slug</th><th>Aktion</th></tr>
+{% for club in clubs %}<tr><td>{{club.name}}</td><td>{{club.status.value}}</td><td>{{club.slug}}</td><td><a class="button" href="/platform/clubs/{{club.id}}">Öffnen</a></td></tr>{% endfor %}</table>
+<section>
+  <h2>Privaten Objektspeicher abgleichen</h2>
+  <p>Die Prüfung vergleicht die gespeicherten Metadaten mit dem privaten Objektspeicher. Sie verändert oder löscht keine Dateien.</p>
+  <form method="post" action="/platform/storage/reconcile" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <label>Geltungsbereich
+      <select name="club_id">
+        <option value="">Alle Vereine</option>
+        {% for club in clubs %}<option value="{{club.id}}">{{club.name}}</option>{% endfor %}
+      </select>
+    </label>
+    <button>Speicherbestand jetzt abgleichen</button>
+  </form>
+  <h3>Letzte Abgleiche</h3>
+  <table>
+    <tr><th>Zeitpunkt</th><th>Verein</th><th>Provider</th><th>Status</th><th>Geprüft</th><th>Fehlend</th><th>Unerwartet</th><th>Größenabweichung</th></tr>
+    {% for run in reconciliation_runs %}
+      <tr>
+        <td>{{run.created_at|berlin}}</td>
+        <td>{{club_names.get(run.club_id, run.club_id) if run.club_id else 'Alle Vereine'}}</td>
+        <td>{{run.provider}}</td>
+        <td>
+          {{run.status}}
+          {% if run.status == 'attention_required' %}
+            <details>
+              <summary>Abweichungen anzeigen</summary>
+              {% if run.report.get('missing') %}<strong>Fehlend</strong><ul>{% for key in run.report.get('missing', []) %}<li><code>{{key}}</code></li>{% endfor %}</ul>{% endif %}
+              {% if run.report.get('unexpected') %}<strong>Unerwartet</strong><ul>{% for key in run.report.get('unexpected', []) %}<li><code>{{key}}</code></li>{% endfor %}</ul>{% endif %}
+              {% if run.report.get('size_mismatches') %}<strong>Größe abweichend</strong><ul>{% for key in run.report.get('size_mismatches', []) %}<li><code>{{key}}</code></li>{% endfor %}</ul>{% endif %}
+              <p>Nach kontrollierter Korrektur den Abgleich erneut ausführen.</p>
+            </details>
+          {% endif %}
+        </td>
+        <td>{{run.checked_objects}}</td>
+        <td>{{run.missing_objects}}</td>
+        <td>{{run.unexpected_objects}}</td>
+        <td>{{run.size_mismatches}}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8">Noch kein Speicherabgleich ausgeführt.</td></tr>
+    {% endfor %}
+  </table>
+</section>
+<section><h2>Feature Flag verwalten</h2><form method="post" action="/platform/feature-flags" class="gridform"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Schlüssel<input name="key" placeholder="feature.name" required></label><label>Verein (leer = Plattform)<select name="club_id"><option value="">Plattformweit</option>{% for club in clubs %}<option value="{{club.id}}">{{club.name}}</option>{% endfor %}</select></label><label><input type="checkbox" name="enabled" value="true"> Aktiv</label><label>JSON-Wert<textarea name="value_json">{}</textarea></label><button>Feature Flag speichern</button></form></section>
+<section><h2>Aktuelle Feature Flags</h2><table><tr><th>Schlüssel</th><th>Geltungsbereich</th><th>Status</th><th>Wert</th></tr>{% for flag in feature_flags %}<tr><td>{{flag.key}}</td><td>{{flag.club_id or 'Plattform'}}</td><td>{{'aktiv' if flag.enabled else 'inaktiv'}}</td><td>{{flag.value}}</td></tr>{% else %}<tr><td colspan="4">Keine Feature Flags angelegt.</td></tr>{% endfor %}</table></section>
+{% endblock %}

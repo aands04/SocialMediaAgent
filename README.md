@@ -191,3 +191,28 @@ Ein `.hint-pre-publish` markiert Treffer als `provisional`. Standardmäßig blei
 Ergebnisse aus normalen ASCII-Ziffern werden direkt gelesen. Dynamisch zugeordnete Ziffern werden nur über den streng validierten offiziellen FUSSBALL.DE-Font deterministisch aufgelöst; OCR und visuelles Raten sind ausgeschlossen. Ein Ergebnis wird erst nach zwei verschiedenen, zeitlich stabilen Snapshots automatisch bestätigt. Automatische Abrufe und Beitragserzeugung besitzen getrennte globale und mannschaftsbezogene Opt-ins. Beiträge bleiben standardmäßig manuell freizugeben; eine automatische Freigabe kann je Mannschaft und Beitragstyp ausdrücklich aktiviert werden und nutzt weiterhin sämtliche bestehenden Freigabeprüfungen. Betrieb und Diagnose beschreibt [`docs/AUTOMATIC_FUSSBALL.md`](docs/AUTOMATIC_FUSSBALL.md), die mannschaftsbezogene Zeit- und Freigabeplanung [`docs/FUSSBALL_SCHEDULING.md`](docs/FUSSBALL_SCHEDULING.md).
 
 Die Provider-Diagnose bleibt read-only. Nach der Vorschau kann ausschließlich ein Administrator mit CSRF-Schutz und der Bestätigung `SPIELE ÜBERNEHMEN` Spiele idempotent importieren. Der Import erzeugt keine Beiträge. Öffentliche AJAX-Aufrufe sind technisch auf HTTPS, `fussball.de`/`www.fussball.de`, die drei bekannten `ajax.team.*`-Pfade, Größenlimit, Timeout und begrenztes Backoff beschränkt. Ob `ajax.team.prev.games` lesbare Ergebnisse liefert, wurde in dieser Änderung nicht live geprüft; verschleierte Werte bleiben deshalb leer.
+
+## Mandantenfähige SaaS-Plattform
+
+Die Anwendung besitzt ein explizites `Club`-Mandantenmodell. Normale Konten
+gehören genau einem Verein; `PlatformAdmin`-Konten besitzen ausdrücklich keine
+Vereinszuordnung. `TenantSession`, `TenantContext` und tenantgebundene Services
+verweigern Zugriffe ohne eindeutigen Kontext. Die neue Migration übernimmt eine
+bestehende Installation nur nach erfolgreicher Vorprüfung in einen explizit
+konfigurierten initialen Verein.
+
+Der getrennte Bereich `/platform` verwaltet Vereine, Vereinsadministratoren,
+Tarif-/Limitprofile, Zusatzkontingente, Feature Flags, zentrale Prompts,
+geschützte Vereinsanpassungen, Plattformtests, aggregierten Verbrauch und
+Plattform-Audit. Selbstregistrierung und Zahlungsabwicklung bleiben über Feature
+Flags deaktiviert.
+
+Für neue SaaS-Uploads steht privater S3-kompatibler Objektspeicher mit
+Club-UUID-Namespaces, direkten signierten Uploads, Abschlussvalidierung,
+Storage-Reservierungen und Ledger zur Verfügung. Cloudflare R2, Hetzner Object
+Storage, generisches S3 und lokaler Entwicklungsspeicher verwenden dieselbe
+Schnittstelle. Der PlatformAdmin kann Datenbank und privaten Objektspeicher
+vereinsweise oder plattformweit rein lesend abgleichen; automatische
+Korrekturen oder Löschungen erfolgen dabei nicht. Die vollständige Betriebs-
+und Rollout-Dokumentation beginnt bei
+[`docs/SAAS_ADMINISTRATION.md`](docs/SAAS_ADMINISTRATION.md).

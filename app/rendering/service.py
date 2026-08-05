@@ -80,7 +80,9 @@ class Renderer:
         return next((str(path) for path in candidates if path and Path(path).is_file()), None)
 
     @staticmethod
-    def _safe_file(path_value, roots: tuple[Path | None, ...], types: set[str], limit: int) -> Path | None:
+    def _safe_file(
+        path_value, roots: tuple[Path | None, ...], types: set[str], limit: int
+    ) -> Path | None:
         if not path_value:
             return None
         path = Path(path_value).resolve()
@@ -127,7 +129,11 @@ class Renderer:
             raise RenderValidationError(f"Pflichtangaben fehlen: {', '.join(missing)}")
         if any(len(str(data[key])) > 300 for key in ("home_team", "away_team")):
             raise RenderValidationError("Pflichtangabe passt nicht in Textbereich")
-        kickoff = datetime.fromisoformat(data["kickoff"]) if isinstance(data["kickoff"], str) else data["kickoff"]
+        kickoff = (
+            datetime.fromisoformat(data["kickoff"])
+            if isinstance(data["kickoff"], str)
+            else data["kickoff"]
+        )
         if kickoff.tzinfo is None:
             raise RenderValidationError("Anpfiff benötigt eine Zeitzone")
         local = kickoff.astimezone(ZoneInfo("Europe/Berlin"))
@@ -149,7 +155,9 @@ class Renderer:
             "opponent_logo": self._asset(data.get("opponent_logo")),
         }
         primary_rule, primary = self._font_face(data.get("primary_font_asset"), "primary", "Arial")
-        secondary_rule, secondary = self._font_face(data.get("secondary_font_asset"), "secondary", "Arial")
+        secondary_rule, secondary = self._font_face(
+            data.get("secondary_font_asset"), "secondary", "Arial"
+        )
         css = (
             f":root{{--primary:{data.get('primary_color') or '#172554'};--secondary:{data.get('secondary_color') or '#fff'};--primary-font:{primary};--secondary-font:{secondary}}}"
             + primary_rule
@@ -165,7 +173,9 @@ class Renderer:
                 value = str(element.attrs[attribute])
                 if attribute.lower().startswith("on"):
                     del element.attrs[attribute]
-                elif attribute.lower() in {"src", "href", "poster"} and not value.startswith(("data:", "#")):
+                elif attribute.lower() in {"src", "href", "poster"} and not value.startswith(
+                    ("data:", "#")
+                ):
                     del element.attrs[attribute]
         csp = "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'"
         document = f"<!doctype html><html><head><meta charset='utf-8'><meta http-equiv='Content-Security-Policy' content=\"{csp}\"><style>{css}</style></head><body>{soup}</body></html>"
@@ -178,12 +188,18 @@ class Renderer:
             with sync_playwright() as playwright:
                 executable = self._browser_executable()
                 browser = playwright.chromium.launch(headless=True, executable_path=executable)
-                page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=1)
+                page = browser.new_page(
+                    viewport={"width": width, "height": height}, device_scale_factor=1
+                )
                 page.route("**/*", lambda route: route.abort())
                 page.set_content(document, wait_until="load")
-                page.evaluate("""() => { for (const el of document.querySelectorAll('.teams')) { let n=parseFloat(getComputedStyle(el).fontSize); const bad=()=>{const r=el.getBoundingClientRect();return r.top<0||r.bottom>innerHeight||el.scrollWidth>el.clientWidth}; while (bad() && n>34) { n-=2; el.style.fontSize=n+'px'; } } }""")
+                page.evaluate(
+                    """() => { for (const el of document.querySelectorAll('.teams')) { let n=parseFloat(getComputedStyle(el).fontSize); const bad=()=>{const r=el.getBoundingClientRect();return r.top<0||r.bottom>innerHeight||el.scrollWidth>el.clientWidth}; while (bad() && n>34) { n-=2; el.style.fontSize=n+'px'; } } }"""
+                )
                 teams = page.locator(".teams")
-                clipped = teams.count() > 0 and teams.evaluate("el => {const r=el.getBoundingClientRect();return r.top<0||r.bottom>innerHeight||el.scrollWidth>el.clientWidth}")
+                clipped = teams.count() > 0 and teams.evaluate(
+                    "el => {const r=el.getBoundingClientRect();return r.top<0||r.bottom>innerHeight||el.scrollWidth>el.clientWidth}"
+                )
                 if clipped:
                     raise RenderValidationError("Pflichtangabe passt nicht in Textbereich")
                 page.screenshot(path=str(out), full_page=False, type="png")
@@ -207,4 +223,10 @@ class Renderer:
             colors = image.convert("RGB").getcolors(maxcolors=image.width * image.height)
             if colors is not None and len(colors) < 2:
                 raise RenderValidationError("Grafik ist einfarbig und vermutlich leer")
-            return {"kind": kind, "width": image.width, "height": image.height, "format": image.format, "bytes": path.stat().st_size}
+            return {
+                "kind": kind,
+                "width": image.width,
+                "height": image.height,
+                "format": image.format,
+                "bytes": path.stat().st_size,
+            }

@@ -50,20 +50,13 @@ def assert_meta_environment(settings: Settings, *, external_call: bool = False) 
         if not settings.meta_test_enabled:
             raise MetaApiError("Instagram-Meta-Test ist nicht aktiviert")
         if external_call and not settings.meta_test_publish_enabled:
-            raise MetaApiError(
-                "Externe Meta-Aufrufe sind durch META_TEST_PUBLISH_ENABLED gesperrt"
-            )
+            raise MetaApiError("Externe Meta-Aufrufe sind durch META_TEST_PUBLISH_ENABLED gesperrt")
         return
     if settings.environment == "production":
-        if (
-            settings.publisher_mode != "instagram"
-            or not settings.meta_production_enabled
-        ):
+        if settings.publisher_mode != "instagram" or not settings.meta_production_enabled:
             raise MetaApiError("Instagram-Produktion ist nicht ausdrücklich aktiviert")
         return
-    raise MetaApiError(
-        "Instagram-Verbindungen sind nur in Meta-Test oder Produktion erlaubt"
-    )
+    raise MetaApiError("Instagram-Verbindungen sind nur in Meta-Test oder Produktion erlaubt")
 
 
 def start_oauth(
@@ -134,7 +127,9 @@ def complete_oauth(
         scopes = _oauth_grant_scopes()
         account_type = str(profile.get("account_type") or "").upper()
         if account_type != "BUSINESS":
-            raise MetaApiError("Für Story-Tests ist ein professionelles Business-Konto erforderlich")
+            raise MetaApiError(
+                "Für Story-Tests ist ein professionelles Business-Konto erforderlich"
+            )
         profile_id = str(profile.get("user_id") or profile.get("id") or short.user_id)
         page = db.get(InstagramPage, record.instagram_page_id)
         if not page:

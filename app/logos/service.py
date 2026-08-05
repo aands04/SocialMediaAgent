@@ -259,7 +259,9 @@ class LogoCompositor:
             return image.convert("RGBA")
 
     @staticmethod
-    def _fit_logo(image: Image.Image, box: tuple[int, int, int, int]) -> tuple[Image.Image, tuple[int, int]]:
+    def _fit_logo(
+        image: Image.Image, box: tuple[int, int, int, int]
+    ) -> tuple[Image.Image, tuple[int, int]]:
         x, y, width, height = box
         fitted = ImageOps.contain(image, (width, height), Image.Resampling.LANCZOS)
         return fitted, (x + (width - fitted.width) // 2, y + (height - fitted.height) // 2)
@@ -304,9 +306,7 @@ class LogoCompositor:
             draw.rounded_rectangle((x, y, x + width, y + height), 18, fill=(7, 15, 35, 220))
             name = str(opponent.get("name") or "Gegner")
             font = ImageFont.load_default(size=28)
-            wrapped = "\n".join(
-                [name[i : i + 20] for i in range(0, min(len(name), 60), 20)]
-            )
+            wrapped = "\n".join([name[i : i + 20] for i in range(0, min(len(name), 60), 20)])
             draw.multiline_text(
                 (x + width // 2, y + height // 2),
                 wrapped,

@@ -8,15 +8,41 @@ from app.models import InstagramConnection
 
 
 @dataclass
-class PublishResult: confirmed:bool; platform_id:str|None=None; permalink:str|None=None; uncertain:bool=False
+class PublishResult:
+    confirmed: bool
+    platform_id: str | None = None
+    permalink: str | None = None
+    uncertain: bool = False
+
+
 class PublishError(RuntimeError):
-    def __init__(self,message:str,retryable:bool=False): super().__init__(message); self.retryable=retryable
+    def __init__(self, message: str, retryable: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
+
+
 class SocialMediaPublisher(ABC):
     @abstractmethod
-    def publish(self,*,account_id:str,kind:str,media_url:str,caption:str|None,idempotency_key:str)->PublishResult: ...
+    def publish(
+        self,
+        *,
+        account_id: str,
+        kind: str,
+        media_url: str,
+        caption: str | None,
+        idempotency_key: str,
+    ) -> PublishResult: ...
+
+
 class DryRunPublisher(SocialMediaPublisher):
-    def publish(self,**kwargs)->PublishResult: return PublishResult(True,"dry-run:"+kwargs["idempotency_key"])
-class MockPublisher(DryRunPublisher): pass
+    def publish(self, **kwargs) -> PublishResult:
+        return PublishResult(True, "dry-run:" + kwargs["idempotency_key"])
+
+
+class MockPublisher(DryRunPublisher):
+    pass
+
+
 class InstagramPublisher(SocialMediaPublisher):
     """Fassade für den persistenten Instagram-Login-Workflow.
 
@@ -49,16 +75,12 @@ class InstagramPublisher(SocialMediaPublisher):
             caption=caption,
         )
 
-    def container_status(
-        self, *, connection: InstagramConnection, container_id: str
-    ) -> dict:
+    def container_status(self, *, connection: InstagramConnection, container_id: str) -> dict:
         return self.api.container_status(
             access_token=self.token_for(connection), container_id=container_id
         )
 
-    def publish_container(
-        self, *, connection: InstagramConnection, container_id: str
-    ) -> dict:
+    def publish_container(self, *, connection: InstagramConnection, container_id: str) -> dict:
         return self.api.publish_container(
             access_token=self.token_for(connection),
             account_id=connection.instagram_user_id or "",

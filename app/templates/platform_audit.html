@@ -1,0 +1,2 @@
+{% extends 'base.html' %}
+{% block content %}<h1>Plattform-Audit</h1><table><tr><th>Zeit</th><th>Aktion</th><th>Typ</th><th>ID</th><th>Details</th></tr>{% for item in items %}<tr><td>{{item.at}}</td><td>{{item.action}}</td><td>{{item.entity_type}}</td><td>{{item.entity_id or '—'}}</td><td>{{item.details}}</td></tr>{% endfor %}</table>{% endblock %}

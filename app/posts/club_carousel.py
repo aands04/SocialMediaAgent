@@ -58,10 +58,12 @@ def _mode_groups(mode: str, post_type: str) -> bool:
 
 def _feed_job(db: Session, post_id: str) -> PublicationJob | None:
     return db.scalar(
-        select(PublicationJob).where(
+        select(PublicationJob)
+        .where(
             PublicationJob.post_id == post_id,
             PublicationJob.kind.in_(["feed", "carousel"]),
-        ).with_for_update()
+        )
+        .with_for_update()
     )
 
 
@@ -77,8 +79,7 @@ def _combined_text(club: str, post_type: str, games: list[Game], teams: dict[str
         heading = f"⚽ Spieltag für {club} am {local_day:%d.%m.%Y}"
         lines = [
             f"• {_utc(game.kickoff).astimezone(BERLIN):%H:%M} Uhr: "
-            f"{game.home_team} – {game.away_team}"
-            + (f" · {game.venue}" if game.venue else "")
+            f"{game.home_team} – {game.away_team}" + (f" · {game.venue}" if game.venue else "")
             for game in games
         ]
     hashtags: list[str] = []
@@ -137,9 +138,7 @@ def _candidate_games(
     ]
     if len({item.team_id for item in games}) < 2:
         return [], teams
-    preferred_team_id = str(
-        (team.rules or {}).get("club_matchday_primary_team_id") or ""
-    )
+    preferred_team_id = str((team.rules or {}).get("club_matchday_primary_team_id") or "")
     games.sort(
         key=lambda item: (
             0 if item.team_id == preferred_team_id else 1,
@@ -158,9 +157,7 @@ def _mark_waiting(db: Session, post: Post, waiting_for: list[str]) -> None:
     feed.status = JobStatus.WAITING
     feed.approval_status = "bundle_wait"
     feed.approved_post_version = None
-    feed.error = (
-        "Gemeinsamer Vereins-Feed wartet auf: " + ", ".join(waiting_for)
-    )
+    feed.error = "Gemeinsamer Vereins-Feed wartet auf: " + ", ".join(waiting_for)
 
 
 def coordinate_club_matchday_feed(
@@ -189,9 +186,7 @@ def coordinate_club_matchday_feed(
 
     if post.post_type == "result":
         missing_results = [
-            teams[item.team_id].display_name
-            for item in games
-            if not item.result_confirmed
+            teams[item.team_id].display_name for item in games if not item.result_confirmed
         ]
         if missing_results:
             _mark_waiting(db, post, missing_results)
@@ -204,17 +199,18 @@ def coordinate_club_matchday_feed(
     game_ids = [item.id for item in games]
     posts = list(
         db.scalars(
-            select(Post).where(
+            select(Post)
+            .where(
                 Post.game_id.in_(game_ids),
                 Post.post_type == post.post_type,
                 Post.active_key == "active",
-            ).order_by(Post.id).with_for_update()
+            )
+            .order_by(Post.id)
+            .with_for_update()
         )
     )
     by_game = {item.game_id: item for item in posts}
-    missing_posts = [
-        teams[item.team_id].display_name for item in games if item.id not in by_game
-    ]
+    missing_posts = [teams[item.team_id].display_name for item in games if item.id not in by_game]
     if missing_posts:
         _mark_waiting(db, post, missing_posts)
         db.flush()
@@ -264,8 +260,7 @@ def coordinate_club_matchday_feed(
             open_job.approval_status = "reapproval_required"
             open_job.approved_post_version = None
             open_job.error = (
-                "Gemeinsamer Vereins-Karussellfeed wurde erstellt; "
-                "erneute Freigabe erforderlich"
+                "Gemeinsamer Vereins-Karussellfeed wurde erstellt; erneute Freigabe erforderlich"
             )
     primary.text = _combined_text(team.club, post.post_type, games, teams)
     primary.text_version += 1
@@ -277,16 +272,12 @@ def coordinate_club_matchday_feed(
         if post.post_type == "result"
         else min(item.scheduled_at for item in feed_jobs if item is not None)
     )
-    primary_feed.absolute_time = any(
-        item.absolute_time for item in feed_jobs if item is not None
-    )
+    primary_feed.absolute_time = any(item.absolute_time for item in feed_jobs if item is not None)
     primary_feed.status = JobStatus.UNAPPROVED
     primary_feed.approval_status = "reapproval_required"
     primary_feed.approved_post_version = None
     primary_feed.error = "Gemeinsamer Vereins-Karussellfeed wurde erstellt; Freigabe erforderlich"
-    primary_feed.idempotency_key = (
-        f"{primary.id}:club-carousel:{post.post_type}:v{primary.version}"
-    )
+    primary_feed.idempotency_key = f"{primary.id}:club-carousel:{post.post_type}:v{primary.version}"
 
     db.execute(
         delete(PublicationMediaItem).where(
@@ -296,9 +287,7 @@ def coordinate_club_matchday_feed(
     for position, member in enumerate(ordered_posts, start=1):
         path = Path(member.feed_path or "")
         if not path.is_file():
-            raise ClubCarouselConflict(
-                f"Feed-Datei für {teams[member.team_id].display_name} fehlt"
-            )
+            raise ClubCarouselConflict(f"Feed-Datei für {teams[member.team_id].display_name} fehlt")
         payload = path.read_bytes()
         with Image.open(path) as image:
             width, height = image.size

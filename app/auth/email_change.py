@@ -65,8 +65,7 @@ def _send_email_change_confirmation(
     message = EmailMessage()
     message["Subject"] = "E-Mail-Adresse der Vereinszentrale bestätigen"
     message["From"] = (
-        f"{_clean_header(settings.smtp_from_name)} "
-        f"<{_clean_header(settings.smtp_from_email)}>"
+        f"{_clean_header(settings.smtp_from_name)} <{_clean_header(settings.smtp_from_email)}>"
     )
     message["To"] = _clean_header(recipient)
     message.set_content(
@@ -168,9 +167,7 @@ def request_email_change(
     return EmailChangeRequestResult(delivered=True)
 
 
-def find_valid_email_change_token(
-    db: Session, raw_token: str
-) -> EmailChangeToken | None:
+def find_valid_email_change_token(db: Session, raw_token: str) -> EmailChangeToken | None:
     if len(raw_token) > 256:
         return None
     item = db.scalar(
@@ -208,9 +205,10 @@ def complete_email_change(
         or user.auth_version != item.auth_version
     ):
         raise ValueError("Bestätigungslink ist ungültig oder abgelaufen")
-    if db.scalar(
-        select(User.id).where(User.email == item.new_email, User.id != user.id)
-    ) is not None:
+    if (
+        db.scalar(select(User.id).where(User.email == item.new_email, User.id != user.id))
+        is not None
+    ):
         raise ValueError("Die neue E-Mail-Adresse wird inzwischen bereits verwendet")
 
     claimed = db.execute(

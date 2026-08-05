@@ -17,6 +17,7 @@ from app.auth.service import allowed, hash_password, normalize_email, validate_n
 from app.config import get_settings
 from app.db import get_db
 from app.games.identity import team_name_variants
+from app.limits.service import LimitExceeded, assert_resource_capacity
 from app.logos.service import (
     LogoValidationError,
     normalize_club_name,
@@ -35,6 +36,8 @@ from app.media.uploads import (
 )
 from app.models import (
     AuditLog,
+    Club,
+    ClubBrandingConfiguration,
     DesignTemplate,
     FontAsset,
     FussballSyncState,
@@ -49,7 +52,9 @@ from app.models import (
     MetaPublishingAttempt,
     Post,
     PostStatus,
+    PromptStatus,
     PromptTemplate,
+    PromptTestRun,
     PublicationJob,
     PublicationMediaItem,
     Role,
@@ -68,7 +73,15 @@ from app.posts.manual import (
     validate_manual_image,
 )
 from app.posts.service import logo_recompose_availability
-from app.web import berlin_datetime, check_csrf, csrf_token, current_user, require, require_admin
+from app.web import (
+    berlin_datetime,
+    check_csrf,
+    csrf_token,
+    current_user,
+    require,
+    require_admin,
+    require_platform_admin,
+)
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -102,9 +115,181 @@ def redirect(path, message="Gespeichert"):
     return RedirectResponse(f"{path}{separator}notice={message}", 303)
 
 
-def _invalidate_posts_for_logo_change(
-    db: Session, game: Game, reason: str
-) -> list[str]:
+def _structured_list(value: str) -> list[str]:
+    return [item.strip() for item in value.replace(",", "\n").splitlines() if item.strip()]
+
+
+@router.get("/branding", response_class=HTMLResponse)
+def club_branding(
+    request: Request,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    require_admin(current)
+    club = db.get(Club, current.club_id)
+    if club is None:
+        raise HTTPException(404)
+    config = db.get(ClubBrandingConfiguration, club.id)
+    return render(
+        request,
+        "branding.html",
+        current,
+        club=club,
+        config=config,
+        image=(config.image_settings if config else {}) or {},
+        text=(config.text_settings if config else {}) or {},
+        fonts=db.scalars(
+            select(FontAsset).where(
+                FontAsset.club_id == club.id,
+                FontAsset.active.is_(True),
+                FontAsset.archived_at.is_(None),
+            ).order_by(FontAsset.name)
+        ).all(),
+        title="Vereinsbranding",
+    )
+
+
+@router.post("/branding")
+def update_club_branding(
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    version: int = Form(),
+    primary_color: str = Form(default="#172554"),
+    secondary_color: str = Form(default="#ffffff"),
+    accent_colors: str = Form(default=""),
+    graphic_style: str = Form(default=""),
+    image_effect: str = Form(default=""),
+    background_style: str = Form(default=""),
+    text_alignment: str = Form(default=""),
+    logo_placement: str = Form(default=""),
+    safe_margins: str = Form(default=""),
+    player_position: str = Form(default=""),
+    allowed_elements: str = Form(default=""),
+    unwanted_elements: str = Form(default=""),
+    sponsor_rules: str = Form(default=""),
+    forbidden_colors: str = Form(default=""),
+    feed_rules: str = Form(default=""),
+    story_rules: str = Form(default=""),
+    image_text_amount: str = Form(default=""),
+    player_background_ratio: str = Form(default=""),
+    dynamics: str = Form(default=""),
+    individualization: str = Form(default=""),
+    address_style: str = Form(default=""),
+    tone: str = Form(default=""),
+    text_length: str = Form(default=""),
+    emoji_usage: str = Form(default=""),
+    hashtags: str = Form(default=""),
+    mentions: str = Form(default=""),
+    typical_phrases: str = Form(default=""),
+    unwanted_phrases: str = Form(default=""),
+    team_name_spelling: str = Form(default=""),
+    home_label: str = Form(default=""),
+    away_label: str = Form(default=""),
+    call_to_action: str = Form(default=""),
+    sponsor_mentions: str = Form(default=""),
+    max_hashtags: int = Form(default=10),
+    primary_font_id: str = Form(default=""),
+    secondary_font_id: str = Form(default=""),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    from app.branding.service import BrandingValidationError, validate_branding_settings
+
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    statement = select(ClubBrandingConfiguration).where(
+        ClubBrandingConfiguration.club_id == current.club_id
+    )
+    if db.bind.dialect.name == "postgresql":
+        statement = statement.with_for_update()
+    config = db.scalar(statement)
+    current_version = config.version if config else 0
+    if version != current_version:
+        raise HTTPException(409, "Das Vereinsbranding wurde zwischenzeitlich geändert")
+    font_ids = [value for value in (primary_font_id, secondary_font_id) if value]
+    if font_ids:
+        valid_fonts = set(
+            db.scalars(
+                select(FontAsset.id).where(
+                    FontAsset.club_id == current.club_id,
+                    FontAsset.id.in_(font_ids),
+                    FontAsset.active.is_(True),
+                    FontAsset.archived_at.is_(None),
+                )
+            )
+        )
+        if valid_fonts != set(font_ids):
+            raise HTTPException(422, "Mindestens eine Schriftart gehört nicht zu diesem Verein")
+    image_settings = {
+        "primary_color": primary_color,
+        "secondary_color": secondary_color,
+        "accent_colors": _structured_list(accent_colors),
+        "graphic_style": graphic_style,
+        "image_effect": image_effect,
+        "background_style": background_style,
+        "text_alignment": text_alignment,
+        "logo_placement": logo_placement,
+        "safe_margins": safe_margins,
+        "player_position": player_position,
+        "allowed_elements": _structured_list(allowed_elements),
+        "unwanted_elements": _structured_list(unwanted_elements),
+        "sponsor_rules": _structured_list(sponsor_rules),
+        "forbidden_colors": _structured_list(forbidden_colors),
+        "feed_rules": feed_rules,
+        "story_rules": story_rules,
+        "image_text_amount": image_text_amount,
+        "player_background_ratio": player_background_ratio,
+        "dynamics": dynamics,
+        "individualization": individualization,
+    }
+    text_settings = {
+        "address_style": address_style,
+        "tone": tone,
+        "text_length": text_length,
+        "emoji_usage": emoji_usage,
+        "hashtags": _structured_list(hashtags),
+        "mentions": _structured_list(mentions),
+        "typical_phrases": _structured_list(typical_phrases),
+        "unwanted_phrases": _structured_list(unwanted_phrases),
+        "team_name_spelling": team_name_spelling,
+        "home_label": home_label,
+        "away_label": away_label,
+        "call_to_action": call_to_action,
+        "sponsor_mentions": _structured_list(sponsor_mentions),
+        "max_hashtags": max_hashtags,
+    }
+    try:
+        image_settings = validate_branding_settings(image_settings)
+        text_settings = validate_branding_settings(text_settings)
+    except BrandingValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if config is None:
+        config = ClubBrandingConfiguration(club_id=current.club_id)
+        db.add(config)
+    else:
+        config.version += 1
+    config.image_settings = image_settings
+    config.text_settings = text_settings
+    config.primary_font_id = primary_font_id or None
+    config.secondary_font_id = secondary_font_id or None
+    config.updated_by = current.id
+    audit(
+        db,
+        current,
+        "branding.updated",
+        "club_branding_configuration",
+        current.club_id,
+        details={
+            "version": config.version,
+            "image_keys": sorted(image_settings),
+            "text_keys": sorted(text_settings),
+        },
+    )
+    db.commit()
+    return redirect("/branding", "Vereinsbranding wurde gespeichert")
+
+
+def _invalidate_posts_for_logo_change(db: Session, game: Game, reason: str) -> list[str]:
     affected = []
     for post in db.scalars(select(Post).where(Post.game_id == game.id)).all():
         if post.status in {PostStatus.PUBLISHED, PostStatus.CANCELLED}:
@@ -116,9 +301,7 @@ def _invalidate_posts_for_logo_change(
             "Logo-Zuordnung wurde geändert; Grafiken mit aktualisierten "
             "Logo-Referenzen neu erzeugen"
         )
-        post.critical_warnings = list(
-            dict.fromkeys([*(post.critical_warnings or []), warning])
-        )
+        post.critical_warnings = list(dict.fromkeys([*(post.critical_warnings or []), warning]))
         for publication in db.scalars(
             select(PublicationJob).where(
                 PublicationJob.post_id == post.id,
@@ -177,12 +360,15 @@ def teams(request: Request, current=Depends(current_user), db: Session = Depends
         ).all()
         for item in items
     }
-    uploader_ids = {
-        logo.uploaded_by
-        for versions in logo_versions.values()
-        for logo in versions
-    }
-    uploaders = {user.id: user.email for user in db.scalars(select(User).where(User.id.in_(uploader_ids))).all()} if uploader_ids else {}
+    uploader_ids = {logo.uploaded_by for versions in logo_versions.values() for logo in versions}
+    uploaders = (
+        {
+            user.id: user.email
+            for user in db.scalars(select(User).where(User.id.in_(uploader_ids))).all()
+        }
+        if uploader_ids
+        else {}
+    )
     return render(
         request,
         "teams.html",
@@ -213,6 +399,14 @@ def create_team(
 ):
     check_csrf(request, csrf_token_value)
     require_admin(current)
+    try:
+        assert_resource_capacity(db, current.club_id, "teams")
+    except LimitExceeded as exc:
+        audit(
+            db, current, "team.limit_blocked", "club", current.club_id, details={"reason": str(exc)}
+        )
+        db.commit()
+        raise HTTPException(409, str(exc)) from exc
     if not fussball_url.startswith(("https://www.fussball.de/", "https://fussball.de/")):
         raise HTTPException(422, "Ungültige FUSSBALL.DE-URL")
     try:
@@ -220,7 +414,7 @@ def create_team(
     except StorageError as e:
         raise HTTPException(422, str(e)) from e
     page = db.get(InstagramPage, instagram_page_id)
-    if not page or not page.active:
+    if not page or page.club_id != current.club_id or not page.active:
         raise HTTPException(422, "Instagram-Seite muss aktiv sein")
     item = Team(
         internal_name=internal_name,
@@ -260,6 +454,21 @@ def team_state(
         item.archived_at = datetime.now(timezone.utc)
         item.active = False
     elif action == "toggle":
+        if not item.active:
+            try:
+                assert_resource_capacity(db, current.club_id, "teams")
+            except LimitExceeded as exc:
+                audit(
+                    db,
+                    current,
+                    "team.reactivation_limit_blocked",
+                    "team",
+                    item.id,
+                    item.id,
+                    {"reason": str(exc)},
+                )
+                db.commit()
+                raise HTTPException(409, str(exc)) from exc
         item.active = not item.active
     else:
         raise HTTPException(422, "Unbekannte Aktion")
@@ -307,9 +516,7 @@ async def upload_team_logo(
             reason = "Mannschaftslogo wurde geändert; erneute Freigabe erforderlich"
             game_posts = _invalidate_posts_for_logo_change(db, game, reason)
             affected.extend(game_posts)
-            _audit_logo_approval_revocations(
-                db, current, team.id, game.id, game_posts, reason
-            )
+            _audit_logo_approval_revocations(db, current, team.id, game.id, game_posts, reason)
     audit(
         db,
         current,
@@ -374,9 +581,7 @@ def team_logo_state(
             reason = "Mannschaftslogo wurde geändert; erneute Freigabe erforderlich"
             game_posts = _invalidate_posts_for_logo_change(db, game, reason)
             affected.extend(game_posts)
-            _audit_logo_approval_revocations(
-                db, current, team.id, game.id, game_posts, reason
-            )
+            _audit_logo_approval_revocations(db, current, team.id, game.id, game_posts, reason)
     audit(
         db,
         current,
@@ -386,11 +591,7 @@ def team_logo_state(
         team.id,
         {
             "old_logo": {"id": old.id, "version": old.version} if old else None,
-            "new_logo": (
-                {"id": logo.id, "version": logo.version}
-                if team.logo_asset_id
-                else None
-            ),
+            "new_logo": ({"id": logo.id, "version": logo.version} if team.logo_asset_id else None),
             "affected_posts": affected,
         },
     )
@@ -456,6 +657,19 @@ def create_instagram(
 ):
     check_csrf(request, csrf_token_value)
     require_admin(current)
+    try:
+        assert_resource_capacity(db, current.club_id, "instagram_pages")
+    except LimitExceeded as exc:
+        audit(
+            db,
+            current,
+            "instagram.limit_blocked",
+            "club",
+            current.club_id,
+            details={"reason": str(exc)},
+        )
+        db.commit()
+        raise HTTPException(409, str(exc)) from exc
     item = InstagramPage(
         internal_name=internal_name,
         display_name=display_name,
@@ -499,6 +713,20 @@ def instagram_state(
         and settings.publisher_mode != "live"
         and settings.environment != "meta-test"
     ):
+        if not item.active:
+            try:
+                assert_resource_capacity(db, current.club_id, "instagram_pages")
+            except LimitExceeded as exc:
+                audit(
+                    db,
+                    current,
+                    "instagram.reactivation_limit_blocked",
+                    "instagram_page",
+                    item.id,
+                    details={"reason": str(exc)},
+                )
+                db.commit()
+                raise HTTPException(409, str(exc)) from exc
         item.connection_status = "connected"
         item.active = True
         item.last_check_at = datetime.now(timezone.utc)
@@ -525,7 +753,7 @@ def users(request: Request, current=Depends(current_user), db: Session = Depends
         items=items,
         teams=teams,
         assignments=assignments,
-        roles=[Role.ADMIN, Role.APPROVER, Role.EDITOR, Role.VIEWER],
+        roles=[Role.ADMIN, Role.APPROVER, Role.EDITOR, Role.REVIEWER, Role.VIEWER],
         title="Benutzer und Rechte",
     )
 
@@ -671,7 +899,9 @@ def assign_user_role(
             )
         )
         if len(active_admin_ids) <= 1:
-            raise HTTPException(409, "Der letzte aktive Administrator kann nicht herabgestuft werden")
+            raise HTTPException(
+                409, "Der letzte aktive Administrator kann nicht herabgestuft werden"
+            )
     previous_role = item.role
     item.role = role
     audit(
@@ -891,9 +1121,7 @@ async def upload_player_images(
     try:
         for file in direct_files:
             content = await file.read(MAX_PLAYER_IMAGE_BYTES + 1)
-            persist(
-                validate_player_image(file.filename or "", file.content_type, content)
-            )
+            persist(validate_player_image(file.filename or "", file.content_type, content))
         if has_archive:
             await archive.seek(0)
             for image in iter_player_images_from_zip(
@@ -1011,6 +1239,14 @@ async def upload_font(
 ):
     check_csrf(request, csrf_token_value)
     require_admin(current)
+    try:
+        assert_resource_capacity(db, current.club_id, "fonts")
+    except LimitExceeded as exc:
+        audit(
+            db, current, "font.limit_blocked", "club", current.club_id, details={"reason": str(exc)}
+        )
+        db.commit()
+        raise HTTPException(409, str(exc)) from exc
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in {".woff2", ".ttf"}:
         raise HTTPException(422, "Nur WOFF2 und TTF sind erlaubt")
@@ -1081,12 +1317,14 @@ def prompts(request: Request, current=Depends(current_user), db: Session = Depen
         DEFAULT_TEXT_PROMPT,
     )
 
-    require_admin(current)
+    require_platform_admin(current)
     items = db.scalars(
         select(PromptTemplate)
         .where(PromptTemplate.archived_at.is_(None))
         .order_by(PromptTemplate.name, PromptTemplate.version.desc())
     ).all()
+    requested_run = request.query_params.get("test_run")
+    selected_test = db.get(PromptTestRun, requested_run) if requested_run else None
     return render(
         request,
         "prompts.html",
@@ -1096,6 +1334,13 @@ def prompts(request: Request, current=Depends(current_user), db: Session = Depen
         default_image=DEFAULT_IMAGE_PROMPT,
         default_text=DEFAULT_TEXT_PROMPT,
         preview=None,
+        clubs=db.scalars(select(Club).order_by(Club.name)).all(),
+        teams=db.scalars(select(Team).order_by(Team.display_name)).all(),
+        games=db.scalars(select(Game).order_by(Game.kickoff.desc()).limit(200)).all(),
+        prompt_tests=db.scalars(
+            select(PromptTestRun).order_by(PromptTestRun.created_at.desc()).limit(20)
+        ).all(),
+        selected_test=selected_test,
         title="KI-Promptvorlagen",
     )
 
@@ -1125,7 +1370,7 @@ def preview_prompt(
     )
 
     check_csrf(request, csrf_token_value)
-    require_admin(current)
+    require_platform_admin(current)
     if (
         prompt_kind not in {"image", "text"}
         or post_type not in {"announcement", "reminder", "result"}
@@ -1167,6 +1412,13 @@ def preview_prompt(
             "media_kind": media_kind,
             "style_direction": style_direction,
         },
+        clubs=db.scalars(select(Club).order_by(Club.name)).all(),
+        teams=db.scalars(select(Team).order_by(Team.display_name)).all(),
+        games=db.scalars(select(Game).order_by(Game.kickoff.desc()).limit(200)).all(),
+        prompt_tests=db.scalars(
+            select(PromptTestRun).order_by(PromptTestRun.created_at.desc()).limit(20)
+        ).all(),
+        selected_test=None,
         title="KI-Promptvorlagen",
     )
 
@@ -1189,7 +1441,7 @@ def create_prompt(
     from app.prompts.service import PromptValidationError, validate_template
 
     check_csrf(request, csrf_token_value)
-    require_admin(current)
+    require_platform_admin(current)
     name = name.strip()
     if (
         not name
@@ -1208,7 +1460,7 @@ def create_prompt(
             422, "Bildprompts benötigen ein GPT-Image-Modell und eine Bildqualitätsstufe"
         )
     try:
-        validate_template(prompt_body)
+        allowed_variables = sorted(validate_template(prompt_body))
     except PromptValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
     previous = db.scalar(
@@ -1228,10 +1480,17 @@ def create_prompt(
         post_type=post_type,
         media_kind=media_kind,
         prompt_body=prompt_body,
+        status=PromptStatus.DRAFT,
+        checksum=hashlib.sha256(prompt_body.encode("utf-8")).hexdigest(),
+        allowed_variables=allowed_variables,
+        validation_rules={},
+        created_by=current.id,
+        change_description="Neue geschützte Promptversion",
         style_direction=style_direction.strip() or None,
         model=model.strip(),
         quality=quality,
         version=version,
+        active=False,
     )
     db.add(item)
     db.flush()
@@ -1270,16 +1529,6 @@ def rules(
         else []
     )
     pages = db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
-    prompt_items = db.scalars(
-        select(PromptTemplate)
-        .where(PromptTemplate.active.is_(True), PromptTemplate.archived_at.is_(None))
-        .order_by(PromptTemplate.version.desc())
-    ).all()
-    latest = {}
-    for prompt in prompt_items:
-        latest.setdefault(
-            (prompt.name, prompt.prompt_kind, prompt.post_type, prompt.media_kind), prompt
-        )
     story_output_defaults = {"announcement": 1, "reminder": 1, "result": 1}
     for story in stories:
         story_output_defaults[story.post_type] = max(
@@ -1307,7 +1556,6 @@ def rules(
         selected=selected,
         stories=stories,
         pages=pages,
-        prompts=list(latest.values()),
         story_output_defaults=story_output_defaults,
         carousel_teams=carousel_teams,
         title="Veröffentlichungsregeln",
@@ -1443,12 +1691,13 @@ def save_rules(
             422,
             "Die bevorzugte Mannschaft gehört nicht zu diesem Verein und dieser Instagram-Seite",
         )
-    if announcement_offset_direction not in {"before", "after"} or result_offset_direction not in {"before", "after"}:
+    if announcement_offset_direction not in {"before", "after"} or result_offset_direction not in {
+        "before",
+        "after",
+    }:
         raise HTTPException(422, "Ungueltige Zeitrichtung")
     announcement_offset_minutes = (
-        feed_before_minutes
-        if announcement_offset_minutes is None
-        else announcement_offset_minutes
+        feed_before_minutes if announcement_offset_minutes is None else announcement_offset_minutes
     )
     if not 0 <= announcement_offset_minutes <= 43200 or not 0 <= result_offset_minutes <= 43200:
         raise HTTPException(422, "Relative Zeitpunkte muessen zwischen 0 und 43200 Minuten liegen")
@@ -1650,14 +1899,18 @@ def save_rules(
         if parsed.strftime("%H:%M") != value:
             raise HTTPException(422, "Ungueltige feste Uhrzeit")
     if announcement_timing_mode == "weekday_fixed" and len(announcement_weekday_times) != 7:
-        raise HTTPException(422, "Fuer feste Ankuendigungszeiten sind alle sieben Wochentage erforderlich")
+        raise HTTPException(
+            422, "Fuer feste Ankuendigungszeiten sind alle sieben Wochentage erforderlich"
+        )
     if reminder_timing_mode == "weekday_fixed" and len(reminder_weekday_times) != 7:
         raise HTTPException(
             422,
             "Für feste Erinnerungszeiten sind alle sieben Wochentage erforderlich",
         )
     if result_timing_mode == "weekday_fixed" and len(result_weekday_times) != 7:
-        raise HTTPException(422, "Fuer feste Ergebniszeiten sind alle sieben Wochentage erforderlich")
+        raise HTTPException(
+            422, "Fuer feste Ergebniszeiten sind alle sieben Wochentage erforderlich"
+        )
     team.rules = {
         **team.rules,
         "announcement_enabled": announcement_enabled,
@@ -1692,12 +1945,19 @@ def save_rules(
         "club_matchday_primary_team_id": club_matchday_primary_team_id or None,
         "reminder_feed_before_minutes": reminder_feed_before_minutes,
         **output_counts,
-        "image_prompt_feed": image_prompt_feed,
-        "image_prompt_story": image_prompt_story,
-        "text_prompt": text_prompt,
-        "image_prompt_feed_result": result_image_prompt_feed,
-        "image_prompt_story_result": result_image_prompt_story,
-        "text_prompt_result": result_text_prompt,
+        # Prompt selection is platform-owned. Keep any existing protected
+        # assignment, otherwise use the server-side platform defaults. Values
+        # submitted by a club form are deliberately ignored.
+        "image_prompt_feed": (team.rules or {}).get("image_prompt_feed", "default-image-feed"),
+        "image_prompt_story": (team.rules or {}).get("image_prompt_story", "default-image-story"),
+        "text_prompt": (team.rules or {}).get("text_prompt", "default-text-announcement"),
+        "image_prompt_feed_result": (team.rules or {}).get(
+            "image_prompt_feed_result", "default-image-feed"
+        ),
+        "image_prompt_story_result": (team.rules or {}).get(
+            "image_prompt_story_result", "default-image-story"
+        ),
+        "text_prompt_result": (team.rules or {}).get("text_prompt_result", "default-text-result"),
         "style_direction": style_direction.strip(),
     }
     team.version += 1
@@ -1774,7 +2034,7 @@ def create_story_rule(
     media_slot: int = Form(default=1),
     next_day: bool = Form(default=False),
     template: str = Form(),
-    prompt_template: str = Form(default="default-image-story"),
+    prompt_template: str = Form(default=""),
     instagram_page_id: str = Form(default=""),
     reuse_media: bool = Form(default=False),
     sort_order: int = Form(default=0),
@@ -1848,14 +2108,9 @@ def create_story_rule(
             ]
         )
     }
-    if any(
-        value not in {"0", "1", "2", "3", "4", "5", "6"}
-        for value in weekday_targets.values()
-    ):
+    if any(value not in {"0", "1", "2", "3", "4", "5", "6"} for value in weekday_targets.values()):
         raise HTTPException(422, "Ungültiger Story-Veröffentlichungs-Wochentag")
-    item = db.scalar(
-        select(StoryRule).where(StoryRule.team_id == team_id, StoryRule.name == name)
-    )
+    item = db.scalar(select(StoryRule).where(StoryRule.team_id == team_id, StoryRule.name == name))
     if item and item.active:
         raise HTTPException(409, "Ein Story-Zeitpunkt mit diesem Namen existiert bereits")
     restored = item is not None
@@ -1874,7 +2129,14 @@ def create_story_rule(
     item.media_slot = media_slot
     item.next_day = next_day
     item.template = template
-    item.prompt_template = prompt_template
+    protected_prompt_keys = {
+        "announcement": "image_prompt_story",
+        "reminder": "image_prompt_story",
+        "result": "image_prompt_story_result",
+    }
+    item.prompt_template = (team.rules or {}).get(
+        protected_prompt_keys[post_type], "default-image-story"
+    )
     item.instagram_page_id = instagram_page_id or None
     item.reuse_media = reuse_media
     item.sort_order = sort_order
@@ -1958,9 +2220,7 @@ def posts(
     planned_query = select(PublicationJob).where(
         PublicationJob.scheduled_at >= now,
         PublicationJob.scheduled_at <= planned_until,
-        PublicationJob.status.notin_(
-            [JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED]
-        ),
+        PublicationJob.status.notin_([JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED]),
     )
     if selected_kinds:
         published_query = published_query.where(PublicationJob.kind.in_(selected_kinds))
@@ -1968,16 +2228,12 @@ def posts(
 
     published_jobs = [
         job
-        for job in db.scalars(
-            published_query.order_by(PublicationJob.published_at.desc())
-        )
+        for job in db.scalars(published_query.order_by(PublicationJob.published_at.desc()))
         if require_visible(db, current, job.team_id)
     ]
     planned_jobs = [
         job
-        for job in db.scalars(
-            planned_query.order_by(PublicationJob.scheduled_at)
-        )
+        for job in db.scalars(planned_query.order_by(PublicationJob.scheduled_at))
         if require_visible(db, current, job.team_id)
     ]
 
@@ -1986,27 +2242,19 @@ def posts(
     game_ids = {job.game_id for job in calendar_jobs if job.game_id}
     page_ids = {job.instagram_page_id for job in calendar_jobs}
     calendar_posts = (
-        {
-            post.id: post
-            for post in db.scalars(select(Post).where(Post.id.in_(post_ids)))
-        }
+        {post.id: post for post in db.scalars(select(Post).where(Post.id.in_(post_ids)))}
         if post_ids
         else {}
     )
     games = (
-        {
-            game.id: game
-            for game in db.scalars(select(Game).where(Game.id.in_(game_ids)))
-        }
+        {game.id: game for game in db.scalars(select(Game).where(Game.id.in_(game_ids)))}
         if game_ids
         else {}
     )
     pages = (
         {
             page.id: page
-            for page in db.scalars(
-                select(InstagramPage).where(InstagramPage.id.in_(page_ids))
-            )
+            for page in db.scalars(select(InstagramPage).where(InstagramPage.id.in_(page_ids)))
         }
         if page_ids
         else {}
@@ -2143,16 +2391,12 @@ async def create_manual_post_route(
         if kind != "carousel" and len(images) != 1:
             raise ManualPostError("Feed und Story benötigen genau ein Bild")
         crop_specs = parse_manual_crop_specs(crop_specs_value, len(images))
-        user_tags_by_image = parse_manual_user_tag_specs(
-            user_tags_value, len(images), kind
-        )
+        user_tags_by_image = parse_manual_user_tag_specs(user_tags_value, len(images), kind)
         validated = []
         for image, crop in zip(images, crop_specs, strict=True):
             content = await image.read(MAX_MANUAL_IMAGE_BYTES + 1)
             validated.append(
-                validate_manual_image(
-                    image.filename or "", image.content_type, content, kind, crop
-                )
+                validate_manual_image(image.filename or "", image.content_type, content, kind, crop)
             )
         scheduled_at = parse_manual_publication_time(
             scheduled_at_value, team.timezone or settings.timezone
@@ -2195,13 +2439,15 @@ def post_detail(
     pages = db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
     current_media_asset = db.get(MediaAsset, item.media_asset_id) if item.media_asset_id else None
     alternative_media_assets = db.scalars(
-        select(MediaAsset).where(
+        select(MediaAsset)
+        .where(
             MediaAsset.team_id == item.team_id,
             MediaAsset.active.is_(True),
             MediaAsset.available.is_(True),
             MediaAsset.reserved_game_id.is_(None),
             MediaAsset.uses == 0,
-        ).order_by(MediaAsset.filename)
+        )
+        .order_by(MediaAsset.filename)
     ).all()
     from app.rendering.service import Renderer
 
@@ -2227,7 +2473,9 @@ def post_detail(
             if job.kind == "carousel":
                 if not 2 <= len(media_items) <= 10:
                     raise ValueError("Karussell benötigt 2 bis 10 geordnete Bilder")
-                reports = [renderer.validate(Path(media.media_path), "feed") for media in media_items]
+                reports = [
+                    renderer.validate(Path(media.media_path), "feed") for media in media_items
+                ]
                 checks[job.id] = (
                     f"{len(reports)} PNGs geprüft – jeweils "
                     f"{reports[0]['width']} × {reports[0]['height']}"
@@ -2373,17 +2621,13 @@ def revise_post_with_ai(
     if item.version != version:
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
     if not 10 <= len(instruction.strip()) <= 2000:
-        raise HTTPException(
-            422, "Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein"
-        )
+        raise HTTPException(422, "Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein")
     # Keep accepting ``revise_graphics`` for already open legacy forms. New
     # forms select the feed and each story explicitly.
     revise_feed = revise_feed or revise_graphics
     has_graphics = revise_feed or bool(story_job_ids)
     if not revise_text and not has_graphics:
-        raise HTTPException(
-            422, "Bitte Begleittext, Feed oder mindestens eine Story auswählen"
-        )
+        raise HTTPException(422, "Bitte Begleittext, Feed oder mindestens eine Story auswählen")
     allowed_story_ids = set(
         db.scalars(
             select(PublicationJob.id).where(
@@ -2505,6 +2749,7 @@ def reject_post(
     db: Session = Depends(get_db),
 ):
     from app.models import JobStatus, PostStatus
+    from app.usage.service import mark_post_rejected
 
     check_csrf(request, csrf_token_value)
     item = db.get(Post, post_id)
@@ -2529,6 +2774,7 @@ def reject_post(
         item.team_id,
         {"reason": reason or None},
     )
+    mark_post_rejected(db, item.id)
     db.commit()
     return redirect(f"/posts/{item.id}", "Beitrag abgelehnt")
 
@@ -2627,9 +2873,7 @@ def logo_preview(
             assigned_team_ids = db.scalars(
                 select(Game.team_id).where(Game.opponent_logo_id == logo.id)
             ).all()
-            if not any(
-                require_visible(db, current, team_id) for team_id in assigned_team_ids
-            ):
+            if not any(require_visible(db, current, team_id) for team_id in assigned_team_ids):
                 raise HTTPException(403, "Keine Berechtigung für dieses Gegnerlogo")
     relative = Path(logo.original_path)
     root = settings.upload_root.resolve()
@@ -2685,7 +2929,14 @@ def manage_opponent_logo(
         .order_by(LogoAsset.display_name, LogoAsset.version.desc())
     ).all()
     uploader_ids = {logo.uploaded_by for logo in library}
-    uploaders = {user.id: user.email for user in db.scalars(select(User).where(User.id.in_(uploader_ids))).all()} if uploader_ids else {}
+    uploaders = (
+        {
+            user.id: user.email
+            for user in db.scalars(select(User).where(User.id.in_(uploader_ids))).all()
+        }
+        if uploader_ids
+        else {}
+    )
     return render(
         request,
         "opponent_logo.html",
@@ -2768,9 +3019,7 @@ async def update_opponent_logo(
     if (old.id if old else None) != (selected.id if selected else None):
         reason = "Gegnerlogo wurde geändert; erneute Freigabe erforderlich"
         affected = _invalidate_posts_for_logo_change(db, game, reason)
-        _audit_logo_approval_revocations(
-            db, current, game.team_id, game.id, affected, reason
-        )
+        _audit_logo_approval_revocations(db, current, game.team_id, game.id, affected, reason)
     action_name = (
         "opponent_logo.removed"
         if not selected
@@ -2793,9 +3042,7 @@ async def update_opponent_logo(
         game.team_id,
         {
             "old_logo": {"id": old.id, "version": old.version} if old else None,
-            "new_logo": (
-                {"id": selected.id, "version": selected.version} if selected else None
-            ),
+            "new_logo": ({"id": selected.id, "version": selected.version} if selected else None),
             "source": source,
             "affected_posts": affected,
         },
@@ -2885,9 +3132,7 @@ def create_mock_game(
     if own_variants & team_name_variants(opponent):
         raise HTTPException(422, "Der Gegner darf nicht die eigene Mannschaft sein")
     own_name = team.display_name
-    home_team, away_team = (
-        (own_name, opponent) if side == "home" else (opponent, own_name)
-    )
+    home_team, away_team = (own_name, opponent) if side == "home" else (opponent, own_name)
     from zoneinfo import ZoneInfo
 
     try:
@@ -2999,7 +3244,9 @@ def delete_game(
                 publication_job.status = JobStatus.CANCELLED
                 publication_job.approval_status = "unapproved"
                 publication_job.approved_post_version = None
-                publication_job.error = "Spiel wurde im Dashboard gelöscht und für Provider-Importe unterdrückt"
+                publication_job.error = (
+                    "Spiel wurde im Dashboard gelöscht und für Provider-Importe unterdrückt"
+                )
         audit(
             db,
             current,
@@ -3025,9 +3272,7 @@ def delete_game(
             else "Spiel gelöscht und für erneute Provider-Importe unterdrückt",
         )
 
-    for asset in db.scalars(
-        select(MediaAsset).where(MediaAsset.reserved_game_id == game.id)
-    ):
+    for asset in db.scalars(select(MediaAsset).where(MediaAsset.reserved_game_id == game.id)):
         asset.reserved_game_id = None
         asset.uses = max(0, asset.uses - 1)
     terminal_job_ids = list(

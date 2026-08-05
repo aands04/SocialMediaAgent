@@ -19,6 +19,8 @@ from app.games.provider import FussballDeProvider, ProviderError
 from app.jobs.generation import enqueue_create
 from app.models import (
     AuditLog,
+    Club,
+    ClubStatus,
     FussballSyncState,
     Game,
     GenerationJob,
@@ -31,6 +33,7 @@ from app.models import (
     User,
 )
 from app.posts.service import feed_time, story_time
+from app.tenancy.state import system_scope, tenant_scope
 
 log = structlog.get_logger()
 
@@ -51,7 +54,11 @@ def _now() -> datetime:
 
 
 def _utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
 
 
 def _ensure_states(db: Session, now: datetime) -> None:
@@ -107,18 +114,14 @@ def claim_due_team(
         state.status = "running"
         state.last_started_at = now
         state.lease_owner = worker_id
-        state.lease_expires_at = now + timedelta(
-            seconds=settings.fussball_sync_lease_seconds
-        )
+        state.lease_expires_at = now + timedelta(seconds=settings.fussball_sync_lease_seconds)
         db.commit()
         return state.team_id
     db.commit()
     return None
 
 
-def _capture_automatic_snapshot(
-    db: Session, team: Team, settings: Settings
-) -> ProviderSnapshot:
+def _capture_automatic_snapshot(db: Session, team: Team, settings: Settings) -> ProviderSnapshot:
     provider = FussballDeProvider(
         timeout=15,
         max_attempts=2,
@@ -137,9 +140,7 @@ def _capture_automatic_snapshot(
             previous_html = provider.fetch_html(previous_url, ajax_only=True)
             previous_records = provider.parse(previous_html)
         except ProviderError as exc:
-            related_warnings.append(
-                f"Letzte Spiele konnten nicht gelesen werden: {exc}"
-            )
+            related_warnings.append(f"Letzte Spiele konnten nicht gelesen werden: {exc}")
         else:
             related_html.append(("previous", previous_url, previous_html))
             merged = {record.external_id: record for record in records}
@@ -174,9 +175,7 @@ def _capture_automatic_snapshot(
 
     root = settings.provider_snapshot_root.resolve()
     root.mkdir(parents=True, exist_ok=True)
-    relative = Path(team.id) / (
-        f"{fetched_at.strftime('%Y%m%dT%H%M%S%fZ')}-{checksum[:12]}.html"
-    )
+    relative = Path(team.id) / (f"{fetched_at.strftime('%Y%m%dT%H%M%S%fZ')}-{checksum[:12]}.html")
     target = (root / relative).resolve()
     if not target.is_relative_to(root):
         raise ProviderError("Ungültiger Snapshot-Pfad")
@@ -194,15 +193,12 @@ def _capture_automatic_snapshot(
                 "kind": label,
                 "source_url": source_url,
                 "relative_path": str(related_relative),
-                "checksum": hashlib.sha256(
-                    related_payload.encode("utf-8")
-                ).hexdigest(),
+                "checksum": hashlib.sha256(related_payload.encode("utf-8")).hexdigest(),
             }
         )
     parsed = [serialize(record) for record in records]
     warnings = sorted(
-        {warning for record in records for warning in record.warnings}
-        | set(related_warnings)
+        {warning for record in records for warning in record.warnings} | set(related_warnings)
     )
     snapshot = ProviderSnapshot(
         team_id=team.id,
@@ -243,9 +239,7 @@ def _observe_results(
         )
         if not game or (game.overrides or {}).get("import_suppressed"):
             continue
-        if now > _utc(game.kickoff) + timedelta(
-            hours=settings.fussball_result_max_age_hours
-        ):
+        if now > _utc(game.kickoff) + timedelta(hours=settings.fussball_result_max_age_hours):
             continue
         home_score = item.get("home_score")
         away_score = item.get("away_score")
@@ -254,12 +248,8 @@ def _observe_results(
             old_enough = now >= _utc(game.kickoff) + timedelta(
                 minutes=settings.fussball_result_min_age_minutes
             )
-            obfuscated = any(
-                "Symbolschrift" in warning for warning in item.get("warnings", [])
-            )
-            if old_enough and obfuscated and not overrides.get(
-                "result_review_notified_at"
-            ):
+            obfuscated = any("Symbolschrift" in warning for warning in item.get("warnings", []))
+            if old_enough and obfuscated and not overrides.get("result_review_notified_at"):
                 overrides["result_review_notified_at"] = now.isoformat()
                 game.overrides = overrides
                 db.add(
@@ -283,9 +273,9 @@ def _observe_results(
             overrides["result_detected_at"] = now.isoformat()
             game.result_confirmed = False
         elif overrides.get("provider_score_last_snapshot_id") != snapshot.id:
-            overrides["provider_score_observations"] = int(
-                overrides.get("provider_score_observations", 1)
-            ) + 1
+            overrides["provider_score_observations"] = (
+                int(overrides.get("provider_score_observations", 1)) + 1
+            )
         overrides["provider_score_last_snapshot_id"] = snapshot.id
         overrides["provider_score_last_seen_at"] = now.isoformat()
         overrides.setdefault("result_detected_at", now.isoformat())
@@ -344,9 +334,7 @@ def _automatic_actor(db: Session) -> User | None:
     )
 
 
-def _earliest_publication(
-    db: Session, team: Team, game: Game, post_type: str
-) -> datetime:
+def _earliest_publication(db: Session, team: Team, game: Game, post_type: str) -> datetime:
     feed_at, _ = feed_time(team, game, post_type)
     times = [feed_at]
     for rule in db.scalars(
@@ -363,9 +351,9 @@ def _earliest_publication(
 def plan_generation_jobs(
     db: Session, team: Team, settings: Settings, *, now: datetime | None = None
 ) -> int:
-    if not settings.automatic_post_generation_enabled or not (
-        team.rules or {}
-    ).get("automatic_generation_enabled"):
+    if not settings.automatic_post_generation_enabled or not (team.rules or {}).get(
+        "automatic_generation_enabled"
+    ):
         return 0
     actor = _automatic_actor(db)
     if not actor:
@@ -373,15 +361,15 @@ def plan_generation_jobs(
     now = now or _now()
     rules = team.rules or {}
     if "generation_lead_days" in rules:
+
         def generation_due(game: Game) -> datetime:
-            return _utc(game.kickoff) - timedelta(
-                days=int(rules.get("generation_lead_days", 4))
-            )
+            return _utc(game.kickoff) - timedelta(days=int(rules.get("generation_lead_days", 4)))
     else:
         legacy_lead = timedelta(minutes=int(rules.get("generation_lead_minutes", 120)))
 
         def generation_due(game: Game) -> datetime:
             return _earliest_publication(db, team, game, "announcement") - legacy_lead
+
     queued = 0
     games = db.scalars(
         select(Game).where(
@@ -391,9 +379,9 @@ def plan_generation_jobs(
         )
     ).all()
     for game in games:
-        if (game.overrides or {}).get("automation_blocked") or (
-            game.overrides or {}
-        ).get("import_suppressed"):
+        if (game.overrides or {}).get("automation_blocked") or (game.overrides or {}).get(
+            "import_suppressed"
+        ):
             continue
         post_types: list[str] = []
         if (
@@ -411,9 +399,7 @@ def plan_generation_jobs(
         if (
             rules.get("result_enabled")
             and game.result_confirmed
-            and now
-            <= _utc(game.kickoff)
-            + timedelta(hours=settings.fussball_result_max_age_hours)
+            and now <= _utc(game.kickoff) + timedelta(hours=settings.fussball_result_max_age_hours)
         ):
             post_types.append("result")
         for post_type in post_types:
@@ -427,8 +413,7 @@ def plan_generation_jobs(
                 continue
             existing_job = db.scalar(
                 select(GenerationJob.id).where(
-                    GenerationJob.idempotency_key
-                    == f"create:{game.id}:{post_type}"
+                    GenerationJob.idempotency_key == f"create:{game.id}:{post_type}"
                 )
             )
             if existing_job:
@@ -494,11 +479,7 @@ def _next_interval(db: Session, team_id: str, settings: Settings, now: datetime)
         return result_poll
 
     upcoming_dates = sorted(
-        {
-            _utc(game.kickoff).astimezone(berlin).date()
-            for game in games
-            if _utc(game.kickoff) > now
-        }
+        {_utc(game.kickoff).astimezone(berlin).date() for game in games if _utc(game.kickoff) > now}
     )
     if upcoming_dates:
         next_matchday = datetime.combine(
@@ -510,9 +491,7 @@ def _next_interval(db: Session, team_id: str, settings: Settings, now: datetime)
     return normal
 
 
-def process_claimed_team(
-    db: Session, team_id: str, settings: Settings
-) -> dict[str, int]:
+def process_claimed_team(db: Session, team_id: str, settings: Settings) -> dict[str, int]:
     state = db.get(FussballSyncState, team_id)
     team = db.get(Team, team_id)
     if not state or state.status != "running" or not team:
@@ -525,9 +504,7 @@ def process_claimed_team(
         now = _now()
         state = db.get(FussballSyncState, team_id)
         state.status = "idle"
-        state.next_poll_at = now + timedelta(
-            seconds=_next_interval(db, team.id, settings, now)
-        )
+        state.next_poll_at = now + timedelta(seconds=_next_interval(db, team.id, settings, now))
         state.lease_owner = None
         state.lease_expires_at = None
         state.last_completed_at = now
@@ -580,17 +557,31 @@ def process_claimed_team(
         raise
 
 
-def run_automatic_fussball_cycle(
-    db: Session, settings: Settings
-) -> AutomaticFussballResult:
+def run_automatic_fussball_cycle(db: Session, settings: Settings) -> AutomaticFussballResult:
     result = AutomaticFussballResult()
     for _ in range(settings.fussball_sync_batch_size):
-        team_id = claim_due_team(db, settings)
+        with system_scope("FUSSBALL.DE-Mannschaft global beanspruchen"):
+            team_id = claim_due_team(db, settings)
         if not team_id:
             break
+        with system_scope("Mandant der FUSSBALL.DE-Mannschaft bestimmen"):
+            team = db.get(Team, team_id)
+            club = db.get(Club, team.club_id) if team else None
         result.claimed += 1
+        if not team or not club or club.status not in {ClubStatus.ACTIVE, ClubStatus.TRIAL}:
+            with system_scope("FUSSBALL.DE-Auftrag eines gesperrten Vereins blockieren"):
+                state = db.get(FussballSyncState, team_id)
+                if state:
+                    state.status = "disabled"
+                    state.lease_owner = None
+                    state.lease_expires_at = None
+                    state.next_poll_at = _now() + timedelta(hours=24)
+                    db.commit()
+            result.failed += 1
+            continue
         try:
-            item = process_claimed_team(db, team_id, settings)
+            with tenant_scope(team.club_id, "system:fussball-worker"):
+                item = process_claimed_team(db, team_id, settings)
         except Exception as exc:
             result.failed += 1
             log.warning("automatic_fussball_sync_failed", team_id=team_id, error=str(exc))

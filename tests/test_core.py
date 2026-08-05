@@ -62,7 +62,7 @@ def test_editorial_roles_enforce_creation_and_approval_permissions(db, tmp_path)
  viewer=User(email="viewer-role@x.de",password_hash="x",role=Role.VIEWER,all_teams=True)
  db.add_all([administrator,editor,author,viewer]); db.commit()
 
- assert administrator.role.label=="Administrator" and allowed(db,administrator,"manage_users",team.id)
+ assert administrator.role.label=="Vereinsadministrator" and allowed(db,administrator,"manage_users",team.id)
  assert editor.role.label=="Redakteur"
  assert all(allowed(db,editor,permission,team.id) for permission in ("view","edit_post","generate","approve","publish_retry"))
  assert not allowed(db,editor,"manage_users",team.id)
@@ -70,7 +70,7 @@ def test_editorial_roles_enforce_creation_and_approval_permissions(db, tmp_path)
  assert all(allowed(db,author,permission,team.id) for permission in ("view","edit_post","generate"))
  assert not allowed(db,author,"approve",team.id)
  assert not allowed(db,author,"publish_retry",team.id)
- assert viewer.role.label=="Betrachter" and allowed(db,viewer,"view",team.id)
+ assert viewer.role.label=="Nur Lesen" and allowed(db,viewer,"view",team.id)
  assert not allowed(db,viewer,"edit_post",team.id)
 def test_storage_blocks_escape_and_bad_type(media_root):
  store=LocalStorageProvider(media_root); (media_root/"x.jpg").write_bytes(b"x")
