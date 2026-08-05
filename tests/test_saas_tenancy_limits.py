@@ -68,6 +68,19 @@ def test_legacy_migration_requires_explicit_club_when_identity_is_ambiguous(
             migration._initial_identity(connection, {"users"})
 
 
+def test_account_type_enum_is_created_before_postgresql_alter_table_and_dropped_afterward():
+    source = Path("alembic/versions/0016_multi_tenant_core.py").read_text(encoding="utf-8")
+    create_position = source.index("account_type.create(bind, checkfirst=True)")
+    add_column_position = source.index('with op.batch_alter_table("users") as batch:')
+    drop_column_position = source.index('batch.drop_column("account_type")')
+    drop_type_position = source.index(
+        'sa.Enum("CLUB_USER", "PLATFORM_ADMIN", name="accounttype").drop('
+    )
+
+    assert create_position < add_column_position
+    assert drop_column_position < drop_type_position
+
+
 def test_account_type_and_tenant_context_invariants(db):
     club_id = db.info["test_club_id"]
     member = User(
