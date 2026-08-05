@@ -64,23 +64,28 @@ def authenticate(db: Session, email: str, password: str) -> User | None:
         normalized_email = normalize_email(email)
     except ValueError:
         return None
-    with system_scope("Anmeldedaten prüfen"):
+    # Before authentication succeeds there cannot be a trusted tenant actor:
+    # the account (and therefore its club) is only known after the global,
+    # unique e-mail lookup. Keep the narrowly scoped authentication lookup
+    # and its lockout-state update in one explicit system scope. Otherwise
+    # the tenant write guard rejects the commit after the lookup scope ends.
+    with system_scope("Anmeldedaten prüfen und Sperrstatus aktualisieren"):
         user = db.scalar(
             select(User).where(User.email == normalized_email, User.archived_at.is_(None))
         )
-    now = datetime.now(timezone.utc)
-    if not user or not user.active or (user.locked_until and user.locked_until > now):
-        return None
-    if not verify_password(password, user.password_hash):
-        user.failed_logins += 1
-        if user.failed_logins >= 5:
-            user.locked_until = now + timedelta(minutes=15)
+        now = datetime.now(timezone.utc)
+        if not user or not user.active or (user.locked_until and user.locked_until > now):
+            return None
+        if not verify_password(password, user.password_hash):
+            user.failed_logins += 1
+            if user.failed_logins >= 5:
+                user.locked_until = now + timedelta(minutes=15)
+            db.commit()
+            return None
+        user.failed_logins = 0
+        user.locked_until = None
         db.commit()
-        return None
-    user.failed_logins = 0
-    user.locked_until = None
-    db.commit()
-    return user
+        return user
 
 
 def allowed(db: Session, user: User, permission: str, team_id: str | None = None) -> bool:
