@@ -1,5 +1,6 @@
 import hashlib
 import re
+from contextlib import contextmanager
 from urllib.parse import urlparse
 
 import pytest
@@ -8,9 +9,19 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 
 from app.auth.service import hash_password, validate_new_password, verify_password
-from app.db import Base, get_db
+from app.db import Base, TenantSession, get_db
 from app.main import app
-from app.models import AuditLog, EmailChangeToken, PasswordResetToken, Role, User
+from app.models import (
+    AuditLog,
+    Club,
+    ClubStatus,
+    EmailChangeToken,
+    PasswordResetToken,
+    PlanProfile,
+    Role,
+    User,
+)
+from app.tenancy.state import system_scope, tenant_scope
 
 
 @pytest.fixture
@@ -24,19 +35,37 @@ def password_browser(tmp_path, monkeypatch):
         connection.execute("PRAGMA foreign_keys=ON")
 
     Base.metadata.create_all(engine)
-    factory = sessionmaker(engine, expire_on_commit=False)
-    with factory() as db:
-        db.add(
-            User(
+    raw_factory = sessionmaker(engine, class_=TenantSession, expire_on_commit=False)
+    with raw_factory() as db, system_scope("Passwort-Testmandant anlegen"):
+        profile = PlanProfile(name="Passwort-Test", description="Testprofil", version=1)
+        db.add(profile)
+        db.flush()
+        club = Club(
+            name="Passwort Testverein",
+            short_name="Passwort",
+            slug="passwort-testverein",
+            status=ClubStatus.ACTIVE,
+            timezone="Europe/Berlin",
+            plan_profile_id=profile.id,
+        )
+        db.add(club)
+        db.flush()
+        admin = User(
                 email="account@test.invalid",
                 password_hash=hash_password("Current-Secure-Password"),
                 role=Role.ADMIN,
                 all_teams=True,
+                club_id=club.id,
             )
-        )
+        db.add(admin)
         db.commit()
 
-    def override():
+    @contextmanager
+    def factory():
+        with tenant_scope(club.id, admin.id), raw_factory() as db:
+            yield db
+
+    async def override():
         with factory() as db:
             yield db
 
@@ -76,7 +105,7 @@ def test_signed_in_identity_and_password_change_invalidates_session(password_bro
     dashboard = client.get("/")
     assert "Eingeloggt als" in dashboard.text
     assert "account@test.invalid" in dashboard.text
-    assert "Administrator" in dashboard.text
+    assert "Vereinsadministrator" in dashboard.text
 
     page = client.get("/account/password")
     response = client.post(
@@ -110,59 +139,21 @@ def test_minimum_password_length_is_eight_characters():
     assert validate_new_password("12345678") is None
 
 
-def test_registration_requires_admin_approval(password_browser):
-    client, factory, _ = password_browser
-    page = client.get("/register")
-    assert "erst nach Prüfung" in page.text
-    too_short = client.post(
-        "/register",
-        data={
-            "email": "member@test.invalid",
-            "password": "1234567",
-            "password_confirmation": "1234567",
-            "csrf_token": _csrf(page),
-        },
+def test_public_registration_is_disabled_in_multi_tenant_mode(password_browser):
+    client, _factory, _ = password_browser
+    assert client.get("/register").status_code == 404
+    assert (
+        client.post(
+            "/register",
+            data={
+                "email": "member@test.invalid",
+                "password": "12345678",
+                "password_confirmation": "12345678",
+                "csrf_token": "not-needed-for-disabled-route",
+            },
+        ).status_code
+        == 404
     )
-    assert too_short.status_code == 422
-
-    page = client.get("/register")
-    created = client.post(
-        "/register",
-        data={
-            "email": "Member@Test.Invalid",
-            "password": "12345678",
-            "password_confirmation": "12345678",
-            "csrf_token": _csrf(page),
-        },
-        follow_redirects=False,
-    )
-    assert created.status_code == 303
-    with factory() as db:
-        member = db.scalar(select(User).where(User.email == "member@test.invalid"))
-        assert member is not None
-        assert member.registration_status == "pending"
-        assert member.active is False
-        assert member.role == Role.VIEWER
-        member_id = member.id
-        assert db.scalar(select(AuditLog).where(AuditLog.action == "registration.requested"))
-
-    assert _login(client, "12345678", "member@test.invalid").status_code == 401
-    assert _login(client).status_code == 303
-    users_page = client.get("/users")
-    assert "wartet auf Freigabe" in users_page.text
-    approved = client.post(
-        f"/users/{member_id}/registration",
-        data={"csrf_token": _csrf(users_page), "action": "approve"},
-        follow_redirects=False,
-    )
-    assert approved.status_code == 303
-    client.post("/logout")
-    assert _login(client, "12345678", "member@test.invalid").status_code == 303
-    with factory() as db:
-        member = db.get(User, member_id)
-        assert member.active is True
-        assert member.registration_status == "approved"
-        assert db.scalar(select(AuditLog).where(AuditLog.action == "registration.approved"))
 
 
 def test_email_change_is_confirmed_via_old_address_and_invalidates_session(

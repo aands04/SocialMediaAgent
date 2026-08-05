@@ -50,11 +50,7 @@ def _reject_before_publish(
     message: str,
     final_check: bool,
 ) -> None:
-    requires_reapproval = (
-        final_check
-        or "Version" in message
-        or "Vereins-Karussell" in message
-    )
+    requires_reapproval = final_check or "Version" in message or "Vereins-Karussell" in message
     if message == "Not-Aus aktiv" or not requires_reapproval:
         # Preserve the established worker contract for temporary gates. The
         # scheduler may retry these jobs after the gate has been resolved.
@@ -76,9 +72,7 @@ def process_job(
     publisher: SocialMediaPublisher,
     settings: Settings,
 ):
-    job = db.scalar(
-        select(PublicationJob).where(PublicationJob.id == job_id).with_for_update()
-    )
+    job = db.scalar(select(PublicationJob).where(PublicationJob.id == job_id).with_for_update())
     if not job or job.status in {JobStatus.PUBLISHED, JobStatus.PUBLISHING}:
         return job
     post = db.get(Post, job.post_id)
@@ -95,8 +89,7 @@ def process_job(
     )
     carousel_ok = job.kind != "carousel" or (
         2 <= len(media_items) <= 10
-        and [item.position for item in media_items]
-        == list(range(1, len(media_items) + 1))
+        and [item.position for item in media_items] == list(range(1, len(media_items) + 1))
         and all(Path(item.media_path).is_file() for item in media_items)
     )
     grouped_ok, grouped_error = _grouped_games_are_publishable(db, post)
@@ -104,8 +97,7 @@ def process_job(
         (settings.global_publish_enabled, "Globales Publishing ist nicht aktiviert"),
         (not (stop and stop.value.get("enabled")), "Not-Aus aktiv"),
         (
-            post.status
-            in {PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL},
+            post.status in {PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL},
             "Beitrag nicht freigegeben",
         ),
         (post.version == job.approved_post_version, "Freigegebene Version verändert"),
@@ -120,9 +112,7 @@ def process_job(
         (grouped_ok, grouped_error),
         (not job.stale_time, "Veröffentlichungszeit ist möglicherweise veraltet"),
         (
-            post.publishing_enabled
-            and team.publishing_enabled
-            and page.publishing_enabled,
+            post.publishing_enabled and team.publishing_enabled and page.publishing_enabled,
             "Publishing deaktiviert",
         ),
         (
@@ -135,9 +125,7 @@ def process_job(
     ]
     for ok, message in checks:
         if not ok:
-            _reject_before_publish(
-                db, post=post, job=job, message=message, final_check=False
-            )
+            _reject_before_publish(db, post=post, job=job, message=message, final_check=False)
 
     job.status = JobStatus.PUBLISHING
     job.attempts += 1
@@ -153,8 +141,7 @@ def process_job(
     final_checks = [
         (not (stop and stop.value.get("enabled")), "Not-Aus aktiv"),
         (
-            post.status
-            in {PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL},
+            post.status in {PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL},
             "Beitrag nicht mehr freigegeben",
         ),
         (post.version == job.approved_post_version, "Freigegebene Version verändert"),
@@ -171,9 +158,7 @@ def process_job(
     ]
     for ok, message in final_checks:
         if not ok:
-            _reject_before_publish(
-                db, post=post, job=job, message=message, final_check=True
-            )
+            _reject_before_publish(db, post=post, job=job, message=message, final_check=True)
 
     try:
         result = publisher.publish(
@@ -203,9 +188,7 @@ def process_job(
     job.permalink = result.permalink
     job.published_at = datetime.now(timezone.utc)
     statuses = list(
-        db.scalars(
-            select(PublicationJob.status).where(PublicationJob.post_id == post.id)
-        )
+        db.scalars(select(PublicationJob.status).where(PublicationJob.post_id == post.id))
     )
     finished = {JobStatus.PUBLISHED, JobStatus.SKIPPED, JobStatus.CANCELLED}
     if all(value in finished for value in statuses):

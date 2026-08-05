@@ -63,9 +63,7 @@ def _page_connection(db: Session, page_id: str):
     if not page or page.archived_at:
         raise HTTPException(404, "Instagram-Seite nicht gefunden")
     connection = db.scalar(
-        select(InstagramConnection).where(
-            InstagramConnection.instagram_page_id == page.id
-        )
+        select(InstagramConnection).where(InstagramConnection.instagram_page_id == page.id)
     )
     return page, connection
 

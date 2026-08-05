@@ -15,11 +15,7 @@ def normalize_instagram_username(value: object) -> str:
     if not isinstance(value, str):
         raise UserTagValidationError("Instagram-Benutzername ist ungültig")
     username = value.strip().removeprefix("@").lower()
-    if (
-        not _USERNAME_PATTERN.fullmatch(username)
-        or ".." in username
-        or len(username) > 30
-    ):
+    if not _USERNAME_PATTERN.fullmatch(username) or ".." in username or len(username) > 30:
         raise UserTagValidationError(
             "Instagram-Benutzername darf nur Buchstaben, Zahlen, Punkte und Unterstriche enthalten"
         )
@@ -42,9 +38,7 @@ def normalize_user_tag_list(value: object) -> list[dict[str, float | str]]:
             raise UserTagValidationError("Instagram-Markierung ist ungültig")
         username = normalize_instagram_username(item.get("username"))
         if username in usernames:
-            raise UserTagValidationError(
-                f"@{username} ist auf diesem Bild mehrfach markiert"
-            )
+            raise UserTagValidationError(f"@{username} ist auf diesem Bild mehrfach markiert")
         try:
             x = float(item["x"])
             y = float(item["y"])
@@ -98,17 +92,11 @@ def user_tags_from_snapshot(
     if not isinstance(images, list):
         raise UserTagValidationError("Eingefrorene Bilddaten sind ungültig")
     image = next(
-        (
-            item
-            for item in images
-            if isinstance(item, dict) and item.get("position") == position
-        ),
+        (item for item in images if isinstance(item, dict) and item.get("position") == position),
         None,
     )
     if image is None:
-        raise UserTagValidationError(
-            f"Eingefrorene Bilddaten für Position {position} fehlen"
-        )
+        raise UserTagValidationError(f"Eingefrorene Bilddaten für Position {position} fehlen")
     return normalize_user_tag_list(image.get("user_tags") or [])
 
 

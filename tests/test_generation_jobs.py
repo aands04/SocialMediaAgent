@@ -5,6 +5,8 @@ from sqlalchemy import select
 from app.config import Settings
 from app.jobs import generation
 from app.models import (
+    Club,
+    ClubStatus,
     Game,
     GenerationJob,
     GenerationJobStatus,
@@ -204,3 +206,29 @@ def test_cancel_queued_job_and_manual_retry(db):
     generation.retry_job(db, job)
     assert job.status == GenerationJobStatus.QUEUED
     assert job.active_key == f"create:{game.id}:announcement"
+
+
+def test_worker_stops_when_club_is_suspended_after_claim(db, monkeypatch, tmp_path):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    claimed = generation.claim_next(db, "worker-suspended-club")
+    club = db.get(Club, job.club_id)
+    club.status = ClubStatus.SUSPENDED
+    db.commit()
+
+    called = False
+
+    def unexpected_create(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("Bei gesperrtem Verein darf keine Generierung beginnen")
+
+    monkeypatch.setattr(generation, "create_post", unexpected_create)
+    result = generation.process_generation_job(
+        db, claimed, Settings(generated_root=tmp_path, media_root=tmp_path)
+    )
+
+    assert called is False
+    assert result.status == GenerationJobStatus.FAILED
+    assert result.error_category == "permission_changed"
+    assert "Verein ist gesperrt" in result.error_message

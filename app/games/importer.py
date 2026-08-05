@@ -1,4 +1,5 @@
 """Explicit, audited and idempotent snapshot-to-game import; never creates posts."""
+
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -48,7 +49,11 @@ def preview_snapshot(snapshot: ProviderSnapshot) -> list[dict]:
 
 
 def _utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
 
 
 def _different(current, value) -> bool:
@@ -66,20 +71,13 @@ def _invalidate_publications(db: Session, game: Game, kickoff_delta) -> None:
         for post in candidate_posts
         if post.game_id == game.id
         or game.id
-        in (
-            ((post.design_snapshot or {}).get("club_matchday_carousel") or {}).get(
-                "game_ids", []
-            )
-        )
+        in (((post.design_snapshot or {}).get("club_matchday_carousel") or {}).get("game_ids", []))
     ]
     post_ids = [post.id for post in posts]
     open_jobs = list(
         db.scalars(
             select(PublicationJob).where(
-                (
-                    (PublicationJob.game_id == game.id)
-                    | PublicationJob.post_id.in_(post_ids)
-                ),
+                ((PublicationJob.game_id == game.id) | PublicationJob.post_id.in_(post_ids)),
                 PublicationJob.status.in_(OPEN_JOB_STATUSES),
             )
         )
@@ -105,9 +103,7 @@ def _invalidate_publications(db: Session, game: Game, kickoff_delta) -> None:
         job.error = "Spieldaten wurden geändert; erneute Freigabe erforderlich"
 
 
-def import_snapshot(
-    db: Session, snapshot: ProviderSnapshot, user: User | None = None
-) -> dict:
+def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User | None = None) -> dict:
     team = db.get(Team, snapshot.team_id)
     if not team:
         raise SnapshotImportError("Snapshot hat keine gültige Mannschaft")
@@ -134,8 +130,10 @@ def import_snapshot(
         incoming_scores = (item.get("home_score"), item.get("away_score"))
         # A temporarily unavailable or structurally rejected symbol font must
         # never erase a score that was read safely during an earlier poll.
-        if game and incoming_scores == (None, None) and (
-            game.home_score is not None and game.away_score is not None
+        if (
+            game
+            and incoming_scores == (None, None)
+            and (game.home_score is not None and game.away_score is not None)
         ):
             incoming_scores = (game.home_score, game.away_score)
         existing_overrides = dict(game.overrides or {}) if game else {}

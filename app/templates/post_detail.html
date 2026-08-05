@@ -67,17 +67,6 @@
 <div class="warning">Legacy-Beitrag ohne eingefrorene Logoversion. Logos zuordnen und anschließend kontrolliert neu zusammensetzen.</div>
 {% endif %}
 {% endif %}
-{% if item.design_snapshot.get('prompts') %}
-<details>
-  <summary>Verwendete Promptversionen anzeigen</summary>
-  {% for key,prompt in item.design_snapshot.get('prompts',{}).items() %}
-  {% if prompt %}<h3>{{key}}: {{prompt.name}} · v{{prompt.version}} · {{prompt.model}}</h3><pre style="white-space:pre-wrap">{{prompt.rendered}}</pre>{% endif %}
-  {% endfor %}
-  {% for story in item.design_snapshot.get('stories',[]) %}
-  {% if story.get('prompt') %}<h3>Story: {{story.prompt.name}} · v{{story.prompt.version}} · {{story.prompt.model}}</h3><pre style="white-space:pre-wrap">{{story.prompt.rendered}}</pre>{% endif %}
-  {% endfor %}
-</details>
-{% endif %}
 <h2>Visuelle Prüfübersicht</h2>
 <div class="media-grid">
   {% for x in jobs %}

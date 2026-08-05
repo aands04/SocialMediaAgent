@@ -265,7 +265,7 @@ def test_automatic_scheduler_selects_due_manual_post(db, tmp_path):
     job.scheduled_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     db.commit()
     ids = _candidate_ids(db, Settings(meta_scheduler_batch_size=5))
-    assert ids == [job.id]
+    assert ids == [(job.id, team.club_id)]
 
 
 def test_manual_carousel_persists_selected_order_and_shared_caption(db, tmp_path):

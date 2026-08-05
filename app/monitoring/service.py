@@ -52,9 +52,7 @@ def system_status(db: Session, settings: Settings) -> dict:
                 settings.meta_automatic_publish_enabled,
             ]
         )
-        scheduler_expected = (
-            settings.publisher_mode == "dry-run" or automatic_scheduler_expected
-        )
+        scheduler_expected = settings.publisher_mode == "dry-run" or automatic_scheduler_expected
         checks["scheduler"] = {
             "ok": worker_ok
             and (
@@ -65,37 +63,24 @@ def system_status(db: Session, settings: Settings) -> dict:
             "detail": (
                 "aktiv"
                 if data.get("scheduler")
-                else (
-                    "bewusst deaktiviert"
-                    if not scheduler_expected
-                    else "inaktiv"
-                )
+                else ("bewusst deaktiviert" if not scheduler_expected else "inaktiv")
             ),
         }
         checks["automatic_scheduler"] = {
             "ok": worker_ok
-            and bool(data.get("automatic_scheduler"))
-            == automatic_scheduler_expected,
-            "detail": (
-                "kontrolliert aktiv"
-                if data.get("automatic_scheduler")
-                else "deaktiviert"
-            ),
+            and bool(data.get("automatic_scheduler")) == automatic_scheduler_expected,
+            "detail": ("kontrolliert aktiv" if data.get("automatic_scheduler") else "deaktiviert"),
         }
         automatic_fussball_expected = (
-            settings.environment == "production"
-            and settings.fussball_automatic_sync_enabled
+            settings.environment == "production" and settings.fussball_automatic_sync_enabled
         )
         checks["automatic_fussball_sync"] = {
             "ok": worker_ok
-            and bool(data.get("automatic_fussball_sync"))
-            == automatic_fussball_expected,
+            and bool(data.get("automatic_fussball_sync")) == automatic_fussball_expected,
             "detail": {
                 "sync": "aktiv" if data.get("automatic_fussball_sync") else "deaktiviert",
                 "draft_generation": (
-                    "aktiv"
-                    if data.get("automatic_post_generation")
-                    else "deaktiviert"
+                    "aktiv" if data.get("automatic_post_generation") else "deaktiviert"
                 ),
                 "last_cycle": data.get("fussball_cycle"),
             },
@@ -413,9 +398,7 @@ def system_status(db: Session, settings: Settings) -> dict:
             for team in db.scalars(select(Team).where(Team.active.is_(True)))
             if (team.rules or {}).get("automatic_sync_enabled")
         }
-        enabled_states = [
-            state for state in sync_states if state.team_id in enabled_team_ids
-        ]
+        enabled_states = [state for state in sync_states if state.team_id in enabled_team_ids]
         stale_before = now - timedelta(
             seconds=max(3600, settings.fussball_sync_interval_seconds * 3)
         )
@@ -440,17 +423,11 @@ def system_status(db: Session, settings: Settings) -> dict:
                 "errors": sum(state.status == "error" for state in enabled_states),
                 "stale": len(stale),
                 "last_success": max(
-                    (
-                        state.last_success_at
-                        for state in enabled_states
-                        if state.last_success_at
-                    ),
+                    (state.last_success_at for state in enabled_states if state.last_success_at),
                     default=None,
                 ),
                 "last_errors": {
-                    state.team_id: state.last_error
-                    for state in enabled_states
-                    if state.last_error
+                    state.team_id: state.last_error for state in enabled_states if state.last_error
                 },
             },
         }

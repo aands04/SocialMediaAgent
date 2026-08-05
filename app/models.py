@@ -1,42 +1,54 @@
 import enum
+import hashlib
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from app.db import Base
 
 
-def now(): return datetime.now(timezone.utc)
-def uid(): return str(uuid4())
+def now():
+    return datetime.now(timezone.utc)
+
+
+def uid():
+    return str(uuid4())
 
 
 class Role(str, enum.Enum):
     ADMIN = "admin"
     EDITOR = "editor"
     APPROVER = "approver"
+    REVIEWER = "reviewer"
     VIEWER = "viewer"
 
     @property
     def label(self) -> str:
         return {
-            Role.ADMIN: "Administrator",
+            Role.ADMIN: "Vereinsadministrator",
             Role.APPROVER: "Redakteur",
             Role.EDITOR: "Autor",
-            Role.VIEWER: "Betrachter",
+            Role.REVIEWER: "Freigeber",
+            Role.VIEWER: "Nur Lesen",
         }[self]
 
     @property
@@ -45,58 +57,409 @@ class Role(str, enum.Enum):
             Role.ADMIN: "Vollzugriff einschließlich Benutzer- und Systemeinstellungen.",
             Role.APPROVER: "Darf Beiträge erstellen, bearbeiten und freigeben.",
             Role.EDITOR: "Darf Beiträge erstellen und bearbeiten, aber nicht freigeben.",
+            Role.REVIEWER: "Darf Beiträge prüfen und freigeben, aber nicht selbst erstellen.",
             Role.VIEWER: "Darf Inhalte ausschließlich ansehen.",
         }[self]
-class PostStatus(str,enum.Enum): DETECTED="detected"; PLANNED="planned"; CREATING="creating"; INCOMPLETE="incomplete"; PENDING="pending_approval"; REJECTED="rejected"; APPROVED="approved"; REAPPROVAL="reapproval_required"; SCHEDULED="scheduled"; PARTIAL="partially_published"; PUBLISHED="published"; ERROR="publishing_error"; CANCELLED="cancelled"
-class JobStatus(str,enum.Enum): DRAFT="draft"; UNAPPROVED="unapproved"; APPROVED="approved"; SCHEDULED="scheduled"; WAITING="waiting"; PUBLISHING="publishing"; PUBLISHED="published"; RETRY="retry_scheduled"; FAILED="failed"; CANCELLED="cancelled"; SKIPPED="skipped"; UNCERTAIN="uncertain"
-class GenerationJobStatus(str,enum.Enum): QUEUED="queued"; RUNNING="running"; RETRY_WAIT="retry_wait"; SUCCEEDED="succeeded"; FAILED="failed"; CANCELLED="cancelled"; MANUAL_REVIEW_REQUIRED="manual_review_required"
-class GenerationJobType(str,enum.Enum): CREATE_POST="create_post"; RERENDER_POST="rerender_post"
+
+
+class PostStatus(str, enum.Enum):
+    DETECTED = "detected"
+    PLANNED = "planned"
+    CREATING = "creating"
+    INCOMPLETE = "incomplete"
+    PENDING = "pending_approval"
+    REJECTED = "rejected"
+    APPROVED = "approved"
+    REAPPROVAL = "reapproval_required"
+    SCHEDULED = "scheduled"
+    PARTIAL = "partially_published"
+    PUBLISHED = "published"
+    ERROR = "publishing_error"
+    CANCELLED = "cancelled"
+
+
+class JobStatus(str, enum.Enum):
+    DRAFT = "draft"
+    UNAPPROVED = "unapproved"
+    APPROVED = "approved"
+    SCHEDULED = "scheduled"
+    WAITING = "waiting"
+    PUBLISHING = "publishing"
+    PUBLISHED = "published"
+    RETRY = "retry_scheduled"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
+    UNCERTAIN = "uncertain"
+
+
+class GenerationJobStatus(str, enum.Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    RETRY_WAIT = "retry_wait"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    MANUAL_REVIEW_REQUIRED = "manual_review_required"
+
+
+class GenerationJobType(str, enum.Enum):
+    CREATE_POST = "create_post"
+    RERENDER_POST = "rerender_post"
+
+
+class ClubStatus(str, enum.Enum):
+    SETUP_PENDING = "setup_pending"
+    TRIAL = "trial"
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    CANCELLED = "cancelled"
+    ARCHIVED = "archived"
+
+
+class AccountType(str, enum.Enum):
+    CLUB_USER = "club_user"
+    PLATFORM_ADMIN = "platform_admin"
+
+
+class LedgerStatus(str, enum.Enum):
+    RESERVED = "reserved"
+    COMMITTED = "committed"
+    RELEASED = "released"
+    DELETED = "deleted"
+    CORRECTED = "corrected"
+
+
+class UsageStatus(str, enum.Enum):
+    RESERVED = "reserved"
+    PROVIDER_PROCESSING = "provider_processing"
+    COMPLETED_BILLABLE = "completed_billable"
+    COMPLETED_NOT_BILLABLE = "completed_not_billable"
+    FAILED_TECHNICAL = "failed_technical"
+    REJECTED_BY_USER = "rejected_by_user"
+    REFUNDED = "refunded"
+    CANCELLED = "cancelled"
+
+
+class PromptStatus(str, enum.Enum):
+    DRAFT = "draft"
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
 class Timestamped:
-    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
-    updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now)
-    version: Mapped[int]=mapped_column(Integer,default=1,nullable=False)
-class User(Base,Timestamped):
-    __tablename__="users"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); email:Mapped[str]=mapped_column(String(255),unique=True,index=True); password_hash:Mapped[str]=mapped_column(String(255)); role:Mapped[Role]=mapped_column(Enum(Role),default=Role.VIEWER); all_teams:Mapped[bool]=mapped_column(Boolean,default=False); active:Mapped[bool]=mapped_column(Boolean,default=True); archived_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); failed_logins:Mapped[int]=mapped_column(Integer,default=0); locked_until:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); auth_version:Mapped[int]=mapped_column(Integer,default=1,server_default="1",nullable=False); registration_status:Mapped[str]=mapped_column(String(20),default="approved",server_default="approved",nullable=False,index=True); registration_requested_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); registration_reviewed_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); registration_reviewed_by:Mapped[str|None]=mapped_column(ForeignKey("users.id",ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class PlanProfile(Base, Timestamped):
+    __tablename__ = "plan_profiles"
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_plan_profile_version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    max_teams: Mapped[int] = mapped_column(Integer, default=1)
+    max_storage_bytes: Mapped[int] = mapped_column(BigInteger, default=1_073_741_824)
+    monthly_ai_texts: Mapped[int] = mapped_column(Integer, default=20)
+    monthly_ai_images: Mapped[int] = mapped_column(Integer, default=50)
+    max_fonts: Mapped[int] = mapped_column(Integer, default=2)
+    max_instagram_pages: Mapped[int] = mapped_column(Integer, default=1)
+    trial_days: Mapped[int | None] = mapped_column(Integer)
+    feature_flags: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class Club(Base, Timestamped):
+    __tablename__ = "clubs"
+    __table_args__ = (
+        CheckConstraint("slug <> ''", name="ck_clubs_slug_not_empty"),
+        CheckConstraint("version > 0", name="ck_clubs_version_positive"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    name: Mapped[str] = mapped_column(String(180))
+    short_name: Mapped[str] = mapped_column(String(60))
+    slug: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    logo_asset_id: Mapped[str | None] = mapped_column(String(36))
+    status: Mapped[ClubStatus] = mapped_column(
+        Enum(ClubStatus), default=ClubStatus.SETUP_PENDING, index=True
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    timezone: Mapped[str] = mapped_column(String(64), default="Europe/Berlin")
+    contact_name: Mapped[str | None] = mapped_column(String(180))
+    contact_email: Mapped[str | None] = mapped_column(String(255))
+    billing_details: Mapped[dict] = mapped_column(JSON, default=dict)
+    contract_details: Mapped[dict] = mapped_column(JSON, default=dict)
+    technical_settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    branding_settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    plan_profile_id: Mapped[str] = mapped_column(ForeignKey("plan_profiles.id"), index=True)
+    limit_overrides: Mapped[dict] = mapped_column(JSON, default=dict)
+    usage_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ClubAdditionalAllowance(Base, Timestamped):
+    __tablename__ = "club_additional_allowances"
+    __table_args__ = (
+        CheckConstraint("amount > 0", name="ck_club_allowances_positive"),
+        UniqueConstraint(
+            "club_id", "limit_key", "starts_at", "ends_at", name="uq_club_allowance_period"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
+    limit_key: Mapped[str] = mapped_column(String(60), index=True)
+    amount: Mapped[int] = mapped_column(BigInteger)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    reason: Mapped[str | None] = mapped_column(String(240))
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+
+
+class ClubBrandingConfiguration(Base, Timestamped):
+    __tablename__ = "club_branding_configurations"
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), primary_key=True
+    )
+    image_settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    text_settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    primary_font_id: Mapped[str | None] = mapped_column(String(36))
+    secondary_font_id: Mapped[str | None] = mapped_column(String(36))
+    updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+
+
+class FeatureFlag(Base, Timestamped):
+    __tablename__ = "feature_flags"
+    __table_args__ = (UniqueConstraint("club_id", "key", name="uq_feature_flag_scope"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str | None] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
+    )
+    key: Mapped[str] = mapped_column(String(100), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    value: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+
+
+class TenantMigrationReport(Base):
+    __tablename__ = "tenant_migration_reports"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    migration_revision: Mapped[str] = mapped_column(String(32), unique=True)
+    club_id: Mapped[str | None] = mapped_column(ForeignKey("clubs.id"))
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    report: Mapped[dict] = mapped_column(JSON, default=dict)
+    checksum: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class User(Base, Timestamped):
+    __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint(
+            "(account_type = 'CLUB_USER' AND club_id IS NOT NULL) OR "
+            "(account_type = 'PLATFORM_ADMIN' AND club_id IS NULL)",
+            name="ck_users_account_tenant",
+        ),
+        UniqueConstraint("id", "club_id", name="uq_users_id_club"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str | None] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    account_type: Mapped[AccountType] = mapped_column(
+        Enum(AccountType), default=AccountType.CLUB_USER, index=True
+    )
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[Role] = mapped_column(Enum(Role), default=Role.VIEWER)
+    all_teams: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_logins: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    auth_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
+    registration_status: Mapped[str] = mapped_column(
+        String(20), default="approved", server_default="approved", nullable=False, index=True
+    )
+    registration_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    registration_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    registration_reviewed_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+
 class PasswordResetToken(Base):
-    __tablename__="password_reset_tokens"
-    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
-    user_id:Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True)
-    token_hash:Mapped[str]=mapped_column(String(64),unique=True,index=True)
-    expires_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),index=True)
-    used_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
-    requested_ip:Mapped[str|None]=mapped_column(String(80))
-    delivery_status:Mapped[str]=mapped_column(String(20),default="pending")
-    delivery_error:Mapped[str|None]=mapped_column(String(160))
-    created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+    __tablename__ = "password_reset_tokens"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_ip: Mapped[str | None] = mapped_column(String(80))
+    delivery_status: Mapped[str] = mapped_column(String(20), default="pending")
+    delivery_error: Mapped[str | None] = mapped_column(String(160))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
 class EmailChangeToken(Base):
-    __tablename__="email_change_tokens"
-    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
-    user_id:Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True)
-    token_hash:Mapped[str]=mapped_column(String(64),unique=True,index=True)
-    old_email:Mapped[str]=mapped_column(String(255))
-    new_email:Mapped[str]=mapped_column(String(255),index=True)
-    auth_version:Mapped[int]=mapped_column(Integer)
-    expires_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),index=True)
-    used_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
-    requested_ip:Mapped[str|None]=mapped_column(String(80))
-    delivery_status:Mapped[str]=mapped_column(String(20),default="pending")
-    delivery_error:Mapped[str|None]=mapped_column(String(160))
-    created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+    __tablename__ = "email_change_tokens"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    old_email: Mapped[str] = mapped_column(String(255))
+    new_email: Mapped[str] = mapped_column(String(255), index=True)
+    auth_version: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_ip: Mapped[str | None] = mapped_column(String(80))
+    delivery_status: Mapped[str] = mapped_column(String(20), default="pending")
+    delivery_error: Mapped[str | None] = mapped_column(String(160))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
 class UserTeam(Base):
-    __tablename__="user_teams"; user_id:Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),primary_key=True); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id",ondelete="CASCADE"),primary_key=True)
-class InstagramPage(Base,Timestamped):
-    __tablename__="instagram_pages"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); internal_name:Mapped[str]=mapped_column(String(120)); display_name:Mapped[str]=mapped_column(String(120)); username:Mapped[str]=mapped_column(String(80)); profile_url:Mapped[str|None]=mapped_column(String(500)); account_id:Mapped[str|None]=mapped_column(String(100)); facebook_page_id:Mapped[str|None]=mapped_column(String(100)); club:Mapped[str]=mapped_column(String(160)); active:Mapped[bool]=mapped_column(Boolean,default=False); connection_status:Mapped[str]=mapped_column(String(30),default="unconfigured"); publishing_enabled:Mapped[bool]=mapped_column(Boolean,default=False); automatic_publishing_enabled:Mapped[bool]=mapped_column(Boolean,default=False,server_default="false"); automatic_publishing_confirmed_by:Mapped[str|None]=mapped_column(ForeignKey("users.id")); automatic_publishing_confirmed_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); allowed_types:Mapped[dict]=mapped_column(JSON,default=lambda:{"feed":True,"story":True}); defaults:Mapped[dict]=mapped_column(JSON,default=dict); archived_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_check_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_error:Mapped[str|None]=mapped_column(Text)
-class Team(Base,Timestamped):
-    __tablename__="teams"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); internal_name:Mapped[str]=mapped_column(String(120)); display_name:Mapped[str]=mapped_column(String(120)); short_name:Mapped[str]=mapped_column(String(30)); slug:Mapped[str]=mapped_column(String(80),unique=True); club:Mapped[str]=mapped_column(String(160)); active:Mapped[bool]=mapped_column(Boolean,default=True); archived_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); fussball_url:Mapped[str]=mapped_column(String(1000)); instagram_page_id:Mapped[str]=mapped_column(ForeignKey("instagram_pages.id")); media_subdir:Mapped[str]=mapped_column(String(500)); logo_path:Mapped[str|None]=mapped_column(String(500)); logo_asset_id:Mapped[str|None]=mapped_column(ForeignKey("logo_assets.id")); feed_template:Mapped[str]=mapped_column(String(100),default="default-feed"); story_templates:Mapped[list]=mapped_column(JSON,default=lambda:["default-story"]); primary_font:Mapped[str]=mapped_column(String(100),default="sans-serif"); secondary_font:Mapped[str]=mapped_column(String(100),default="sans-serif"); colors:Mapped[dict]=mapped_column(JSON,default=lambda:{"primary":"#172554","secondary":"#ffffff"}); text_style:Mapped[dict]=mapped_column(JSON,default=dict); hashtags:Mapped[list]=mapped_column(JSON,default=list); timezone:Mapped[str]=mapped_column(String(50),default="Europe/Berlin"); rules:Mapped[dict]=mapped_column(JSON,default=dict); publishing_enabled:Mapped[bool]=mapped_column(Boolean,default=True); last_sync_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_error_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_error:Mapped[str|None]=mapped_column(Text)
-class Game(Base,Timestamped):
-    __tablename__="games"; __table_args__=(UniqueConstraint("team_id","provider","external_id"),); id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id"),index=True); provider:Mapped[str]=mapped_column(String(40),default="fussball.de"); external_id:Mapped[str]=mapped_column(String(200)); home_team:Mapped[str]=mapped_column(String(160)); away_team:Mapped[str]=mapped_column(String(160)); kickoff:Mapped[datetime]=mapped_column(DateTime(timezone=True)); original_kickoff:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); competition:Mapped[str|None]=mapped_column(String(160)); venue:Mapped[str|None]=mapped_column(String(250)); pitch:Mapped[str|None]=mapped_column(String(80)); status:Mapped[str]=mapped_column(String(40),default="scheduled"); home_score:Mapped[int|None]=mapped_column(Integer); away_score:Mapped[int|None]=mapped_column(Integer); halftime:Mapped[str|None]=mapped_column(String(20)); result_confirmed:Mapped[bool]=mapped_column(Boolean,default=False); source_url:Mapped[str]=mapped_column(String(1000)); checked_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); overrides:Mapped[dict]=mapped_column(JSON,default=dict); data_hash:Mapped[str|None]=mapped_column(String(64)); opponent_logo_id:Mapped[str|None]=mapped_column(ForeignKey("logo_assets.id"))
-class LogoAsset(Base,Timestamped):
-    __tablename__="logo_assets"
-    __table_args__=(
-        UniqueConstraint("logo_type","team_id","normalized_name","version"),
+    __tablename__ = "user_teams"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["user_id", "club_id"], ["users.id", "users.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="CASCADE"
+        ),
+    )
+    user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    team_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    club_id: Mapped[str] = mapped_column(String(36), index=True)
+
+
+class InstagramPage(Base, Timestamped):
+    __tablename__ = "instagram_pages"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_instagram_pages_id_club"),
+        UniqueConstraint("club_id", "username", name="uq_instagram_pages_club_username"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    internal_name: Mapped[str] = mapped_column(String(120))
+    display_name: Mapped[str] = mapped_column(String(120))
+    username: Mapped[str] = mapped_column(String(80))
+    profile_url: Mapped[str | None] = mapped_column(String(500))
+    account_id: Mapped[str | None] = mapped_column(String(100))
+    facebook_page_id: Mapped[str | None] = mapped_column(String(100))
+    club: Mapped[str] = mapped_column(String(160))
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+    connection_status: Mapped[str] = mapped_column(String(30), default="unconfigured")
+    publishing_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    automatic_publishing_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    automatic_publishing_confirmed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    automatic_publishing_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    allowed_types: Mapped[dict] = mapped_column(JSON, default=lambda: {"feed": True, "story": True})
+    defaults: Mapped[dict] = mapped_column(JSON, default=dict)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class Team(Base, Timestamped):
+    __tablename__ = "teams"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_teams_id_club"),
+        UniqueConstraint("club_id", "slug", name="uq_teams_club_slug"),
+        ForeignKeyConstraint(
+            ["instagram_page_id", "club_id"],
+            ["instagram_pages.id", "instagram_pages.club_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    internal_name: Mapped[str] = mapped_column(String(120))
+    display_name: Mapped[str] = mapped_column(String(120))
+    short_name: Mapped[str] = mapped_column(String(30))
+    slug: Mapped[str] = mapped_column(String(80))
+    club: Mapped[str] = mapped_column(String(160))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fussball_url: Mapped[str] = mapped_column(String(1000))
+    instagram_page_id: Mapped[str] = mapped_column(String(36))
+    media_subdir: Mapped[str] = mapped_column(String(500))
+    logo_path: Mapped[str | None] = mapped_column(String(500))
+    logo_asset_id: Mapped[str | None] = mapped_column(ForeignKey("logo_assets.id"))
+    feed_template: Mapped[str] = mapped_column(String(100), default="default-feed")
+    story_templates: Mapped[list] = mapped_column(JSON, default=lambda: ["default-story"])
+    primary_font: Mapped[str] = mapped_column(String(100), default="sans-serif")
+    secondary_font: Mapped[str] = mapped_column(String(100), default="sans-serif")
+    colors: Mapped[dict] = mapped_column(
+        JSON, default=lambda: {"primary": "#172554", "secondary": "#ffffff"}
+    )
+    text_style: Mapped[dict] = mapped_column(JSON, default=dict)
+    hashtags: Mapped[list] = mapped_column(JSON, default=list)
+    timezone: Mapped[str] = mapped_column(String(50), default="Europe/Berlin")
+    rules: Mapped[dict] = mapped_column(JSON, default=dict)
+    publishing_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class Game(Base, Timestamped):
+    __tablename__ = "games"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id", "team_id", "provider", "external_id", name="uq_games_club_provider_external"
+        ),
+        UniqueConstraint("id", "club_id", name="uq_games_id_club"),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="RESTRICT"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    team_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider: Mapped[str] = mapped_column(String(40), default="fussball.de")
+    external_id: Mapped[str] = mapped_column(String(200))
+    home_team: Mapped[str] = mapped_column(String(160))
+    away_team: Mapped[str] = mapped_column(String(160))
+    kickoff: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    original_kickoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    competition: Mapped[str | None] = mapped_column(String(160))
+    venue: Mapped[str | None] = mapped_column(String(250))
+    pitch: Mapped[str | None] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(40), default="scheduled")
+    home_score: Mapped[int | None] = mapped_column(Integer)
+    away_score: Mapped[int | None] = mapped_column(Integer)
+    halftime: Mapped[str | None] = mapped_column(String(20))
+    result_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    source_url: Mapped[str] = mapped_column(String(1000))
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    overrides: Mapped[dict] = mapped_column(JSON, default=dict)
+    data_hash: Mapped[str | None] = mapped_column(String(64))
+    opponent_logo_id: Mapped[str | None] = mapped_column(ForeignKey("logo_assets.id"))
+
+
+class LogoAsset(Base, Timestamped):
+    __tablename__ = "logo_assets"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "logo_type",
+            "team_id",
+            "normalized_name",
+            "version",
+            name="uq_logo_assets_club_version",
+        ),
         Index(
             "uq_logo_assets_team_checksum",
             "team_id",
+            "club_id",
             "checksum",
             unique=True,
             postgresql_where=text("logo_type = 'team'"),
@@ -104,83 +467,225 @@ class LogoAsset(Base,Timestamped):
         ),
         Index(
             "uq_logo_assets_opponent_checksum",
+            "club_id",
             "checksum",
             unique=True,
             postgresql_where=text("logo_type = 'opponent'"),
             sqlite_where=text("logo_type = 'opponent'"),
         ),
     )
-    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
-    logo_type:Mapped[str]=mapped_column(String(20),index=True)
-    team_id:Mapped[str|None]=mapped_column(ForeignKey("teams.id"),index=True)
-    display_name:Mapped[str]=mapped_column(String(200))
-    normalized_name:Mapped[str]=mapped_column(String(200),index=True)
-    original_path:Mapped[str]=mapped_column(String(800),unique=True)
-    render_path:Mapped[str|None]=mapped_column(String(800),unique=True)
-    original_filename:Mapped[str]=mapped_column(String(255))
-    mime_type:Mapped[str]=mapped_column(String(80))
-    size:Mapped[int]=mapped_column(Integer)
-    width:Mapped[int]=mapped_column(Integer)
-    height:Mapped[int]=mapped_column(Integer)
-    checksum:Mapped[str]=mapped_column(String(64),index=True)
-    active:Mapped[bool]=mapped_column(Boolean,default=True)
-    archived_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
-    uploaded_by:Mapped[str]=mapped_column(ForeignKey("users.id"))
-class MediaAsset(Base,Timestamped):
-    __tablename__="media_assets"; __table_args__=(UniqueConstraint("team_id","relative_path"),); id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id")); storage_kind:Mapped[str]=mapped_column(String(20),default="external",server_default="external",nullable=False); relative_path:Mapped[str]=mapped_column(String(800)); filename:Mapped[str]=mapped_column(String(255)); mime_type:Mapped[str]=mapped_column(String(80)); size:Mapped[int]=mapped_column(Integer); checksum:Mapped[str]=mapped_column(String(64)); mtime:Mapped[datetime]=mapped_column(DateTime(timezone=True)); player_name:Mapped[str|None]=mapped_column(String(160)); active:Mapped[bool]=mapped_column(Boolean,default=True); available:Mapped[bool]=mapped_column(Boolean,default=True); reserved_game_id:Mapped[str|None]=mapped_column(ForeignKey("games.id"),unique=True); uses:Mapped[int]=mapped_column(Integer,default=0)
-class StoryRule(Base,Timestamped):
-    __tablename__="story_rules"; __table_args__=(UniqueConstraint("team_id","name"),); id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id")); name:Mapped[str]=mapped_column(String(120)); active:Mapped[bool]=mapped_column(Boolean,default=True); post_type:Mapped[str]=mapped_column(String(30)); reference:Mapped[str]=mapped_column(String(40)); direction:Mapped[str]=mapped_column(String(10),default="before"); offset_minutes:Mapped[int]=mapped_column(Integer,default=0); fixed_time:Mapped[str|None]=mapped_column(String(5)); timing_mode:Mapped[str]=mapped_column(String(20),default="relative",server_default="relative",nullable=False); weekday_times:Mapped[dict]=mapped_column(JSON,default=dict,server_default="{}",nullable=False); weekday_targets:Mapped[dict]=mapped_column(JSON,default=dict,server_default="{}",nullable=False); media_slot:Mapped[int]=mapped_column(Integer,default=1,server_default="1",nullable=False); next_day:Mapped[bool]=mapped_column(Boolean,default=False); template:Mapped[str]=mapped_column(String(100)); prompt_template:Mapped[str]=mapped_column(String(160),default="default-image-story"); text_variant:Mapped[str|None]=mapped_column(String(100)); instagram_page_id:Mapped[str|None]=mapped_column(ForeignKey("instagram_pages.id")); priority:Mapped[int]=mapped_column(Integer,default=0); sort_order:Mapped[int]=mapped_column(Integer,default=0); reuse_media:Mapped[bool]=mapped_column(Boolean,default=True)
-class Post(Base,Timestamped):
-    __tablename__="posts"; __table_args__=(UniqueConstraint("game_id","post_type","active_key"),UniqueConstraint("manual_submission_id",name="uq_posts_manual_submission_id"),); id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); game_id:Mapped[str|None]=mapped_column(ForeignKey("games.id"),nullable=True); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id")); instagram_page_id:Mapped[str]=mapped_column(ForeignKey("instagram_pages.id")); post_type:Mapped[str]=mapped_column(String(30)); active_key:Mapped[str]=mapped_column(String(20),default="active"); manual_submission_id:Mapped[str|None]=mapped_column(String(120)); status:Mapped[PostStatus]=mapped_column(Enum(PostStatus),default=PostStatus.DETECTED); text:Mapped[str|None]=mapped_column(Text); text_version:Mapped[int]=mapped_column(Integer,default=1); feed_path:Mapped[str|None]=mapped_column(String(800)); feed_version:Mapped[int]=mapped_column(Integer,default=1); media_asset_id:Mapped[str|None]=mapped_column(ForeignKey("media_assets.id")); design_snapshot:Mapped[dict]=mapped_column(JSON,default=dict); critical_warnings:Mapped[list]=mapped_column(JSON,default=list); publishing_enabled:Mapped[bool]=mapped_column(Boolean,default=True); approved_version:Mapped[int|None]=mapped_column(Integer); approved_by:Mapped[str|None]=mapped_column(ForeignKey("users.id")); approved_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); last_edited_by:Mapped[str|None]=mapped_column(ForeignKey("users.id"))
-class PublicationJob(Base,Timestamped):
-    __tablename__="publication_jobs"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); post_id:Mapped[str]=mapped_column(ForeignKey("posts.id")); game_id:Mapped[str|None]=mapped_column(ForeignKey("games.id"),nullable=True); team_id:Mapped[str]=mapped_column(ForeignKey("teams.id")); instagram_page_id:Mapped[str]=mapped_column(ForeignKey("instagram_pages.id")); story_rule_id:Mapped[str|None]=mapped_column(ForeignKey("story_rules.id")); kind:Mapped[str]=mapped_column(String(10)); media_path:Mapped[str]=mapped_column(String(800)); text_snapshot:Mapped[str|None]=mapped_column(Text); scheduled_at:Mapped[datetime]=mapped_column(DateTime(timezone=True)); next_attempt_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True),index=True); absolute_time:Mapped[bool]=mapped_column(Boolean,default=False); stale_time:Mapped[bool]=mapped_column(Boolean,default=False); approval_status:Mapped[str]=mapped_column(String(30),default="unapproved"); status:Mapped[JobStatus]=mapped_column(Enum(JobStatus),default=JobStatus.UNAPPROVED); attempts:Mapped[int]=mapped_column(Integer,default=0); last_attempt_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); published_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); platform_id:Mapped[str|None]=mapped_column(String(200)); permalink:Mapped[str|None]=mapped_column(String(1000)); error:Mapped[str|None]=mapped_column(Text); idempotency_key:Mapped[str]=mapped_column(String(100),unique=True); locked_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); approved_post_version:Mapped[int|None]=mapped_column(Integer)
-class PublicationMediaItem(Base,Timestamped):
-    __tablename__="publication_media_items"
-    __table_args__=(UniqueConstraint("publication_job_id","position",name="uq_publication_media_position"),)
-    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
-    publication_job_id:Mapped[str]=mapped_column(ForeignKey("publication_jobs.id",ondelete="CASCADE"),index=True)
-    position:Mapped[int]=mapped_column(Integer)
-    media_path:Mapped[str]=mapped_column(String(800))
-    checksum:Mapped[str]=mapped_column(String(64))
-    mime_type:Mapped[str]=mapped_column(String(80),default="image/png")
-    file_size:Mapped[int]=mapped_column(Integer)
-    width:Mapped[int]=mapped_column(Integer)
-    height:Mapped[int]=mapped_column(Integer)
-class GenerationJob(Base,Timestamped):
-    __tablename__="generation_jobs"
-    __table_args__=(UniqueConstraint("active_key"),UniqueConstraint("idempotency_key"),)
-    id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
-    job_type:Mapped[GenerationJobType]=mapped_column(Enum(GenerationJobType),index=True)
-    game_id:Mapped[str]=mapped_column(ForeignKey("games.id"),index=True)
-    team_id:Mapped[str]=mapped_column(ForeignKey("teams.id"),index=True)
-    post_id:Mapped[str|None]=mapped_column(ForeignKey("posts.id"),index=True)
-    result_post_id:Mapped[str|None]=mapped_column(ForeignKey("posts.id"))
-    post_type:Mapped[str]=mapped_column(String(30))
-    requested_by:Mapped[str]=mapped_column(ForeignKey("users.id"))
-    status:Mapped[GenerationJobStatus]=mapped_column(Enum(GenerationJobStatus),default=GenerationJobStatus.QUEUED,index=True)
-    phase:Mapped[str]=mapped_column(String(40),default="preparing")
-    progress:Mapped[int]=mapped_column(Integer,default=0)
-    planned_outputs:Mapped[int]=mapped_column(Integer,default=0)
-    completed_outputs:Mapped[int]=mapped_column(Integer,default=0)
-    attempts:Mapped[int]=mapped_column(Integer,default=0)
-    max_attempts:Mapped[int]=mapped_column(Integer,default=3)
-    available_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
-    locked_by:Mapped[str|None]=mapped_column(String(160))
-    locked_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
-    lease_expires_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True),index=True)
-    cancel_requested:Mapped[bool]=mapped_column(Boolean,default=False)
-    error_category:Mapped[str|None]=mapped_column(String(80))
-    error_message:Mapped[str|None]=mapped_column(Text)
-    idempotency_key:Mapped[str]=mapped_column(String(255))
-    active_key:Mapped[str|None]=mapped_column(String(255))
-    parameters:Mapped[dict]=mapped_column(JSON,default=dict)
-    started_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
-    completed_at:Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    logo_type: Mapped[str] = mapped_column(String(20), index=True)
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id"), index=True)
+    display_name: Mapped[str] = mapped_column(String(200))
+    normalized_name: Mapped[str] = mapped_column(String(200), index=True)
+    original_path: Mapped[str] = mapped_column(String(800))
+    render_path: Mapped[str | None] = mapped_column(String(800))
+    original_filename: Mapped[str] = mapped_column(String(255))
+    mime_type: Mapped[str] = mapped_column(String(80))
+    size: Mapped[int] = mapped_column(Integer)
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    uploaded_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class MediaAsset(Base, Timestamped):
+    __tablename__ = "media_assets"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id", "team_id", "relative_path", name="uq_media_assets_club_team_path"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"))
+    storage_kind: Mapped[str] = mapped_column(
+        String(20), default="external", server_default="external", nullable=False
+    )
+    relative_path: Mapped[str] = mapped_column(String(800))
+    filename: Mapped[str] = mapped_column(String(255))
+    mime_type: Mapped[str] = mapped_column(String(80))
+    size: Mapped[int] = mapped_column(Integer)
+    checksum: Mapped[str] = mapped_column(String(64))
+    mtime: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    player_name: Mapped[str | None] = mapped_column(String(160))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    available: Mapped[bool] = mapped_column(Boolean, default=True)
+    reserved_game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id"), unique=True)
+    uses: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class StoryRule(Base, Timestamped):
+    __tablename__ = "story_rules"
+    __table_args__ = (
+        UniqueConstraint("club_id", "team_id", "name", name="uq_story_rules_club_team_name"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"))
+    name: Mapped[str] = mapped_column(String(120))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    post_type: Mapped[str] = mapped_column(String(30))
+    reference: Mapped[str] = mapped_column(String(40))
+    direction: Mapped[str] = mapped_column(String(10), default="before")
+    offset_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    fixed_time: Mapped[str | None] = mapped_column(String(5))
+    timing_mode: Mapped[str] = mapped_column(
+        String(20), default="relative", server_default="relative", nullable=False
+    )
+    weekday_times: Mapped[dict] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    weekday_targets: Mapped[dict] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
+    media_slot: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    next_day: Mapped[bool] = mapped_column(Boolean, default=False)
+    template: Mapped[str] = mapped_column(String(100))
+    prompt_template: Mapped[str] = mapped_column(String(160), default="default-image-story")
+    text_variant: Mapped[str | None] = mapped_column(String(100))
+    instagram_page_id: Mapped[str | None] = mapped_column(ForeignKey("instagram_pages.id"))
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    reuse_media: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Post(Base, Timestamped):
+    __tablename__ = "posts"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "game_id",
+            "post_type",
+            "active_key",
+            name="uq_posts_club_game_type_active",
+        ),
+        UniqueConstraint(
+            "club_id", "manual_submission_id", name="uq_posts_club_manual_submission_id"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id"), nullable=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"))
+    instagram_page_id: Mapped[str] = mapped_column(ForeignKey("instagram_pages.id"))
+    post_type: Mapped[str] = mapped_column(String(30))
+    active_key: Mapped[str] = mapped_column(String(20), default="active")
+    manual_submission_id: Mapped[str | None] = mapped_column(String(120))
+    status: Mapped[PostStatus] = mapped_column(Enum(PostStatus), default=PostStatus.DETECTED)
+    text: Mapped[str | None] = mapped_column(Text)
+    text_version: Mapped[int] = mapped_column(Integer, default=1)
+    feed_path: Mapped[str | None] = mapped_column(String(800))
+    feed_version: Mapped[int] = mapped_column(Integer, default=1)
+    media_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
+    design_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    critical_warnings: Mapped[list] = mapped_column(JSON, default=list)
+    publishing_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    approved_version: Mapped[int | None] = mapped_column(Integer)
+    approved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_edited_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+
+
+class PublicationJob(Base, Timestamped):
+    __tablename__ = "publication_jobs"
+    __table_args__ = (
+        UniqueConstraint("club_id", "idempotency_key", name="uq_publication_jobs_club_idempotency"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    post_id: Mapped[str] = mapped_column(ForeignKey("posts.id"))
+    game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id"), nullable=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"))
+    instagram_page_id: Mapped[str] = mapped_column(ForeignKey("instagram_pages.id"))
+    story_rule_id: Mapped[str | None] = mapped_column(ForeignKey("story_rules.id"))
+    kind: Mapped[str] = mapped_column(String(10))
+    media_path: Mapped[str] = mapped_column(String(800))
+    text_snapshot: Mapped[str | None] = mapped_column(Text)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    absolute_time: Mapped[bool] = mapped_column(Boolean, default=False)
+    stale_time: Mapped[bool] = mapped_column(Boolean, default=False)
+    approval_status: Mapped[str] = mapped_column(String(30), default="unapproved")
+    status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.UNAPPROVED)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    platform_id: Mapped[str | None] = mapped_column(String(200))
+    permalink: Mapped[str | None] = mapped_column(String(1000))
+    error: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_post_version: Mapped[int | None] = mapped_column(Integer)
+
+
+class PublicationMediaItem(Base, Timestamped):
+    __tablename__ = "publication_media_items"
+    __table_args__ = (
+        UniqueConstraint("publication_job_id", "position", name="uq_publication_media_position"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    publication_job_id: Mapped[str] = mapped_column(
+        ForeignKey("publication_jobs.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    media_path: Mapped[str] = mapped_column(String(800))
+    checksum: Mapped[str] = mapped_column(String(64))
+    mime_type: Mapped[str] = mapped_column(String(80), default="image/png")
+    file_size: Mapped[int] = mapped_column(Integer)
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+
+
+class GenerationJob(Base, Timestamped):
+    __tablename__ = "generation_jobs"
+    __table_args__ = (
+        UniqueConstraint("club_id", "active_key", name="uq_generation_jobs_club_active_key"),
+        UniqueConstraint(
+            "club_id", "idempotency_key", name="uq_generation_jobs_club_idempotency"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    job_type: Mapped[GenerationJobType] = mapped_column(Enum(GenerationJobType), index=True)
+    game_id: Mapped[str] = mapped_column(ForeignKey("games.id"), index=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"), index=True)
+    post_id: Mapped[str | None] = mapped_column(ForeignKey("posts.id"), index=True)
+    result_post_id: Mapped[str | None] = mapped_column(ForeignKey("posts.id"))
+    post_type: Mapped[str] = mapped_column(String(30))
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[GenerationJobStatus] = mapped_column(
+        Enum(GenerationJobStatus), default=GenerationJobStatus.QUEUED, index=True
+    )
+    phase: Mapped[str] = mapped_column(String(40), default="preparing")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    planned_outputs: Mapped[int] = mapped_column(Integer, default=0)
+    completed_outputs: Mapped[int] = mapped_column(Integer, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    locked_by: Mapped[str | None] = mapped_column(String(160))
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_category: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    active_key: Mapped[str | None] = mapped_column(String(255))
+    parameters: Mapped[dict] = mapped_column(JSON, default=dict)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class InstagramConnection(Base, Timestamped):
     __tablename__ = "instagram_connections"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     instagram_page_id: Mapped[str] = mapped_column(
         ForeignKey("instagram_pages.id", ondelete="CASCADE"), unique=True, index=True
     )
@@ -204,6 +709,7 @@ class InstagramConnection(Base, Timestamped):
 class InstagramOAuthState(Base):
     __tablename__ = "instagram_oauth_states"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     instagram_page_id: Mapped[str] = mapped_column(
         ForeignKey("instagram_pages.id", ondelete="CASCADE"), index=True
@@ -218,8 +724,11 @@ class InstagramOAuthState(Base):
 
 class PublicMediaGrant(Base):
     __tablename__ = "public_media_grants"
-    __table_args__ = (UniqueConstraint("active_key"),)
+    __table_args__ = (
+        UniqueConstraint("club_id", "active_key", name="uq_public_media_grants_club_active"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     publication_job_id: Mapped[str] = mapped_column(
         ForeignKey("publication_jobs.id", ondelete="CASCADE"), index=True
     )
@@ -242,8 +751,11 @@ class PublicMediaGrant(Base):
 
 class MetaPublishingAttempt(Base, Timestamped):
     __tablename__ = "meta_publishing_attempts"
-    __table_args__ = (UniqueConstraint("active_key"),)
+    __table_args__ = (
+        UniqueConstraint("club_id", "active_key", name="uq_meta_attempts_club_active"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     publication_job_id: Mapped[str] = mapped_column(
         ForeignKey("publication_jobs.id", ondelete="CASCADE"), index=True
     )
@@ -264,9 +776,7 @@ class MetaPublishingAttempt(Base, Timestamped):
         String(20), default="manual", server_default="manual", index=True
     )
     phase: Mapped[str] = mapped_column(String(40), default="validating", index=True)
-    next_action_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
+    next_action_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     meta_container_id: Mapped[str | None] = mapped_column(String(120), index=True)
     container_status: Mapped[str | None] = mapped_column(String(80))
     meta_media_id: Mapped[str | None] = mapped_column(String(120), index=True)
@@ -290,6 +800,7 @@ class MetaCarouselItem(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     attempt_id: Mapped[str] = mapped_column(
         ForeignKey("meta_publishing_attempts.id", ondelete="CASCADE"), index=True
     )
@@ -310,6 +821,7 @@ class MetaCarouselItem(Base, Timestamped):
 class MetaPublishConfirmation(Base):
     __tablename__ = "meta_publish_confirmations"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     attempt_id: Mapped[str] = mapped_column(
         ForeignKey("meta_publishing_attempts.id", ondelete="CASCADE"), index=True
     )
@@ -319,19 +831,62 @@ class MetaPublishConfirmation(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class AuditLog(Base):
-    __tablename__="audit_logs"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); user_id:Mapped[str|None]=mapped_column(ForeignKey("users.id")); team_id:Mapped[str|None]=mapped_column(ForeignKey("teams.id")); action:Mapped[str]=mapped_column(String(100)); entity_type:Mapped[str]=mapped_column(String(80)); entity_id:Mapped[str|None]=mapped_column(String(36)); details:Mapped[dict]=mapped_column(JSON,default=dict); ip:Mapped[str|None]=mapped_column(String(80))
+    __tablename__ = "audit_logs"
+    __table_args__ = (
+        CheckConstraint(
+            "(scope = 'platform' AND club_id IS NULL) OR (scope = 'club' AND club_id IS NOT NULL)",
+            name="ck_audit_log_scope",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str | None] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    scope: Mapped[str] = mapped_column(
+        String(20), default="club", server_default="club", index=True
+    )
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id"))
+    action: Mapped[str] = mapped_column(String(100))
+    entity_type: Mapped[str] = mapped_column(String(80))
+    entity_id: Mapped[str | None] = mapped_column(String(36))
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    ip: Mapped[str | None] = mapped_column(String(80))
+
+
 class SystemSetting(Base):
-    __tablename__="system_settings"; key:Mapped[str]=mapped_column(String(100),primary_key=True); value:Mapped[dict]=mapped_column(JSON,default=dict); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,onupdate=now)
+    __tablename__ = "system_settings"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
 class Notification(Base):
-    __tablename__="notifications"; id:Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); team_id:Mapped[str|None]=mapped_column(ForeignKey("teams.id")); kind:Mapped[str]=mapped_column(String(80)); message:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); read:Mapped[bool]=mapped_column(Boolean,default=False)
+    __tablename__ = "notifications"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id"))
+    kind: Mapped[str] = mapped_column(String(80))
+    message: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    read: Mapped[bool] = mapped_column(Boolean, default=False)
+
 
 class FontAsset(Base, Timestamped):
     __tablename__ = "font_assets"
+    __table_args__ = (
+        UniqueConstraint("club_id", "name", name="uq_font_assets_club_name"),
+        UniqueConstraint("club_id", "relative_path", name="uq_font_assets_club_path"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    name: Mapped[str] = mapped_column(String(160), unique=True)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
     family: Mapped[str] = mapped_column(String(160))
-    relative_path: Mapped[str] = mapped_column(String(800), unique=True)
+    relative_path: Mapped[str] = mapped_column(String(800))
     mime_type: Mapped[str] = mapped_column(String(80))
     size: Mapped[int] = mapped_column(Integer)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -340,8 +895,11 @@ class FontAsset(Base, Timestamped):
 
 class DesignTemplate(Base, Timestamped):
     __tablename__ = "design_templates"
-    __table_args__ = (UniqueConstraint("name", "version"),)
+    __table_args__ = (
+        UniqueConstraint("club_id", "name", "version", name="uq_design_templates_club_version"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     name: Mapped[str] = mapped_column(String(160))
     post_type: Mapped[str] = mapped_column(String(30))
     media_kind: Mapped[str] = mapped_column(String(10))
@@ -359,16 +917,24 @@ class DesignTemplate(Base, Timestamped):
 class PromptTemplate(Base, Timestamped):
     __tablename__ = "prompt_templates"
     __table_args__ = (
-        UniqueConstraint(
-            "name", "prompt_kind", "post_type", "media_kind", "version"
-        ),
+        UniqueConstraint("name", "prompt_kind", "post_type", "media_kind", "version"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    source_club_id: Mapped[str | None] = mapped_column(ForeignKey("clubs.id"), index=True)
     name: Mapped[str] = mapped_column(String(160))
     prompt_kind: Mapped[str] = mapped_column(String(20))
     post_type: Mapped[str] = mapped_column(String(30))
     media_kind: Mapped[str] = mapped_column(String(10), default="none")
     prompt_body: Mapped[str] = mapped_column(Text)
+    status: Mapped[PromptStatus] = mapped_column(
+        Enum(PromptStatus), default=PromptStatus.ACTIVE, index=True
+    )
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    allowed_variables: Mapped[list] = mapped_column(JSON, default=list)
+    validation_rules: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    change_description: Mapped[str | None] = mapped_column(String(500))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     style_direction: Mapped[str | None] = mapped_column(Text)
     model: Mapped[str] = mapped_column(String(100))
     quality: Mapped[str] = mapped_column(String(20), default="medium")
@@ -376,16 +942,51 @@ class PromptTemplate(Base, Timestamped):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    @validates("prompt_body")
+    def _prepare_prompt_metadata(self, _key: str, value: str) -> str:
+        """Maintain non-secret integrity metadata for every construction path."""
+        self.checksum = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        self.allowed_variables = sorted(
+            set(re.findall(r"{{\s*([A-Za-z_][A-Za-z0-9_]*)\s*}}", value))
+        )
+        return value
+
+
+class ClubPromptOverride(Base, Timestamped):
+    __tablename__ = "club_prompt_overrides"
+    __table_args__ = (
+        UniqueConstraint("club_id", "prompt_kind", "post_type", "media_kind", "version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
+    prompt_kind: Mapped[str] = mapped_column(String(20))
+    post_type: Mapped[str] = mapped_column(String(30))
+    media_kind: Mapped[str] = mapped_column(String(10), default="none")
+    additional_instruction: Mapped[str | None] = mapped_column(Text)
+    forbidden_phrases: Mapped[list] = mapped_column(JSON, default=list)
+    preferred_design: Mapped[dict] = mapped_column(JSON, default=dict)
+    sponsor_rules: Mapped[list] = mapped_column(JSON, default=list)
+    club_rules: Mapped[list] = mapped_column(JSON, default=list)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[PromptStatus] = mapped_column(Enum(PromptStatus), default=PromptStatus.DRAFT)
+    checksum: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
 
 class ProviderSnapshot(Base):
     __tablename__ = "provider_snapshots"
+    __table_args__ = (
+        UniqueConstraint("club_id", "relative_path", name="uq_provider_snapshots_club_path"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id"))
     source_url: Mapped[str] = mapped_column(String(1000))
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     status_code: Mapped[int] = mapped_column(Integer)
     checksum: Mapped[str] = mapped_column(String(64))
-    relative_path: Mapped[str] = mapped_column(String(800), unique=True)
+    relative_path: Mapped[str] = mapped_column(String(800))
     parser_result: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
 
@@ -395,14 +996,11 @@ class FussballSyncState(Base):
     team_id: Mapped[str] = mapped_column(
         ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True
     )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
     status: Mapped[str] = mapped_column(String(30), default="idle", index=True)
-    next_poll_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=now, index=True
-    )
+    next_poll_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     lease_owner: Mapped[str | None] = mapped_column(String(160))
-    lease_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -413,6 +1011,182 @@ class FussballSyncState(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     last_result_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=now, onupdate=now
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class StorageObject(Base, Timestamped):
+    __tablename__ = "storage_objects"
+    __table_args__ = (
+        UniqueConstraint("provider", "bucket", "object_key", name="uq_storage_object_location"),
+        CheckConstraint("size_bytes >= 0", name="ck_storage_object_size"),
     )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    bucket: Mapped[str] = mapped_column(String(160))
+    object_key: Mapped[str] = mapped_column(String(1000))
+    category: Mapped[str] = mapped_column(String(80), index=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    mime_type: Mapped[str] = mapped_column(String(100))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    references: Mapped[dict] = mapped_column(JSON, default=dict)
+    billable: Mapped[bool] = mapped_column(Boolean, default=True)
+    provider_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class StorageLedgerEntry(Base):
+    __tablename__ = "storage_ledger_entries"
+    __table_args__ = (
+        UniqueConstraint("club_id", "idempotency_key", name="uq_storage_ledger_idempotency"),
+        CheckConstraint("reserved_bytes >= 0", name="ck_storage_ledger_reserved"),
+        CheckConstraint("actual_bytes >= 0", name="ck_storage_ledger_actual"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    storage_object_id: Mapped[str | None] = mapped_column(
+        ForeignKey("storage_objects.id", ondelete="SET NULL"), index=True
+    )
+    action: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[LedgerStatus] = mapped_column(Enum(LedgerStatus), index=True)
+    reserved_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    actual_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    actor_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    actor_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"))
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
+class DirectUploadSession(Base, Timestamped):
+    __tablename__ = "direct_upload_sessions"
+    __table_args__ = (
+        UniqueConstraint("club_id", "idempotency_key", name="uq_direct_upload_idempotency"),
+        CheckConstraint("expected_size_bytes > 0", name="ck_direct_upload_expected_size"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
+    )
+    actor_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    ledger_entry_id: Mapped[str] = mapped_column(
+        ForeignKey("storage_ledger_entries.id", ondelete="CASCADE"), unique=True
+    )
+    provider: Mapped[str] = mapped_column(String(40))
+    bucket: Mapped[str] = mapped_column(String(160))
+    object_key: Mapped[str] = mapped_column(String(1000), unique=True)
+    category: Mapped[str] = mapped_column(String(80), index=True)
+    expected_size_bytes: Mapped[int] = mapped_column(BigInteger)
+    expected_mime_type: Mapped[str] = mapped_column(String(100))
+    expected_checksum: Mapped[str | None] = mapped_column(String(64))
+    upload_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    status: Mapped[str] = mapped_column(String(30), default="reserved", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    storage_object_id: Mapped[str | None] = mapped_column(
+        ForeignKey("storage_objects.id", ondelete="SET NULL")
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+
+
+class StorageReconciliationRun(Base, Timestamped):
+    __tablename__ = "storage_reconciliation_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str | None] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    checked_objects: Mapped[int] = mapped_column(Integer, default=0)
+    missing_objects: Mapped[int] = mapped_column(Integer, default=0)
+    unexpected_objects: Mapped[int] = mapped_column(Integer, default=0)
+    size_mismatches: Mapped[int] = mapped_column(Integer, default=0)
+    report: Mapped[dict] = mapped_column(JSON, default=dict)
+    started_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class UsageLedgerEntry(Base):
+    __tablename__ = "usage_ledger_entries"
+    __table_args__ = (
+        UniqueConstraint("club_id", "idempotency_key", name="uq_usage_ledger_idempotency"),
+        CheckConstraint("reserved_quantity >= 0", name="ck_usage_ledger_reserved"),
+        CheckConstraint("actual_quantity >= 0", name="ck_usage_ledger_actual"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="SET NULL"), index=True
+    )
+    post_id: Mapped[str | None] = mapped_column(ForeignKey("posts.id", ondelete="SET NULL"))
+    generation_type: Mapped[str] = mapped_column(String(20), index=True)
+    provider: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str] = mapped_column(String(120))
+    prompt_template_id: Mapped[str | None] = mapped_column(ForeignKey("prompt_templates.id"))
+    prompt_version: Mapped[int | None] = mapped_column(Integer)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[UsageStatus] = mapped_column(Enum(UsageStatus), index=True)
+    reserved_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    actual_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    provider_cost: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    billable: Mapped[bool] = mapped_column(Boolean, default=False)
+    platform_test: Mapped[bool] = mapped_column(Boolean, default=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class PromptTestRun(Base, Timestamped):
+    __tablename__ = "prompt_test_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="SET NULL"))
+    game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id", ondelete="SET NULL"))
+    old_prompt_template_id: Mapped[str | None] = mapped_column(ForeignKey("prompt_templates.id"))
+    new_prompt_template_id: Mapped[str] = mapped_column(ForeignKey("prompt_templates.id"))
+    fixture_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    provider_cost: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class RegistrationIntent(Base, Timestamped):
+    __tablename__ = "registration_intents"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    club_name: Mapped[str] = mapped_column(String(180))
+    requested_plan_profile_id: Mapped[str | None] = mapped_column(ForeignKey("plan_profiles.id"))
+    status: Mapped[str] = mapped_column(
+        String(40), default="email_confirmation_pending", index=True
+    )
+    email_token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    email_token_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    registration_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ClubSubscription(Base, Timestamped):
+    __tablename__ = "club_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("club_id", "active_key", name="uq_club_active_subscription"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    plan_profile_id: Mapped[str] = mapped_column(ForeignKey("plan_profiles.id"))
+    provider: Mapped[str] = mapped_column(String(40), default="mock")
+    provider_customer_id: Mapped[str | None] = mapped_column(String(160))
+    provider_subscription_id: Mapped[str | None] = mapped_column(String(160))
+    contract_status: Mapped[str] = mapped_column(String(40), index=True)
+    subscription_status: Mapped[str] = mapped_column(String(40), index=True)
+    current_period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    grace_period_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active_key: Mapped[str | None] = mapped_column(String(40), default="active")
+    last_payment_status: Mapped[str | None] = mapped_column(String(40))
+    provider_metadata: Mapped[dict] = mapped_column(JSON, default=dict)

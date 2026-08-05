@@ -25,6 +25,8 @@ from app.meta.security import (
 from app.meta.user_tags import UserTagValidationError, user_tags_from_snapshot
 from app.models import (
     AuditLog,
+    Club,
+    ClubStatus,
     Game,
     InstagramConnection,
     InstagramPage,
@@ -102,8 +104,7 @@ def _create_attempt_grants(
         return [(grant, raw_token, url, None)]
 
     persisted = {
-        item.publication_media_item_id: item
-        for item in _attempt_carousel_items(db, attempt.id)
+        item.publication_media_item_id: item for item in _attempt_carousel_items(db, attempt.id)
     }
     result = []
     for media_item, _ in reports:
@@ -153,9 +154,7 @@ def _audit(
 
 def _locked_context(db: Session, job_id: str):
     job = db.scalar(
-        select(PublicationJob)
-        .where(PublicationJob.id == job_id)
-        .with_for_update(skip_locked=True)
+        select(PublicationJob).where(PublicationJob.id == job_id).with_for_update(skip_locked=True)
     )
     if not job:
         if db.scalar(select(PublicationJob.id).where(PublicationJob.id == job_id)):
@@ -194,7 +193,21 @@ def _assert_publication_gates(
     assert_meta_environment(settings, external_call=external_call)
     stop = db.get(SystemSetting, "emergency_stop")
     now = datetime.now(timezone.utc)
+    club = db.get(Club, job.club_id)
+    tenant_ids = {
+        job.club_id,
+        post.club_id,
+        team.club_id,
+        page.club_id,
+        connection.club_id,
+        *( [game.club_id] if game is not None else [] ),
+    }
     checks = [
+        (len(tenant_ids) == 1, "Vereinszuordnung des Veröffentlichungsvorgangs ist widersprüchlich"),
+        (
+            club is not None and club.status in {ClubStatus.ACTIVE, ClubStatus.TRIAL},
+            "Verein ist gesperrt oder archiviert",
+        ),
         (settings.publisher_mode == "instagram", "PUBLISHER_MODE ist nicht instagram"),
         (not (stop and stop.value.get("enabled")), "Globaler Not-Aus ist aktiv"),
         (
@@ -227,13 +240,11 @@ def _assert_publication_gates(
         ),
         (
             job.approval_status == "approved"
-            and job.status
-            not in {JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED},
+            and job.status not in {JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED},
             "Auftrag ist nicht freigegeben oder bereits abgeschlossen",
         ),
         (
-            game is None
-            or game.status not in {"cancelled", "postponed", "provisional"},
+            game is None or game.status not in {"cancelled", "postponed", "provisional"},
             "Spielstatus sperrt die Veröffentlichung",
         ),
         (
@@ -315,8 +326,7 @@ def _assert_automatic_publication_gates(
         ),
         (
             last_check is not None
-            and last_check
-            >= now - timedelta(seconds=settings.meta_connection_max_age_seconds),
+            and last_check >= now - timedelta(seconds=settings.meta_connection_max_age_seconds),
             "Meta-Verbindungsprüfung ist zu alt",
         ),
         (
@@ -392,13 +402,9 @@ def create_attempt(
     if existing:
         return existing, None
     if db.scalar(
-        select(MetaPublishingAttempt.id).where(
-            MetaPublishingAttempt.active_key == job.id
-        )
+        select(MetaPublishingAttempt.id).where(MetaPublishingAttempt.active_key == job.id)
     ):
-        raise MetaPublishingError(
-            "Für diesen Auftrag wird bereits ein Meta-Versuch bearbeitet"
-        )
+        raise MetaPublishingError("Für diesen Auftrag wird bereits ein Meta-Versuch bearbeitet")
     media_reports = _job_media_reports(db, settings, job)
     _, report = media_reports[0]
     attempt = MetaPublishingAttempt(
@@ -425,8 +431,7 @@ def create_attempt(
                     "public/meta-media/[temporäres-token]"
                 ),
                 "kind": job.kind,
-                "caption_included": job.kind in {"feed", "carousel"}
-                and bool(job.text_snapshot),
+                "caption_included": job.kind in {"feed", "carousel"} and bool(job.text_snapshot),
                 "image_count": len(media_reports),
                 "ordered_checksums": [entry[1]["checksum"] for entry in media_reports],
             },
@@ -478,9 +483,7 @@ def create_attempt(
                 else:
                     job.status = JobStatus.FAILED
                 job.error = str(exc)
-        _revoke_attempt_grants(
-            db, attempt, user, reason="Öffentliche Medienprüfung fehlgeschlagen"
-        )
+        _revoke_attempt_grants(db, attempt, user, reason="Öffentliche Medienprüfung fehlgeschlagen")
         _audit(
             db,
             user,
@@ -500,9 +503,7 @@ def create_attempt(
         attempt.phase = "completed"
         attempt.completed_at = datetime.now(timezone.utc)
         attempt.active_key = None
-        _revoke_attempt_grants(
-            db, attempt, user, reason="Validate-only-Prüfung abgeschlossen"
-        )
+        _revoke_attempt_grants(db, attempt, user, reason="Validate-only-Prüfung abgeschlossen")
     else:
         attempt.phase = "creating_media_grant"
         attempt.next_action_at = datetime.now(timezone.utc)
@@ -566,11 +567,7 @@ def _consume_confirmation(
         .with_for_update()
     )
     now = datetime.now(timezone.utc)
-    if (
-        not confirmation
-        or confirmation.used_at
-        or _utc(confirmation.expires_at) <= now
-    ):
+    if not confirmation or confirmation.used_at or _utc(confirmation.expires_at) <= now:
         raise MetaPublishingError("Bestätigungscode ist falsch, abgelaufen oder bereits verwendet")
     confirmation.used_at = now
 
@@ -590,9 +587,7 @@ def _reload_attempt_context(db: Session, attempt_id: str):
         .with_for_update(skip_locked=True)
     )
     if not attempt:
-        raise MetaPublishingError(
-            "Meta-Versuch wird bereits von einem anderen Vorgang bearbeitet"
-        )
+        raise MetaPublishingError("Meta-Versuch wird bereits von einem anderen Vorgang bearbeitet")
     return (attempt, *context)
 
 
@@ -607,9 +602,7 @@ def create_container(
     media_http_client: httpx.Client,
     automatic: bool = False,
 ) -> MetaPublishingAttempt:
-    attempt, job, post, game, team, page, connection = _reload_attempt_context(
-        db, attempt_id
-    )
+    attempt, job, post, game, team, page, connection = _reload_attempt_context(db, attempt_id)
     if attempt.meta_container_id:
         return attempt
     if attempt.phase == "validating_public_media":
@@ -657,11 +650,13 @@ def create_container(
     if attempt.local_media_version != job.version:
         raise MetaPublishingError("Lokale Medienversion wurde seit der Prüfung verändert")
     media_reports = _job_media_reports(db, settings, job)
-    expected_checksums = (attempt.sanitized_response or {}).get(
-        "request_preview", {}
-    ).get("ordered_checksums") or [attempt.file_checksum]
+    expected_checksums = (attempt.sanitized_response or {}).get("request_preview", {}).get(
+        "ordered_checksums"
+    ) or [attempt.file_checksum]
     if [entry[1]["checksum"] for entry in media_reports] != expected_checksums:
-        raise MetaPublishingError("Mediendateien oder Reihenfolge wurden seit der Prüfung verändert")
+        raise MetaPublishingError(
+            "Mediendateien oder Reihenfolge wurden seit der Prüfung verändert"
+        )
     if not automatic:
         _consume_confirmation(db, attempt, user, "create_container", confirmation_code)
     grant_rows = _create_attempt_grants(db, settings, attempt, job, user)
@@ -700,13 +695,9 @@ def create_container(
         )
         db.commit()
         raise
-    attempt, job, post, game, team, page, connection = _reload_attempt_context(
-        db, attempt_id
-    )
+    attempt, job, post, game, team, page, connection = _reload_attempt_context(db, attempt_id)
     if attempt.phase != "validating_public_media":
-        raise MetaPublishingError(
-            "Meta-Versuch wurde während der Medienprüfung verändert"
-        )
+        raise MetaPublishingError("Meta-Versuch wurde während der Medienprüfung verändert")
     _assert_publication_gates(
         db,
         settings,
@@ -736,9 +727,7 @@ def create_container(
         attempt.local_media_version != job.version
         or [entry[1]["checksum"] for entry in media_reports] != expected_checksums
     ):
-        raise MetaPublishingError(
-            "Medium oder Medienfreigabe wurde während der Prüfung verändert"
-        )
+        raise MetaPublishingError("Medium oder Medienfreigabe wurde während der Prüfung verändert")
     try:
         user_tags_by_position = {
             position: user_tags_from_snapshot(post.design_snapshot, position)
@@ -757,15 +746,11 @@ def create_container(
         **(attempt.sanitized_response or {}),
         "public_media_checks": public_checks,
         "instagram_user_tag_counts": {
-            str(position): len(tags)
-            for position, tags in user_tags_by_position.items()
-            if tags
+            str(position): len(tags) for position, tags in user_tags_by_position.items() if tags
         },
     }
     db.commit()
-    token = TokenCipher(settings.meta_token_encryption_key).decrypt(
-        connection.encrypted_token
-    )
+    token = TokenCipher(settings.meta_token_encryption_key).decrypt(connection.encrypted_token)
     try:
         if attempt.media_kind == "carousel":
             child_ids = []
@@ -808,9 +793,7 @@ def create_container(
         if not container_id:
             raise MetaApiError("Meta lieferte keine Container-ID", response=response)
         db.expire_all()
-        attempt, job, post, game, team, page, connection = _reload_attempt_context(
-            db, attempt_id
-        )
+        attempt, job, post, game, team, page, connection = _reload_attempt_context(db, attempt_id)
         if attempt.meta_container_id:
             return attempt
         attempt.meta_container_id = container_id
@@ -833,9 +816,7 @@ def create_container(
         return attempt
     except MetaApiError as exc:
         db.expire_all()
-        attempt, job, post, game, team, page, connection = _reload_attempt_context(
-            db, attempt_id
-        )
+        attempt, job, post, game, team, page, connection = _reload_attempt_context(db, attempt_id)
         attempt.phase = "uncertain" if exc.uncertain else "failed"
         if not exc.uncertain:
             attempt.active_key = None
@@ -870,9 +851,7 @@ def refresh_container_status(
     user: User,
     api: MetaApiClient,
 ) -> MetaPublishingAttempt:
-    attempt, job, post, game, team, page, connection = _reload_attempt_context(
-        db, attempt_id
-    )
+    attempt, job, post, game, team, page, connection = _reload_attempt_context(db, attempt_id)
     if not attempt.meta_container_id:
         raise MetaPublishingError("Es ist noch keine Container-ID gespeichert")
     _assert_publication_gates(
@@ -899,12 +878,8 @@ def refresh_container_status(
         )
         if automatic_user.id != user.id:
             raise MetaPublishingError("Freigabebindung des automatischen Auftrags ist ungültig")
-    token = TokenCipher(settings.meta_token_encryption_key).decrypt(
-        connection.encrypted_token
-    )
-    response = api.container_status(
-        access_token=token, container_id=attempt.meta_container_id
-    )
+    token = TokenCipher(settings.meta_token_encryption_key).decrypt(connection.encrypted_token)
+    response = api.container_status(access_token=token, container_id=attempt.meta_container_id)
     old_status = attempt.container_status
     attempt.container_status = str(response.get("status_code") or "UNKNOWN")
     attempt.sanitized_response = sanitize_platform_data(response)
@@ -928,9 +903,7 @@ def refresh_container_status(
         if attempt.stage == "container-only":
             attempt.completed_at = datetime.now(timezone.utc)
             attempt.active_key = None
-            _revoke_attempt_grants(
-                db, attempt, user, reason="Container-only-Test abgeschlossen"
-            )
+            _revoke_attempt_grants(db, attempt, user, reason="Container-only-Test abgeschlossen")
     else:
         attempt.next_action_at = datetime.now(timezone.utc) + timedelta(
             seconds=settings.meta_container_poll_interval_seconds
@@ -958,9 +931,7 @@ def publish(
     api: MetaApiClient,
     automatic: bool = False,
 ) -> MetaPublishingAttempt:
-    attempt, job, post, game, team, page, connection = _reload_attempt_context(
-        db, attempt_id
-    )
+    attempt, job, post, game, team, page, connection = _reload_attempt_context(db, attempt_id)
     if attempt.meta_media_id:
         return attempt
     if attempt.phase == "publishing":
@@ -1008,9 +979,7 @@ def publish(
         _consume_confirmation(db, attempt, user, "publish", confirmation_code)
     attempt.phase = "publishing"
     db.commit()
-    token = TokenCipher(settings.meta_token_encryption_key).decrypt(
-        connection.encrypted_token
-    )
+    token = TokenCipher(settings.meta_token_encryption_key).decrypt(connection.encrypted_token)
     try:
         response = api.publish_container(
             access_token=token,
@@ -1021,9 +990,7 @@ def publish(
         if not media_id:
             raise MetaApiError("Meta lieferte keine Media-ID", response=response)
         db.expire_all()
-        attempt, job, post, game, team, page, connection = _reload_attempt_context(
-            db, attempt_id
-        )
+        attempt, job, post, game, team, page, connection = _reload_attempt_context(db, attempt_id)
         if attempt.meta_media_id:
             return attempt
         attempt.meta_media_id = media_id
@@ -1033,9 +1000,7 @@ def publish(
         job.platform_id = media_id
         job.published_at = datetime.now(timezone.utc)
         sibling_statuses = list(
-            db.scalars(
-                select(PublicationJob.status).where(PublicationJob.post_id == post.id)
-            )
+            db.scalars(select(PublicationJob.status).where(PublicationJob.post_id == post.id))
         )
         post.status = (
             PostStatus.PUBLISHED
@@ -1058,9 +1023,7 @@ def publish(
         attempt.phase = "completed"
         attempt.completed_at = datetime.now(timezone.utc)
         attempt.active_key = None
-        _revoke_attempt_grants(
-            db, attempt, user, reason="Instagram-Veröffentlichung abgeschlossen"
-        )
+        _revoke_attempt_grants(db, attempt, user, reason="Instagram-Veröffentlichung abgeschlossen")
         _audit(
             db,
             user,
@@ -1074,9 +1037,7 @@ def publish(
         return attempt
     except MetaApiError as exc:
         db.expire_all()
-        attempt, job, post, game, team, page, connection = _reload_attempt_context(
-            db, attempt_id
-        )
+        attempt, job, post, game, team, page, connection = _reload_attempt_context(db, attempt_id)
         attempt.phase = "uncertain" if exc.uncertain else "failed"
         if not exc.uncertain:
             attempt.active_key = None
@@ -1123,9 +1084,7 @@ def reconcile_attempt(
             "kann manuell abgeglichen werden"
         )
     if attempt.phase in interrupted_phases:
-        minimum_age = timedelta(
-            seconds=max(120, int(settings.meta_http_timeout_seconds * 3))
-        )
+        minimum_age = timedelta(seconds=max(120, int(settings.meta_http_timeout_seconds * 3)))
         if datetime.now(timezone.utc) - _utc(attempt.updated_at) < minimum_age:
             raise MetaPublishingError(
                 "Der externe Aufruf könnte noch laufen. Der manuelle Abgleich ist "
@@ -1149,9 +1108,7 @@ def reconcile_attempt(
         job.permalink = attempt.permalink
         job.published_at = datetime.now(timezone.utc)
         sibling_statuses = list(
-            db.scalars(
-                select(PublicationJob.status).where(PublicationJob.post_id == post.id)
-            )
+            db.scalars(select(PublicationJob.status).where(PublicationJob.post_id == post.id))
         )
         post.status = (
             PostStatus.PUBLISHED
@@ -1166,9 +1123,7 @@ def reconcile_attempt(
         attempt.active_key = None
         job.status = JobStatus.FAILED
         job.error = "Manuell geprüft: nicht veröffentlicht"
-    _revoke_attempt_grants(
-        db, attempt, user, reason="manueller Meta-Abgleich abgeschlossen"
-    )
+    _revoke_attempt_grants(db, attempt, user, reason="manueller Meta-Abgleich abgeschlossen")
     _audit(
         db,
         user,

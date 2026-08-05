@@ -75,3 +75,42 @@ ausgeliefert und ist in
 `admin_routes` stellt CSRF-geschützte, serverseitig autorisierte Workflows für Mannschaften, Seiten, Benutzer/Teamzuordnungen, SMB-Scan, Medienstatus, Fonts, versionierte Designs, Ankündigungs-/Ergebnisregeln, Multi-Story-Regeln, Beitragsprüfung/Freigabe/Ablehnung und Auftragsabbruch bereit. Versionsfelder verhindern unbemerkte parallele Statusänderungen. Verstrichene Jobs werden sichtbar markiert und gemäß Teamregel sofort, manuell, übersprungen oder am nächsten Story-Termin behandelt.
 
 Der kontrollierte Live-Diagnosemodus speichert öffentlich abgerufenes FUSSBALL.DE-HTML unverändert mit Prüfsumme und Parserdiagnose. Er ist standardmäßig deaktiviert und besitzt keinerlei Schreibpfad zu Spielen, Beiträgen oder Veröffentlichungen.
+
+## Mandanten- und Plattformgrenze
+
+`Club.id` ist die unveränderliche Sicherheits- und Storage-Grenze. Slug, Name
+oder Mannschaftsname sind niemals Berechtigungsmerkmale. Jede mandantenbezogene
+Entität trägt eine direkte `club_id`; zusammengesetzte Constraints sichern
+kritische Beziehungen zusätzlich ab. `TenantSession` ergänzt Loader-Kriterien,
+prüft neue und geänderte Objekte vor dem Flush und verweigert nackte
+mandantenbezogene Datenbankzugriffe ohne aktiven Scope. HTTP-Anfragen aktivieren
+den Scope aus der authentifizierten Session, Worker aus der persistenten
+`club_id` ihres Jobs. Plattformoperationen verwenden einen getrennten
+`PlatformContext`.
+
+Normale Benutzer sind `club_user` mit genau einer `club_id`. `platform_admin`
+ist ein getrennter Kontotyp ohne `club_id`. Vereinsrollen und
+Mannschaftszuweisungen wirken ausschließlich innerhalb dieses Vereins.
+Statuswechsel auf `suspended` oder `archived` erhöhen die Sitzungs-/Clubversion,
+blockieren neue mutierende Arbeiten und lassen vorhandene Inhalte lesbar.
+
+## Quoten, Storage und Prompts
+
+Effektive Limits entstehen nachvollziehbar aus versioniertem Tarifprofil,
+Club-Override und zeitlich begrenztem Zusatzkontingent. Storage- und KI-Nutzung
+werden vor der Arbeit atomar reserviert und anschließend idempotent committed
+oder freigegeben. Ledger sind die Quelle der Verbrauchshistorie; Summen sind nur
+abgeleitete Ansichten.
+
+Neue SaaS-Objekte liegen privat unter
+`clubs/{club_uuid}/{category}/{object_uuid}`. Direkte Uploads erhalten nur
+kurzlebige signierte URLs und werden nach dem Upload serverseitig geprüft.
+Bestehende lokale Dateipfade bleiben vorerst über den Legacypfad lesbar; SMB ist
+nur Importprovider. Diese schrittweise Kompatibilität verhindert einen
+ungeprüften Big-Bang-Umzug produktiver Medien.
+
+Zentrale Prompttexte sind ausschließlich im PlatformAdmin-Kontext sichtbar.
+Clubbenutzer bearbeiten validierte strukturierte Bild- und Textparameter.
+Generierungssnapshots enthalten IDs, Versionen und Prüfsummen, aber keine
+Prompttexte. PlatformAdmin-Fixturetests werden auditiert und als nicht
+abrechenbare Plattformnutzung im Usage-Ledger erfasst.

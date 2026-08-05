@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Vereine</h1>
+<form method="get" action="/platform/clubs" class="gridform">
+<label>Suche<input name="q" value="{{filters.q}}" placeholder="Name, Kurzname oder Slug"></label>
+<label>Status<select name="status_filter"><option value="">Alle</option>{% for status in statuses %}<option value="{{status.value}}" {% if filters.status == status.value %}selected{% endif %}>{{status.value}}</option>{% endfor %}</select></label>
+<label>Sortierung<select name="sort"><option value="name" {% if filters.sort == 'name' %}selected{% endif %}>Name aufsteigend</option><option value="name_desc" {% if filters.sort == 'name_desc' %}selected{% endif %}>Name absteigend</option><option value="created_desc" {% if filters.sort == 'created_desc' %}selected{% endif %}>Neueste zuerst</option><option value="status" {% if filters.sort == 'status' %}selected{% endif %}>Status</option></select></label>
+<button>Filtern</button>
+</form>
+<section>
+<h2>Verein transaktionssicher anlegen</h2>
+<form method="post" action="/platform/clubs" class="gridform">
+<input type="hidden" name="csrf_token" value="{{csrf}}">
+<label>Vereinsname<input name="name" required maxlength="180"></label>
+<label>Kurzname<input name="short_name" required maxlength="60"></label>
+<label>Slug<input name="slug" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*"></label>
+<label>Zeitzone<input name="timezone_name" value="Europe/Berlin" required></label>
+<label>Ansprechpartner<input name="contact_name" maxlength="180"></label>
+<label>Kontakt-E-Mail<input type="email" name="contact_email"></label>
+<label>Erster Vereinsadministrator<input type="email" name="admin_email" required></label>
+<label>Initialpasswort<input type="password" name="admin_password" minlength="8" required></label>
+<label>Limitprofil<select name="plan_profile_id" required>{% for plan in plans if plan.active %}<option value="{{plan.id}}">{{plan.name}} · v{{plan.version}}</option>{% endfor %}</select></label>
+<label>Status<select name="status">{% for status in statuses %}<option value="{{status.value}}">{{status.value}}</option>{% endfor %}</select></label>
+<label>Primärfarbe<input name="primary_color" value="#172554" pattern="#[0-9A-Fa-f]{6}"></label>
+<label>Sekundärfarbe<input name="secondary_color" value="#ffffff" pattern="#[0-9A-Fa-f]{6}"></label>
+<fieldset class="full-span"><legend>Optionale individuelle Limitüberschreibungen</legend><div class="gridform">
+<label>Mannschaften<input type="number" name="max_teams" min="0"></label>
+<label>Speicher Byte<input type="number" name="max_storage_bytes" min="0"></label>
+<label>KI-Texte/Monat<input type="number" name="monthly_ai_texts" min="0"></label>
+<label>KI-Bilder/Monat<input type="number" name="monthly_ai_images" min="0"></label>
+<label>Schriftarten<input type="number" name="max_fonts" min="0"></label>
+<label>Instagram-Seiten<input type="number" name="max_instagram_pages" min="0"></label>
+</div></fieldset>
+<button>Verein und Administrator anlegen</button>
+</form>
+</section>
+<section><h2>Vorhandene Vereine</h2><table><tr><th>Name</th><th>Status</th><th>Slug</th><th>Version</th><th>Aktion</th></tr>
+{% for club in clubs %}<tr><td>{{club.name}}</td><td>{{club.status.value}}</td><td>{{club.slug}}</td><td>{{club.version}}</td><td><a class="button" href="/platform/clubs/{{club.id}}">Verwalten</a></td></tr>{% endfor %}</table></section>
+{% endblock %}

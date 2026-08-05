@@ -64,8 +64,7 @@ def _send_reset_email(settings: Settings, recipient: str, reset_url: str) -> Non
     message = EmailMessage()
     message["Subject"] = "Passwort für die Vereinszentrale zurücksetzen"
     message["From"] = (
-        f"{_clean_header(settings.smtp_from_name)} "
-        f"<{_clean_header(settings.smtp_from_email)}>"
+        f"{_clean_header(settings.smtp_from_name)} <{_clean_header(settings.smtp_from_email)}>"
     )
     message["To"] = _clean_header(recipient)
     message.set_content(

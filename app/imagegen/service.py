@@ -52,9 +52,7 @@ class OpenAIImageProvider(ImageProvider):
                 with ExitStack() as stack:
                     files = []
                     for path in references:
-                        mime_type = REFERENCE_IMAGE_MIME_TYPES.get(
-                            path.suffix.lower()
-                        )
+                        mime_type = REFERENCE_IMAGE_MIME_TYPES.get(path.suffix.lower())
                         if not mime_type:
                             raise ImageGenerationError(
                                 "Nicht unterstütztes Referenzbildformat: "
@@ -83,9 +81,7 @@ class OpenAIImageProvider(ImageProvider):
                 )
             encoded = response.data[0].b64_json
             if not encoded:
-                raise ImageGenerationError(
-                    "Bild-API hat keine eingebetteten PNG-Daten geliefert"
-                )
+                raise ImageGenerationError("Bild-API hat keine eingebetteten PNG-Daten geliefert")
             return base64.b64decode(encoded, validate=True)
         except ImageGenerationError:
             raise
@@ -134,11 +130,7 @@ class AIImageRenderer:
     def _reference_metadata(data: dict, opponent_present: bool) -> dict:
         logos = data.get("logos") if isinstance(data.get("logos"), dict) else {}
         team = logos.get("team") if isinstance(logos.get("team"), dict) else {}
-        opponent = (
-            logos.get("opponent")
-            if isinstance(logos.get("opponent"), dict)
-            else {}
-        )
+        opponent = logos.get("opponent") if isinstance(logos.get("opponent"), dict) else {}
         references = [
             {"position": 1, "role": "player"},
             {
@@ -198,16 +190,12 @@ class AIImageRenderer:
             # version filename alone.  The stable digest also keeps retries of
             # this exact job idempotent without exposing user-controlled text
             # in a path.
-            job_digest = hashlib.sha256(
-                str(generation_job_id).encode("utf-8")
-            ).hexdigest()[:12]
+            job_digest = hashlib.sha256(str(generation_job_id).encode("utf-8")).hexdigest()[:12]
             out = requested_out.with_name(
                 f"{requested_out.stem}-job-{job_digest}{requested_out.suffix}"
             )
         if out != self.root and not out.is_relative_to(self.root):
-            raise ImageGenerationError(
-                "Ausgabepfad liegt außerhalb des Render-Verzeichnisses"
-            )
+            raise ImageGenerationError("Ausgabepfad liegt außerhalb des Render-Verzeichnisses")
         out.parent.mkdir(parents=True, exist_ok=True)
         phase = data.get("_generation_phase")
         if out.is_file():
@@ -215,9 +203,7 @@ class AIImageRenderer:
             self._metadata[str(out)] = {
                 "final_path": str(out),
                 "requested_path": str(requested_out),
-                "generation_job_id": str(generation_job_id)
-                if generation_job_id
-                else None,
+                "generation_job_id": str(generation_job_id) if generation_job_id else None,
                 "reused_final": True,
                 "logo_integration": integration,
             }
@@ -248,18 +234,14 @@ class AIImageRenderer:
             temporary.unlink(missing_ok=True)
             if isinstance(exc, ImageGenerationError):
                 raise
-            raise ImageGenerationError(
-                f"KI-Ausgabe ist kein verarbeitbares Bild: {exc}"
-            ) from exc
+            raise ImageGenerationError(f"KI-Ausgabe ist kein verarbeitbares Bild: {exc}") from exc
         if callable(phase):
             phase("validating_final_media")
         self.validate(out, kind)
         self._metadata[str(out)] = {
             "final_path": str(out),
             "requested_path": str(requested_out),
-            "generation_job_id": str(generation_job_id)
-            if generation_job_id
-            else None,
+            "generation_job_id": str(generation_job_id) if generation_job_id else None,
             "logo_integration": integration,
         }
         return out

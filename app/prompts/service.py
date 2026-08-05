@@ -1,16 +1,18 @@
+import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from jinja2 import StrictUndefined, meta
 from jinja2.sandbox import SandboxedEnvironment
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.branding.service import branding_snapshot, prompt_data_block
 from app.config import get_settings
 from app.games.identity import TeamIdentityError, resolve_team_side
-from app.models import PromptTemplate
+from app.models import ClubPromptOverride, PromptStatus, PromptTemplate
 
 
 class PromptValidationError(ValueError):
@@ -133,8 +135,17 @@ class ResolvedPrompt:
     rendered: str
     builtin: bool
     policy_version: str | None = None
+    template_id: str | None = None
+    override_id: str | None = None
+    override_version: int | None = None
+    override_checksum: str | None = None
+    branding: dict | None = None
 
     def snapshot(self) -> dict:
+        # Prompt bodies are platform intellectual property. A post only needs an
+        # immutable, auditable reference to the material used; persisting the
+        # rendered prompt in tenant-owned JSON would expose it through exports,
+        # backups and ordinary post views.
         return {
             "name": self.name,
             "version": self.version,
@@ -143,10 +154,15 @@ class ResolvedPrompt:
             "media_kind": self.media_kind,
             "model": self.model,
             "quality": self.quality,
-            "body": self.body,
-            "rendered": self.rendered,
+            "template_checksum": hashlib.sha256(self.body.encode("utf-8")).hexdigest(),
+            "rendered_checksum": hashlib.sha256(self.rendered.encode("utf-8")).hexdigest(),
             "builtin": self.builtin,
             "policy_version": self.policy_version,
+            "template_id": self.template_id,
+            "override_id": self.override_id,
+            "override_version": self.override_version,
+            "override_checksum": self.override_checksum,
+            "branding": self.branding or {},
         }
 
 
@@ -172,9 +188,7 @@ def validate_template(body: str) -> set[str]:
     variables = meta.find_undeclared_variables(parsed)
     unknown = variables - ALLOWED_PLACEHOLDERS
     if unknown:
-        raise PromptValidationError(
-            "Unbekannte Platzhalter: " + ", ".join(sorted(unknown))
-        )
+        raise PromptValidationError("Unbekannte Platzhalter: " + ", ".join(sorted(unknown)))
     return variables
 
 
@@ -241,7 +255,9 @@ def venue_display(facts: dict) -> str:
     return f"{prefix} {place}"
 
 
-def prompt_context(facts: dict, media_kind: str = "none", style_direction: str | None = None) -> dict:
+def prompt_context(
+    facts: dict, media_kind: str = "none", style_direction: str | None = None
+) -> dict:
     own, opponent, is_home = _own_and_opponent(facts)
     competition = str(facts.get("competition") or "").strip()
     if not competition:
@@ -310,9 +326,7 @@ def builtin_prompt(
 ) -> ResolvedPrompt:
     settings = get_settings()
     image = prompt_kind == "image"
-    name = (
-        f"default-image-{media_kind}" if image else f"default-text-{post_type}"
-    )
+    name = f"default-image-{media_kind}" if image else f"default-text-{post_type}"
     body = DEFAULT_IMAGE_PROMPT if image else DEFAULT_TEXT_PROMPT
     context = prompt_context(facts, media_kind)
     rendered = render_body(body, context)
@@ -351,6 +365,7 @@ def resolve_prompt(
             PromptTemplate.post_type == post_type,
             PromptTemplate.media_kind == media_kind,
             PromptTemplate.active.is_(True),
+            PromptTemplate.status == PromptStatus.ACTIVE,
             PromptTemplate.archived_at.is_(None),
         )
         .order_by(PromptTemplate.version.desc())
@@ -360,9 +375,62 @@ def resolve_prompt(
             raise PromptValidationError(
                 f"Die zugewiesene Promptvorlage '{name}' ist nicht aktiv oder passt nicht zu Typ und Format"
             )
-        return builtin_prompt(prompt_kind, post_type, media_kind, facts)
+        resolved = builtin_prompt(prompt_kind, post_type, media_kind, facts)
+        club_id = str(facts.get("club_id") or "").strip()
+        if not club_id:
+            return resolved
+        branding = branding_snapshot(db, club_id)
+        return replace(
+            resolved,
+            rendered=resolved.rendered
+            + "\n\n"
+            + prompt_data_block(branding, prompt_kind),
+            branding=branding,
+        )
     context = prompt_context(facts, media_kind, item.style_direction)
     rendered = render_body(item.prompt_body, context)
+    club_id = str(facts.get("club_id") or "").strip()
+    branding = branding_snapshot(db, club_id) if club_id else None
+    override = None
+    if club_id:
+        current = datetime.now(tz=ZoneInfo("UTC"))
+        override = db.scalar(
+            select(ClubPromptOverride)
+            .where(
+                ClubPromptOverride.club_id == club_id,
+                ClubPromptOverride.prompt_kind == prompt_kind,
+                ClubPromptOverride.post_type == post_type,
+                ClubPromptOverride.media_kind == media_kind,
+                ClubPromptOverride.status == PromptStatus.ACTIVE,
+                or_(
+                    ClubPromptOverride.valid_from.is_(None),
+                    ClubPromptOverride.valid_from <= current,
+                ),
+                or_(
+                    ClubPromptOverride.valid_until.is_(None),
+                    ClubPromptOverride.valid_until >= current,
+                ),
+            )
+            .order_by(ClubPromptOverride.version.desc())
+        )
+    protected_parts = [rendered]
+    if branding:
+        protected_parts.append(prompt_data_block(branding, prompt_kind))
+    if override:
+        protected_parts.append(
+            "GESCHÜTZTE VEREINSANPASSUNG DES PLATFORMADMINS:\n"
+            + "\n".join(
+                part
+                for part in (
+                    override.additional_instruction,
+                    "Verbotene Formulierungen: " + ", ".join(override.forbidden_phrases or []),
+                    "Sponsorvorgaben: " + ", ".join(override.sponsor_rules or []),
+                    "Vereinsregeln: " + ", ".join(override.club_rules or []),
+                )
+                if part and not part.endswith(": ")
+            )
+        )
+    rendered = "\n\n".join(protected_parts)
     if prompt_kind == "image":
         rendered = image_safety_prefix(facts) + "\n" + rendered
     else:
@@ -379,6 +447,11 @@ def resolve_prompt(
         rendered=rendered,
         builtin=False,
         policy_version=IMAGE_POLICY_VERSION if prompt_kind == "image" else None,
+        template_id=item.id,
+        override_id=override.id if override else None,
+        override_version=override.version if override else None,
+        override_checksum=override.checksum if override else None,
+        branding=branding,
     )
 
 

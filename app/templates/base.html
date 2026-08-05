@@ -9,16 +9,26 @@
 <body class="{% if environment == 'meta-test' %}meta-test-environment{% endif %}">
 <header>
   <strong>⚽ Vereinszentrale</strong>
-  {% if user %}<span class="signed-in-user">Eingeloggt als <strong>{{ user.email }}</strong> ({{ user.role.label }})</span>{% endif %}
+  {% if user %}<span class="signed-in-user">Eingeloggt als <strong>{{ user.email }}</strong> ({% if user.account_type.value == 'platform_admin' %}PlatformAdmin{% else %}{{ user.role.label }}{% endif %})</span>{% endif %}
   {% if environment == 'meta-test' %}<span class="environment-badge">META-TEST – ECHTE VERÖFFENTLICHUNGEN MÖGLICH</span>{% endif %}
   <button aria-label="Navigation" onclick="document.querySelector('nav').classList.toggle('open')">☰</button>
 </header>
 {% if user %}
 <nav>
+  {% if user.account_type.value == 'platform_admin' %}
+  <a href="/platform">Plattformübersicht</a>
+  <a href="/platform/clubs">Vereine</a>
+  <a href="/platform/plans">Tarif- und Limitprofile</a>
+  <a href="/prompts">Zentrale Promptvorlagen</a>
+  <a href="/platform/audit">Plattform-Audit</a>
+  <a href="/platform/usage.csv">Verbrauch als CSV</a>
+  <a href="/account/password">Passwort ändern</a>
+  <form method="post" action="/logout"><button>Abmelden</button></form>
+  {% else %}
   {% for href,label in [
     ('/','Übersicht'),('/teams','Mannschaften'),('/instagram','Instagram-Seiten'),
     ('/games','Spiele & Testdaten'),('/rules','Regeln & Storys'),('/media','Medienbibliothek'),
-    ('/prompts','KI-Promptvorlagen'),('/assets','HTML/CSS-Fallbacks'),
+    ('/assets','HTML/CSS-Fallbacks'),
     ('/generation-jobs','Generierungsaufträge'),
     ('/posts','Beiträge & Freigaben'),
     ('/publications','Veröffentlichungen'),
@@ -26,9 +36,11 @@
   ] %}<a href="{{ href }}">{{ label }}</a>{% endfor %}
   {% if user.role.value != 'viewer' %}<a href="/posts/manual/new">Beitrag manuell erstellen</a>{% endif %}
   {% if user.role.value == 'admin' %}<a href="/users">Benutzer & Rechte</a>{% endif %}
+  {% if user.role.value == 'admin' %}<a href="/branding">Vereinsbranding</a>{% endif %}
   <a href="/account/password">Passwort ändern</a>
   <a href="/account/email">E-Mail-Adresse ändern</a>
   <form method="post" action="/logout"><button>Abmelden</button></form>
+  {% endif %}
 </nav>
 {% endif %}
 <main>

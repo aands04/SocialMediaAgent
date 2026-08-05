@@ -90,14 +90,14 @@ def create_grant(
     user: User,
     media_item: PublicationMediaItem | None = None,
 ) -> tuple[PublicMediaGrant, str, str]:
-    if not settings.meta_public_base_url or not settings.meta_public_base_url.startswith("https://"):
+    if not settings.meta_public_base_url or not settings.meta_public_base_url.startswith(
+        "https://"
+    ):
         raise MediaGrantError("META_PUBLIC_BASE_URL muss eine öffentliche HTTPS-Adresse sein")
     report = validate_publication_png(job, settings, media_item)
     active_key = job.id if media_item is None else f"{job.id}:{media_item.id}"
     existing = db.scalar(
-        select(PublicMediaGrant)
-        .where(PublicMediaGrant.active_key == active_key)
-        .with_for_update()
+        select(PublicMediaGrant).where(PublicMediaGrant.active_key == active_key).with_for_update()
     )
     if existing:
         existing.revoked_at = datetime.now(timezone.utc)
@@ -134,9 +134,7 @@ def create_grant(
             },
         )
     )
-    url = (
-        f"{settings.meta_public_base_url.rstrip('/')}/public/meta-media/{raw_token}"
-    )
+    url = f"{settings.meta_public_base_url.rstrip('/')}/public/meta-media/{raw_token}"
     return grant, raw_token, url
 
 
@@ -155,13 +153,9 @@ def verify_public_media_url(
             headers={"Accept": "image/png"},
         )
     except httpx.RequestError as exc:
-        raise MediaGrantError(
-            "Öffentliche Medien-URL ist von außen nicht erreichbar"
-        ) from exc
+        raise MediaGrantError("Öffentliche Medien-URL ist von außen nicht erreichbar") from exc
     if response.status_code != 200:
-        raise MediaGrantError(
-            f"Öffentliche Medien-URL antwortet mit HTTP {response.status_code}"
-        )
+        raise MediaGrantError(f"Öffentliche Medien-URL antwortet mit HTTP {response.status_code}")
     content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
     if content_type != "image/png":
         raise MediaGrantError("Öffentliche Medien-URL liefert nicht image/png")
@@ -178,9 +172,7 @@ def verify_public_media_url(
     }
 
 
-def revoke_grant(
-    db: Session, grant: PublicMediaGrant, user: User | None, *, reason: str
-) -> None:
+def revoke_grant(db: Session, grant: PublicMediaGrant, user: User | None, *, reason: str) -> None:
     grant.revoked_at = datetime.now(timezone.utc)
     grant.active_key = None
     db.add(

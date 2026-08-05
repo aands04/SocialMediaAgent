@@ -12,9 +12,12 @@ from app.games.automatic import run_automatic_fussball_cycle
 from app.jobs.generation import claim_next, process_generation_job
 from app.meta.publishing import MetaPublishingError
 from app.meta.scheduler import run_automatic_publishing_cycle
-from app.models import JobStatus, PublicationJob
+from app.models import Club, ClubStatus, GenerationJob, JobStatus, PublicationJob
 from app.publishing.service import DryRunPublisher, PublishError
 from app.publishing.worker import process_job
+from app.storage.providers import build_object_storage_provider
+from app.storage.service import cleanup_expired_uploads
+from app.tenancy.state import system_scope, tenant_scope
 
 log = structlog.get_logger()
 settings = get_settings()
@@ -63,9 +66,7 @@ def _validate_worker_environment(settings: Settings) -> str:
             or settings.fussball_automatic_sync_enabled
             or settings.automatic_post_generation_enabled
         ):
-            raise RuntimeError(
-                "Automatische Instagram-Veröffentlichung ist im Meta-Test verboten"
-            )
+            raise RuntimeError("Automatische Instagram-Veröffentlichung ist im Meta-Test verboten")
         return "manual-meta-test"
 
     if settings.environment == "production":
@@ -89,8 +90,7 @@ def _validate_worker_environment(settings: Settings) -> str:
             and not settings.fussball_automatic_sync_enabled
         ):
             raise RuntimeError(
-                "Automatische Beitragserstellung erfordert den automatischen "
-                "FUSSBALL.DE-Abruf"
+                "Automatische Beitragserstellung erfordert den automatischen FUSSBALL.DE-Abruf"
             )
         return "automatic-instagram" if all(automatic_flags) else "production-paused"
 
@@ -129,38 +129,64 @@ def run():
         automatic_result = None
         fussball_result = None
         with SessionLocal() as db:
+            if loops == 1 or loops % 240 == 0:
+                try:
+                    with system_scope("Abgelaufene direkte Uploads bereinigen"):
+                        expired_uploads = cleanup_expired_uploads(
+                            db, build_object_storage_provider(settings)
+                        )
+                    if expired_uploads:
+                        log.info("expired_direct_uploads_cleaned", count=expired_uploads)
+                except Exception as exc:
+                    db.rollback()
+                    log.error("direct_upload_cleanup_failed", error=str(exc))
             if fussball_enabled:
                 fussball_result = run_automatic_fussball_cycle(db, settings)
             generation_ids = []
             for _ in range(5):
-                generation_id = claim_next(db)
+                with system_scope("Generierungsauftrag global beanspruchen"):
+                    generation_id = claim_next(db)
                 if not generation_id:
                     break
+                with system_scope("Mandant des Generierungsauftrags bestimmen"):
+                    generation_job = db.get(GenerationJob, generation_id)
+                    club = db.get(Club, generation_job.club_id) if generation_job else None
+                if not generation_job or not club or club.status not in {
+                    ClubStatus.ACTIVE,
+                    ClubStatus.TRIAL,
+                }:
+                    log.warning(
+                        "generation_job_blocked_by_club",
+                        generation_job_id=generation_id,
+                        club_id=generation_job.club_id if generation_job else None,
+                    )
+                    continue
                 generation_ids.append(generation_id)
-                result = process_generation_job(db, generation_id, settings)
+                with tenant_scope(generation_job.club_id, "system:generation-worker"):
+                    result = process_generation_job(db, generation_id, settings)
                 generated += int(result.status.value == "succeeded")
 
             if worker_mode == "dry-run":
-                due = list(
-                    db.scalars(
-                        select(PublicationJob)
-                        .where(
-                            PublicationJob.status.in_(
-                                [JobStatus.SCHEDULED, JobStatus.RETRY]
+                with system_scope("Dry-Run-Veröffentlichungen global ermitteln"):
+                    due = list(
+                        db.scalars(
+                            select(PublicationJob)
+                            .where(
+                                PublicationJob.status.in_(
+                                    [JobStatus.SCHEDULED, JobStatus.RETRY]
+                                )
                             )
+                            .limit(20)
                         )
-                        .limit(20)
                     )
-                )
                 due_count = len(due)
                 for job in due:
                     try:
-                        process_job(db, job.id, DryRunPublisher(), dry_run_settings)
+                        with tenant_scope(job.club_id, "system:dry-run-worker"):
+                            process_job(db, job.id, DryRunPublisher(), dry_run_settings)
                         processed += 1
                     except PublishError as exc:
-                        log.warning(
-                            "dry_run_job_blocked", job_id=job.id, error=str(exc)
-                        )
+                        log.warning("dry_run_job_blocked", job_id=job.id, error=str(exc))
             elif scheduler_enabled:
                 try:
                     automatic_result = run_automatic_publishing_cycle(db, settings)
@@ -188,9 +214,7 @@ def run():
             "automatic_cycle": (
                 automatic_result.__dict__ if automatic_result is not None else None
             ),
-            "fussball_cycle": (
-                fussball_result.__dict__ if fussball_result is not None else None
-            ),
+            "fussball_cycle": (fussball_result.__dict__ if fussball_result is not None else None),
         }
         temporary = settings.log_root / "worker-heartbeat.tmp"
         temporary.write_text(json.dumps(payload))

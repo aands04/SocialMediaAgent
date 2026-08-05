@@ -441,9 +441,7 @@ def create_manual_post(
                 "checksums": [image.png_checksum for image in images],
                 "original_filenames": [image.original_filename for image in images],
                 "image_count": len(images),
-                "instagram_user_tag_count": sum(
-                    len(tags) for tags in user_tags_by_image
-                ),
+                "instagram_user_tag_count": sum(len(tags) for tags in user_tags_by_image),
             },
         )
     )

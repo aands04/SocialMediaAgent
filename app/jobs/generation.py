@@ -18,7 +18,10 @@ from app.logos.service import (
     validate_frozen_logo,
 )
 from app.models import (
+    AccountType,
     AuditLog,
+    Club,
+    ClubStatus,
     Game,
     GenerationJob,
     GenerationJobStatus,
@@ -28,6 +31,8 @@ from app.models import (
     PublicationJob,
     StoryRule,
     Team,
+    UsageLedgerEntry,
+    UsageStatus,
     User,
 )
 from app.posts.club_carousel import ClubCarouselState, coordinate_club_matchday_feed
@@ -39,6 +44,7 @@ from app.posts.service import (
     rerender_post,
     revise_post,
 )
+from app.usage.service import complete_usage, release_usage, reserve_usage
 
 log = structlog.get_logger()
 ACTIVE_STATUSES = {
@@ -88,22 +94,14 @@ def _automatically_approve_created_outputs(
         "auto_approve_results" if post.post_type == "result" else "auto_approve_announcements"
     )
     all_auto = bool(carousel.complete and members) and all(
-        bool(
-            (owner.rules or {}).get(auto_key)
-            if (owner := db.get(Team, item.team_id))
-            else False
-        )
+        bool((owner.rules or {}).get(auto_key) if (owner := db.get(Team, item.team_id)) else False)
         for item in members
     )
     approved = 0
     for member in members:
         owner = db.get(Team, member.team_id)
         owner_auto = bool(owner and (owner.rules or {}).get(auto_key))
-        jobs = list(
-            db.scalars(
-                select(PublicationJob).where(PublicationJob.post_id == member.id)
-            )
-        )
+        jobs = list(db.scalars(select(PublicationJob).where(PublicationJob.post_id == member.id)))
         selected = [job.id for job in jobs if job.kind == "story" and owner_auto]
         if carousel.complete and member.id == carousel.primary_post_id and all_auto:
             selected.extend(job.id for job in jobs if job.kind == "carousel")
@@ -119,16 +117,50 @@ class _ProgressTextGenerator:
         self.db = db
         self.job = job
         self.is_ai = getattr(inner, "is_ai", False)
+        self._calls = 0
+
+    def _before_provider(self) -> UsageLedgerEntry | None:
+        if not self.is_ai:
+            return None
+        self._calls += 1
+        entry = reserve_usage(
+            self.db,
+            club_id=self.job.club_id,
+            generation_type="text",
+            quantity=1,
+            idempotency_key=f"generation:{self.job.id}:text:{self._calls}",
+            provider="openai",
+            model=str(getattr(self.inner, "model", "unknown")),
+            user_id=self.job.requested_by,
+            generation_job_id=self.job.id,
+            post_id=self.job.post_id,
+        )
+        if entry.status == UsageStatus.RESERVED:
+            entry.status = UsageStatus.PROVIDER_PROCESSING
+            self.db.commit()
+        return entry
+
+    def _after_provider(self, entry: UsageLedgerEntry | None) -> None:
+        if entry and entry.status in {
+            UsageStatus.RESERVED,
+            UsageStatus.PROVIDER_PROCESSING,
+        }:
+            complete_usage(self.db, entry, actual_quantity=1, post_id=self.job.post_id)
+            self.db.commit()
 
     def generate(self, facts):
         _phase(self.db, self.job, "generating_text", 10)
+        usage = self._before_provider()
         result = self.inner.generate(facts)
+        self._after_provider(usage)
         _check_cancel(self.db, self.job)
         return result
 
     def revise(self, facts, current_text, instruction):
         _phase(self.db, self.job, "generating_text", 10)
+        usage = self._before_provider()
         result = self.inner.revise(facts, current_text, instruction)
+        self._after_provider(usage)
         _check_cancel(self.db, self.job)
         return result
 
@@ -139,6 +171,32 @@ class _ProgressRenderer:
         self.db = db
         self.job = job
         self.is_ai = getattr(inner, "is_ai", False)
+        self._calls = 0
+
+    def _before_provider(self, context: dict) -> UsageLedgerEntry | None:
+        if not self.is_ai:
+            return None
+        self._calls += 1
+        prompt = context.get("image_prompt")
+        model = str(getattr(prompt, "model", None) or "unknown")
+        prompt_version = getattr(prompt, "version", None)
+        entry = reserve_usage(
+            self.db,
+            club_id=self.job.club_id,
+            generation_type="image",
+            quantity=1,
+            idempotency_key=f"generation:{self.job.id}:image:{self._calls}",
+            provider="openai",
+            model=model,
+            user_id=self.job.requested_by,
+            generation_job_id=self.job.id,
+            post_id=self.job.post_id,
+            prompt_version=prompt_version,
+        )
+        if entry.status == UsageStatus.RESERVED:
+            entry.status = UsageStatus.PROVIDER_PROCESSING
+            self.db.commit()
+        return entry
 
     def render(self, kind, relative_path, context):
         phase = "generating_feed" if kind == "feed" else "generating_story"
@@ -166,7 +224,14 @@ class _ProgressRenderer:
                 completed,
             ),
         }
+        usage = self._before_provider(context)
         path = self.inner.render(kind, relative_path, render_context)
+        if usage and usage.status in {
+            UsageStatus.RESERVED,
+            UsageStatus.PROVIDER_PROCESSING,
+        }:
+            complete_usage(self.db, usage, actual_quantity=1, post_id=self.job.post_id)
+            self.db.commit()
         _check_cancel(self.db, self.job)
         completed += 1
         progress = 20 + int(65 * completed / max(1, self.job.planned_outputs))
@@ -202,11 +267,13 @@ def _audit(
 def _story_count(db: Session, team: Team, post_type: str) -> int:
     rows = list(
         db.scalars(
-            select(StoryRule).where(
+            select(StoryRule)
+            .where(
                 StoryRule.team_id == team.id,
                 StoryRule.post_type == post_type,
                 StoryRule.active.is_(True),
-            ).order_by(StoryRule.sort_order, StoryRule.created_at, StoryRule.id)
+            )
+            .order_by(StoryRule.sort_order, StoryRule.created_at, StoryRule.id)
         ).all()
     )
     count_key = f"{post_type}_story_output_count"
@@ -304,9 +371,7 @@ def enqueue_rerender(
     selected = sorted(set(story_job_ids))
     if not rerender_feed and not selected:
         raise ValueError("Bitte mindestens Feed oder eine Story auswählen")
-    selection_hash = hashlib.sha256(
-        repr((rerender_feed, selected)).encode()
-    ).hexdigest()[:16]
+    selection_hash = hashlib.sha256(repr((rerender_feed, selected)).encode()).hexdigest()[:16]
     asset_key = media_asset_id or post.media_asset_id or "neutral"
     key = f"rerender:{post.id}:v{expected_version}:{selection_hash}:{asset_key}"
     active_key = f"rerender:{post.id}"
@@ -337,9 +402,7 @@ def enqueue_rerender(
             "rerender_feed": rerender_feed,
             "story_job_ids": selected,
             "media_asset_id": media_asset_id or post.media_asset_id,
-            "logos": frozen_logo_set(
-                db, db.get(Game, post.game_id), db.get(Team, post.team_id)
-            ),
+            "logos": frozen_logo_set(db, db.get(Game, post.game_id), db.get(Team, post.team_id)),
         },
     )
     db.add(job)
@@ -425,9 +488,7 @@ def enqueue_ai_revision(
         requested_by=user.id,
         status=GenerationJobStatus.QUEUED,
         phase="preparing",
-        planned_outputs=(
-            int(revise_text) + int(revise_feed) + len(selected)
-        ),
+        planned_outputs=(int(revise_text) + int(revise_feed) + len(selected)),
         idempotency_key=key,
         active_key=active_key,
         parameters={
@@ -481,14 +542,15 @@ def enqueue_logo_recompose(
     expected_version: int,
     story_job_ids: list[str],
 ) -> GenerationJob:
-    game=db.get(Game,post.game_id); team=db.get(Team,post.team_id)
+    game = db.get(Game, post.game_id)
+    team = db.get(Team, post.team_id)
     if not game or not team:
         raise ValueError("Spiel oder Mannschaft ist nicht mehr vorhanden.")
-    logos=frozen_logo_set(db,game,team)
+    logos = frozen_logo_set(db, game, team)
     if not logos.get("team"):
         raise ValueError("Bitte zuerst ein verifiziertes Mannschaftslogo zuordnen.")
-    selected=sorted(set(story_job_ids))
-    logo_key=":".join(
+    selected = sorted(set(story_job_ids))
+    logo_key = ":".join(
         [
             str((logos.get("team") or {}).get("id")),
             str((logos.get("team") or {}).get("version")),
@@ -496,21 +558,21 @@ def enqueue_logo_recompose(
             str((logos.get("opponent") or {}).get("version") or "0"),
         ]
     )
-    selection_hash=hashlib.sha256(":".join(selected).encode()).hexdigest()[:12]
-    key=f"recompose:{post.id}:v{expected_version}:{selection_hash}:{hashlib.sha256(logo_key.encode()).hexdigest()[:12]}"
-    active_key=f"rerender:{post.id}"
-    existing=db.scalar(
+    selection_hash = hashlib.sha256(":".join(selected).encode()).hexdigest()[:12]
+    key = f"recompose:{post.id}:v{expected_version}:{selection_hash}:{hashlib.sha256(logo_key.encode()).hexdigest()[:12]}"
+    active_key = f"rerender:{post.id}"
+    existing = db.scalar(
         select(GenerationJob).where(
-            or_(GenerationJob.active_key==active_key,GenerationJob.idempotency_key==key)
+            or_(GenerationJob.active_key == active_key, GenerationJob.idempotency_key == key)
         )
     )
     if existing:
         return existing
-    publication_jobs=list(
-        db.scalars(select(PublicationJob).where(PublicationJob.post_id==post.id))
+    publication_jobs = list(
+        db.scalars(select(PublicationJob).where(PublicationJob.post_id == post.id))
     )
-    logo_recompose_preflight(post,publication_jobs,selected)
-    job=GenerationJob(
+    logo_recompose_preflight(post, publication_jobs, selected)
+    job = GenerationJob(
         job_type=GenerationJobType.RERENDER_POST,
         game_id=post.game_id,
         team_id=post.team_id,
@@ -519,14 +581,14 @@ def enqueue_logo_recompose(
         requested_by=user.id,
         status=GenerationJobStatus.QUEUED,
         phase="loading_verified_logos",
-        planned_outputs=1+len(selected),
+        planned_outputs=1 + len(selected),
         idempotency_key=key,
         active_key=active_key,
         parameters={
-            "expected_post_version":expected_version,
-            "story_job_ids":selected,
-            "logos":logos,
-            "recompose_only":True,
+            "expected_post_version": expected_version,
+            "story_job_ids": selected,
+            "logos": logos,
+            "recompose_only": True,
         },
     )
     db.add(job)
@@ -534,15 +596,15 @@ def enqueue_logo_recompose(
         db.flush()
     except IntegrityError:
         db.rollback()
-        existing=db.scalar(
+        existing = db.scalar(
             select(GenerationJob).where(
-                or_(GenerationJob.active_key==active_key,GenerationJob.idempotency_key==key)
+                or_(GenerationJob.active_key == active_key, GenerationJob.idempotency_key == key)
             )
         )
         if existing:
             return existing
         raise
-    _audit(db,job,"generation.logo_recompose_queued",{"logos":logos})
+    _audit(db, job, "generation.logo_recompose_queued", {"logos": logos})
     db.commit()
     return job
 
@@ -664,6 +726,33 @@ def _capture_partial_post(db: Session, job: GenerationJob) -> None:
         post.critical_warnings = list(dict.fromkeys([*(post.critical_warnings or []), warning]))
 
 
+def _finalize_job_usage(db: Session, job: GenerationJob, post_id: str | None) -> None:
+    """Attach completed ledger rows and release every unfinished reservation.
+
+    A provider timeout is deliberately not charged to the club when no
+    technically usable result was returned to the application. Provider costs
+    can still be recorded on the non-billable row by a later reconciliation.
+    """
+    entries = list(
+        db.scalars(
+            select(UsageLedgerEntry).where(UsageLedgerEntry.generation_job_id == job.id)
+        )
+    )
+    for entry in entries:
+        if entry.status in {
+            UsageStatus.COMPLETED_BILLABLE,
+            UsageStatus.COMPLETED_NOT_BILLABLE,
+            UsageStatus.REJECTED_BY_USER,
+        }:
+            entry.post_id = post_id or entry.post_id
+        elif entry.status in {UsageStatus.RESERVED, UsageStatus.PROVIDER_PROCESSING}:
+            release_usage(
+                entry,
+                technical=True,
+                details={"reason": "generation_job_ended_without_usable_result"},
+            )
+
+
 def _check_cancel(db: Session, job: GenerationJob) -> None:
     db.refresh(job, attribute_names=["cancel_requested"])
     if job.cancel_requested:
@@ -695,20 +784,30 @@ def process_generation_job(
     if not job or job.status != GenerationJobStatus.RUNNING:
         raise ValueError("Generierungsauftrag ist nicht beansprucht")
     try:
+        club = db.get(Club, job.club_id)
         user = db.get(User, job.requested_by)
         game = db.get(Game, job.game_id)
         team = db.get(Team, job.team_id)
+        if not club or club.status not in {ClubStatus.ACTIVE, ClubStatus.TRIAL}:
+            raise PermissionError(
+                "Der Verein ist gesperrt; die Generierung wurde vor dem nächsten "
+                "kostenpflichtigen Schritt beendet."
+            )
         if not user or not user.active or user.archived_at:
             raise PermissionError("Der auslösende Benutzer ist nicht mehr aktiv.")
+        if user.account_type != AccountType.CLUB_USER or user.club_id != job.club_id:
+            raise PermissionError("Der auslösende Benutzer gehört nicht mehr zu diesem Verein.")
         if not allowed(db, user, "generate", job.team_id):
             raise PermissionError(
                 "Der auslösende Benutzer besitzt keine Mannschaftsberechtigung mehr."
             )
         if not game or not team:
             raise ValueError("Spiel oder Mannschaft ist nicht mehr vorhanden.")
-        if game.status in {"provisional", "cancelled", "postponed"} or (
-            game.overrides or {}
-        ).get("automation_blocked"):
+        if game.club_id != job.club_id or team.club_id != job.club_id:
+            raise PermissionError("Spiel oder Mannschaft gehört nicht zum Generierungsverein.")
+        if game.status in {"provisional", "cancelled", "postponed"} or (game.overrides or {}).get(
+            "automation_blocked"
+        ):
             raise ValueError(
                 "Das Spiel ist vorläufig, abgesagt, verschoben oder für Automatisierung gesperrt."
             )
@@ -725,7 +824,9 @@ def process_generation_job(
                 "Eigenes Mannschaftslogo fehlt. Bitte zuerst ein verifiziertes Teamlogo zuordnen."
             )
         team_logo = validate_frozen_logo(db, logos.get("team"), "team") if needs_images else None
-        opponent_logo = validate_frozen_logo(db, logos.get("opponent"), "opponent") if needs_images else None
+        opponent_logo = (
+            validate_frozen_logo(db, logos.get("opponent"), "opponent") if needs_images else None
+        )
         if team_logo and team.logo_asset_id != team_logo.id:
             raise LogoValidationError(
                 "Das eingefrorene Mannschaftslogo ist dieser Mannschaft nicht mehr zugeordnet."
@@ -739,9 +840,7 @@ def process_generation_job(
             and (logos.get("opponent") or {}).get("fallback")
             and game.opponent_logo_id
         ):
-            raise LogoValidationError(
-                "Die Gegnerlogo-Zuordnung wurde nach dem Einreihen geändert."
-            )
+            raise LogoValidationError("Die Gegnerlogo-Zuordnung wurde nach dem Einreihen geändert.")
         if needs_images:
             validate_frozen_file(team_logo, settings.upload_root)
             validate_frozen_file(opponent_logo, settings.upload_root)
@@ -785,9 +884,7 @@ def process_generation_job(
                     revise_text=bool(parameters.get("revise_text")),
                     revise_graphics=bool(parameters.get("revise_graphics")),
                     rerender_feed=bool(
-                        parameters.get(
-                            "revise_feed", parameters.get("revise_graphics")
-                        )
+                        parameters.get("revise_feed", parameters.get("revise_graphics"))
                     ),
                     text_generator=(
                         _ProgressTextGenerator(build_text_generator(settings), db, job)
@@ -847,6 +944,7 @@ def process_generation_job(
             db.commit()
         _phase(db, job, "validating", 90, job.planned_outputs)
         _phase(db, job, "saving", 95, job.planned_outputs)
+        _finalize_job_usage(db, job, post.id)
         if (
             job.job_type == GenerationJobType.CREATE_POST
             and parameters.get("trigger_mode") == "automatic_fussball"
@@ -871,9 +969,7 @@ def process_generation_job(
                             details={
                                 "generation_job_id": job.id,
                                 "post_type": post.post_type,
-                                "rule_opt_in": bool(
-                                    parameters.get("automatic_approval_requested")
-                                ),
+                                "rule_opt_in": bool(parameters.get("automatic_approval_requested")),
                                 "club_carousel_active": carousel.active,
                                 "club_carousel_complete": carousel.complete,
                             },
@@ -907,6 +1003,7 @@ def process_generation_job(
         db.rollback()
         job = db.get(GenerationJob, job_id)
         _capture_partial_post(db, job)
+        _finalize_job_usage(db, job, job.result_post_id)
         _finish(
             db,
             job,
@@ -918,6 +1015,7 @@ def process_generation_job(
         db.rollback()
         job = db.get(GenerationJob, job_id)
         _capture_partial_post(db, job)
+        _finalize_job_usage(db, job, job.result_post_id)
         _finish(
             db,
             job,
@@ -940,6 +1038,7 @@ def process_generation_job(
             _audit(db, job, "generation.retry_scheduled")
             db.commit()
         else:
+            _finalize_job_usage(db, job, job.result_post_id)
             _finish(
                 db,
                 job,
@@ -951,6 +1050,7 @@ def process_generation_job(
         db.rollback()
         job = db.get(GenerationJob, job_id)
         _capture_partial_post(db, job)
+        _finalize_job_usage(db, job, job.result_post_id)
         text = str(exc)
         ambiguous = (
             job.phase.startswith("generating_")

@@ -1,0 +1,36 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1>Vereinsbranding</h1>
+<p>Hier werden ausschließlich strukturierte Vereinsvorgaben gepflegt. Die geschützten Plattform-Prompts werden weder angezeigt noch an den Browser übertragen.</p>
+<form method="post" action="/branding" class="gridform">
+  <input type="hidden" name="csrf_token" value="{{csrf}}">
+  <input type="hidden" name="version" value="{{config.version if config else 0}}">
+  <fieldset class="full-span"><legend>Bildgestaltung</legend><div class="gridform">
+    <label>Primärfarbe<input name="primary_color" value="{{image.get('primary_color','#172554')}}" pattern="#[0-9A-Fa-f]{6}" required></label>
+    <label>Sekundärfarbe<input name="secondary_color" value="{{image.get('secondary_color','#ffffff')}}" pattern="#[0-9A-Fa-f]{6}" required></label>
+    <label>Akzentfarben, je Zeile<input name="accent_colors" value="{{image.get('accent_colors',[])|join(', ')}}"></label>
+    <label>Grafikstil<input name="graphic_style" value="{{image.get('graphic_style','')}}" maxlength="500"></label>
+    <label>Bildwirkung<input name="image_effect" value="{{image.get('image_effect','')}}" maxlength="500"></label>
+    <label>Hintergrundstil<input name="background_style" value="{{image.get('background_style','')}}" maxlength="500"></label>
+    <label>Textausrichtung<input name="text_alignment" value="{{image.get('text_alignment','')}}" maxlength="500"></label>
+    <label>Logo-Platzierung<input name="logo_placement" value="{{image.get('logo_placement','')}}" maxlength="500"></label>
+    <label>Sicherheitsabstände<input name="safe_margins" value="{{image.get('safe_margins','')}}" maxlength="500"></label>
+    <label>Spielerposition<input name="player_position" value="{{image.get('player_position','')}}" maxlength="500"></label>
+    <label>Textmenge im Bild<input name="image_text_amount" value="{{image.get('image_text_amount','')}}" maxlength="500"></label>
+    <label>Spieler-/Hintergrundverhältnis<input name="player_background_ratio" value="{{image.get('player_background_ratio','')}}" maxlength="500"></label>
+    <label>Dynamik<input name="dynamics" value="{{image.get('dynamics','')}}" maxlength="500"></label>
+    <label>Individualisierung<input name="individualization" value="{{image.get('individualization','')}}" maxlength="500"></label>
+    <label>Primäre Schriftart<select name="primary_font_id"><option value="">System-Fallback</option>{% for font in fonts %}<option value="{{font.id}}" {% if config and config.primary_font_id==font.id %}selected{% endif %}>{{font.name}}</option>{% endfor %}</select></label>
+    <label>Sekundäre Schriftart<select name="secondary_font_id"><option value="">System-Fallback</option>{% for font in fonts %}<option value="{{font.id}}" {% if config and config.secondary_font_id==font.id %}selected{% endif %}>{{font.name}}</option>{% endfor %}</select></label>
+    {% for key,label in [('allowed_elements','Erlaubte Gestaltungselemente'),('unwanted_elements','Unerwünschte Gestaltungselemente'),('sponsor_rules','Sponsorenvorgaben'),('forbidden_colors','Verbotene Farben')] %}<label>{{label}}<textarea name="{{key}}" rows="4">{{image.get(key,[])|join('\n')}}</textarea></label>{% endfor %}
+    <label>Feed-Vorgaben<textarea name="feed_rules" rows="4">{{image.get('feed_rules','')}}</textarea></label>
+    <label>Story-Vorgaben<textarea name="story_rules" rows="4">{{image.get('story_rules','')}}</textarea></label>
+  </div></fieldset>
+  <fieldset class="full-span"><legend>Textgestaltung</legend><div class="gridform">
+    {% for key,label in [('address_style','Ansprache'),('tone','Tonalität'),('text_length','Textlänge'),('emoji_usage','Emoji-Nutzung'),('team_name_spelling','Schreibweise der Mannschaften'),('home_label','Heimspielbezeichnung'),('away_label','Auswärtsspielbezeichnung'),('call_to_action','Call-to-Action')] %}<label>{{label}}<input name="{{key}}" value="{{text.get(key,'')}}" maxlength="500"></label>{% endfor %}
+    <label>Maximale Hashtags<input type="number" name="max_hashtags" value="{{text.get('max_hashtags',10)}}" min="0" max="30"></label>
+    {% for key,label in [('hashtags','Standard-Hashtags'),('mentions','Erwähnungen'),('typical_phrases','Typische Formulierungen'),('unwanted_phrases','Unerwünschte Formulierungen'),('sponsor_mentions','Sponsorenerwähnungen')] %}<label>{{label}}, je Zeile<textarea name="{{key}}" rows="4">{{text.get(key,[])|join('\n')}}</textarea></label>{% endfor %}
+  </div></fieldset>
+  <button>Branding versioniert speichern</button>
+</form>
+{% endblock %}

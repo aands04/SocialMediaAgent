@@ -270,9 +270,7 @@ class MetaApiClient:
             headers={"Authorization": f"Bearer {access_token}"},
         )
 
-    def publish_container(
-        self, *, access_token: str, account_id: str, container_id: str
-    ) -> dict:
+    def publish_container(self, *, access_token: str, account_id: str, container_id: str) -> dict:
         return self._request_json(
             "POST",
             f"{self.base}/{account_id}/media_publish",

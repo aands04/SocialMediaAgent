@@ -74,6 +74,23 @@ class Settings(BaseSettings):
     backup_root: Path = Path("data/backups")
     text_generator_mode: str = "mock"
     image_generator_mode: str = "playwright"
+    multi_tenant_enabled: bool = False
+    self_registration_enabled: bool = False
+    billing_enabled: bool = False
+    platform_timezone: str = "UTC"
+    object_storage_provider: str = "local"
+    s3_endpoint_url: str | None = None
+    s3_region: str = "auto"
+    s3_bucket: str | None = None
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: str | None = None
+    s3_presign_ttl_seconds: int = 900
+    publishing_object_ttl_seconds: int = 7200
+    initial_club_id: str | None = None
+    initial_club_name: str | None = None
+    initial_club_short_name: str | None = None
+    initial_club_slug: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

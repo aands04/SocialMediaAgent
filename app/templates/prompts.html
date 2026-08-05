@@ -45,11 +45,33 @@
 </section>
 
 <section>
+  <h2>Geschützter Fixture-Versionsvergleich</h2>
+  <p>Dieser Test verwendet ausschließlich lokale Fixture-Daten und ruft keinen KI-Anbieter auf. Er wird als nicht abrechnungsrelevanter Plattformtest protokolliert.</p>
+  <form method="post" action="/platform/prompt-tests" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <label>Testverein<select name="club_id" required><option value="">Bitte wählen</option>{% for club in clubs %}<option value="{{club.id}}">{{club.name}}</option>{% endfor %}</select></label>
+    <label>Zu prüfende Version<select name="prompt_id" required><option value="">Bitte wählen</option>{% for item in items %}<option value="{{item.id}}">{{item.name}} · {{item.prompt_kind}}/{{item.post_type}}/{{item.media_kind}} · v{{item.version}}</option>{% endfor %}</select></label>
+    <label>Vergleichsversion (optional)<select name="comparison_prompt_id"><option value="">Kein Vergleich</option>{% for item in items %}<option value="{{item.id}}">{{item.name}} · {{item.prompt_kind}}/{{item.post_type}}/{{item.media_kind}} · v{{item.version}}</option>{% endfor %}</select></label>
+    <label>Testmannschaft (optional)<select name="team_id"><option value="">Fixture-Mannschaft</option>{% for team in teams %}<option value="{{team.id}}">{{team.display_name}} · {{team.club_id}}</option>{% endfor %}</select></label>
+    <label>Testspiel (optional)<select name="game_id"><option value="">Fixture-Spiel</option>{% for game in games %}<option value="{{game.id}}">{{game.home_team}} – {{game.away_team}} · {{game.kickoff|berlin}}</option>{% endfor %}</select></label>
+    <button>Fixture-Test speichern</button>
+  </form>
+  {% if selected_test %}
+  <h3>Testergebnis {{selected_test.id}}</h3>
+  <div class="gridform">
+    {% if selected_test.result_snapshot.comparison %}<div><strong>Vergleichsversion</strong><pre style="white-space:pre-wrap">{{selected_test.result_snapshot.comparison}}</pre></div>{% endif %}
+    <div><strong>Zu prüfende Version</strong><pre style="white-space:pre-wrap">{{selected_test.result_snapshot.candidate}}</pre></div>
+  </div>
+  {% endif %}
+  <table><tr><th>Zeitpunkt</th><th>Verein</th><th>Versionen</th><th>Status</th><th>Aktion</th></tr>{% for run in prompt_tests %}<tr><td>{{run.created_at|berlin}}</td><td>{{run.club_id}}</td><td>{{run.old_prompt_template_id or '—'}} → {{run.new_prompt_template_id}}</td><td>{{run.status}}</td><td><a class="button" href="/prompts?test_run={{run.id}}">Anzeigen</a></td></tr>{% else %}<tr><td colspan="5">Noch keine Plattformtests gespeichert.</td></tr>{% endfor %}</table>
+</section>
+
+<section>
   <h2>Gespeicherte Versionen</h2>
   <table>
     <tr><th>Name</th><th>Art</th><th>Typ</th><th>Format</th><th>Version</th><th>Modell</th><th>Qualität</th></tr>
     {% for item in items %}
-    <tr><td>{{item.name}}</td><td>{{item.prompt_kind}}</td><td>{{item.post_type}}</td><td>{{item.media_kind}}</td><td>{{item.version}}</td><td>{{item.model}}</td><td>{{item.quality}}</td></tr>
+    <tr><td>{{item.name}}</td><td>{{item.prompt_kind}}</td><td>{{item.post_type}}</td><td>{{item.media_kind}}</td><td>{{item.version}}</td><td>{{item.status.value}} · {{item.model}} · {{item.quality}}</td><td><code>{{item.checksum[:12]}}</code><br>{% if item.status.value != 'active' %}<form method="post" action="/platform/prompts/{{item.id}}/activate" style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Aktivieren</button></form>{% endif %}{% if item.status.value != 'archived' %}<form method="post" action="/platform/prompts/{{item.id}}/archive" style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Archivieren</button></form>{% endif %}</td></tr>
     {% else %}<tr><td colspan="7">Noch keine eigenen Promptversionen gespeichert. Die eingebauten Standardvorlagen sind sofort verfügbar.</td></tr>{% endfor %}
   </table>
 </section>
