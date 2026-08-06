@@ -39,6 +39,7 @@ from app.models import (
     PublicationJob,
     PublicationMediaItem,
     Role,
+    StorageObject,
     StoryRule,
     Team,
     User,
@@ -124,6 +125,112 @@ def csrf(client):
 def session_csrf(client):
     response = client.get("/teams")
     return re.search(r'name="csrf_token" value="([^"]+)', response.text).group(1)
+
+
+def test_club_dashboard_shows_usage_and_next_seven_days_in_plain_language(browser):
+    client, factory = browser
+    scheduled_at = datetime.now(timezone.utc) + timedelta(days=1)
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="dashboard-overview",
+            display_name="Dashboard Übersicht",
+            username="dashboard_overview",
+            club="Dashboard Testverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="dashboard-overview",
+            display_name="Erste Mannschaft",
+            short_name="I",
+            slug="dashboard-overview",
+            club="Dashboard Testverein",
+            fussball_url="https://www.fussball.de/dashboard-overview",
+            instagram_page_id=page.id,
+            media_subdir="dashboard-overview",
+        )
+        db.add(team)
+        db.flush()
+        db.add(
+            Team(
+                internal_name="dashboard-overview-archived",
+                display_name="Archivierte Mannschaft",
+                short_name="A",
+                slug="dashboard-overview-archived",
+                club="Dashboard Testverein",
+                active=False,
+                fussball_url="https://www.fussball.de/dashboard-overview-archived",
+                instagram_page_id=page.id,
+                media_subdir="dashboard-overview-archived",
+            )
+        )
+        post = Post(
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="announcement",
+            status=PostStatus.APPROVED,
+        )
+        db.add(post)
+        db.flush()
+        db.add_all(
+            [
+                PublicationJob(
+                    post_id=post.id,
+                    team_id=team.id,
+                    instagram_page_id=page.id,
+                    kind="feed",
+                    media_path="generated/feed.png",
+                    scheduled_at=scheduled_at,
+                    approval_status="approved",
+                    status=JobStatus.SCHEDULED,
+                    idempotency_key="dashboard-overview-feed",
+                ),
+                PublicationJob(
+                    post_id=post.id,
+                    team_id=team.id,
+                    instagram_page_id=page.id,
+                    kind="story",
+                    media_path="generated/story.png",
+                    scheduled_at=scheduled_at,
+                    approval_status="unapproved",
+                    status=JobStatus.UNAPPROVED,
+                    idempotency_key="dashboard-overview-story",
+                ),
+                StorageObject(
+                    provider="local",
+                    bucket="dashboard",
+                    object_key="clubs/dashboard/generated/feed",
+                    category="generated/feed",
+                    size_bytes=1_610_612_736,
+                    checksum="a" * 64,
+                    mime_type="image/png",
+                ),
+            ]
+        )
+        db.commit()
+        post_id = post.id
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Geplante Beiträge" in response.text
+    assert "Veröffentlichungen" in response.text
+    assert "<strong>2</strong><span>Mannschaften</span>" in response.text
+    assert re.search(
+        r"<strong>1 / \d+</strong>\s*<span>Aktive Mannschaften</span>",
+        response.text,
+    )
+    assert "KI-Textgenerierungen" in response.text
+    assert "KI-Bilder" in response.text
+    assert "1,50 / 1,00 GB" in response.text
+    assert "0 / 20" in response.text
+    assert "Geplante Veröffentlichungen" in response.text
+    assert "Spielankündigung" in response.text
+    assert "Freigegeben" in response.text
+    assert "Nicht freigegeben" in response.text
+    assert "Geplant" in response.text
+    assert f'href="/posts/{post_id}"' in response.text
+    assert "Aktuelle Beiträge" not in response.text
 
 
 def test_suspended_club_keeps_reads_but_blocks_dashboard_mutations(browser):
