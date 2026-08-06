@@ -189,7 +189,10 @@
     document.querySelector(".team-naming-row [data-team-display]")?.value.trim() ||
     clubShortName ||
     clubName;
-  const venueName = () => document.querySelector("#home-venue")?.value.trim() || "eurer Heimspielstätte";
+  const venueName = () =>
+    form.querySelector('[name="home_venue_short"]')?.value.trim() ||
+    document.querySelector("#home-venue")?.value.trim() ||
+    "eurer Heimspielstätte";
   const examples = {
     tone: {
       factual: () => `Am Sonntag empfängt ${currentTeam()} den kommenden Gegner in ${venueName()}.`,
@@ -239,8 +242,10 @@
       sample.style.fontFamily = family;
       document.querySelector("#branding-preview").style.setProperty(variable, family);
     } else {
-      sample.style.fontFamily = "system-ui";
-      document.querySelector("#branding-preview").style.setProperty(variable, "system-ui");
+      const family = option?.dataset.family || "system-ui";
+      document.querySelector(`style[data-brand-font="${variable}"]`)?.remove();
+      sample.style.fontFamily = family;
+      document.querySelector("#branding-preview").style.setProperty(variable, family);
     }
   };
 

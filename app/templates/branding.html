@@ -73,11 +73,17 @@
             <button type="button" class="button secondary add-row" data-add-color="accent_colors">Farbe hinzufügen</button>
           </div>
           <label>Primäre Schriftart <span class="field-kind recommended">empfohlen</span>
-            <select name="primary_font_id" id="primary-font"><option value="">Systemschrift</option>{% for font in fonts %}<option value="{{font.id}}" data-family="{{font.family}}" data-url="/fonts/{{font.id}}/preview" data-format="{{'truetype' if font.relative_path.lower().endswith('.ttf') else 'woff2'}}" {% if config and config.primary_font_id==font.id %}selected{% endif %}>{{font.name}}</option>{% endfor %}</select>
+            <select name="primary_font_choice" id="primary-font">
+              <optgroup label="Standardschriften">{% for key,font in standard_fonts.items() %}<option value="standard:{{key}}" data-family="{{font.family}}" {% if (not config or not config.primary_font_id) and image.primary_standard_font==key %}selected{% endif %}>{{font.label}}</option>{% endfor %}</optgroup>
+              {% if fonts %}<optgroup label="Eigene Schriftarten">{% for font in fonts %}<option value="asset:{{font.id}}" data-family="{{font.family}}" data-url="/fonts/{{font.id}}/preview" data-format="{{'truetype' if font.relative_path.lower().endswith('.ttf') else 'woff2'}}" {% if config and config.primary_font_id==font.id %}selected{% endif %}>{{font.name}}</option>{% endfor %}</optgroup>{% endif %}
+            </select>
             <span class="font-sample" id="primary-font-sample">Heimspiel – Gemeinsam für {{club.short_name or club.name or 'Dein Verein'}}</span>
           </label>
           <label>Sekundäre Schriftart <span class="field-kind optional">optional</span>
-            <select name="secondary_font_id" id="secondary-font"><option value="">Systemschrift</option>{% for font in fonts %}<option value="{{font.id}}" data-family="{{font.family}}" data-url="/fonts/{{font.id}}/preview" data-format="{{'truetype' if font.relative_path.lower().endswith('.ttf') else 'woff2'}}" {% if config and config.secondary_font_id==font.id %}selected{% endif %}>{{font.name}}</option>{% endfor %}</select>
+            <select name="secondary_font_choice" id="secondary-font">
+              <optgroup label="Standardschriften">{% for key,font in standard_fonts.items() %}<option value="standard:{{key}}" data-family="{{font.family}}" {% if (not config or not config.secondary_font_id) and image.secondary_standard_font==key %}selected{% endif %}>{{font.label}}</option>{% endfor %}</optgroup>
+              {% if fonts %}<optgroup label="Eigene Schriftarten">{% for font in fonts %}<option value="asset:{{font.id}}" data-family="{{font.family}}" data-url="/fonts/{{font.id}}/preview" data-format="{{'truetype' if font.relative_path.lower().endswith('.ttf') else 'woff2'}}" {% if config and config.secondary_font_id==font.id %}selected{% endif %}>{{font.name}}</option>{% endfor %}</optgroup>{% endif %}
+            </select>
             <span class="font-sample" id="secondary-font-sample">Sonntag · 15:00 Uhr · Heimspiel</span>
           </label>
         </div>

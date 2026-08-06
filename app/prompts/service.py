@@ -122,6 +122,57 @@ keinen Spielverlauf, keine Torschützen, Zitate, Zuschauerzahlen oder sonstigen
 Fakten. Gib ausschließlich den direkt kopierbaren Begleittext aus."""
 
 
+def builtin_prompt_catalog() -> dict[str, dict]:
+    """Return controlled built-in templates available to PlatformAdmins.
+
+    The entries contain no tenant data and no rendered runtime prompt.
+    Metadata is reconstructed server-side on save so submitted form values
+    cannot change the identity of a built-in prompt family.
+    """
+    settings = get_settings()
+    labels = {
+        "announcement": "Ankündigung",
+        "reminder": "Erinnerung",
+        "result": "Ergebnis",
+    }
+    items: dict[str, dict] = {}
+    for post_type, post_label in labels.items():
+        text_key = f"text:{post_type}"
+        items[text_key] = {
+            "key": text_key,
+            "name": f"default-text-{post_type}",
+            "label": f"Begleittext · {post_label}",
+            "prompt_kind": "text",
+            "post_type": post_type,
+            "media_kind": "none",
+            "prompt_body": DEFAULT_TEXT_PROMPT,
+            "style_direction": None,
+            "model": settings.openai_model,
+            "quality": "default",
+            "version": 1,
+            "builtin": True,
+            "id": "",
+        }
+        for media_kind, media_label in (("feed", "Feed"), ("story", "Story")):
+            image_key = f"image:{post_type}:{media_kind}"
+            items[image_key] = {
+                "key": image_key,
+                "name": f"default-image-{media_kind}",
+                "label": f"Bild · {post_label} · {media_label}",
+                "prompt_kind": "image",
+                "post_type": post_type,
+                "media_kind": media_kind,
+                "prompt_body": DEFAULT_IMAGE_PROMPT,
+                "style_direction": None,
+                "model": settings.openai_image_model,
+                "quality": settings.openai_image_quality,
+                "version": 2,
+                "builtin": True,
+                "id": "",
+            }
+    return items
+
+
 @dataclass(frozen=True)
 class ResolvedPrompt:
     name: str
@@ -234,7 +285,11 @@ def _place_name(venue: str) -> str:
 def venue_display(facts: dict) -> str:
     _, _, is_home = _own_and_opponent(facts)
     if is_home:
-        return "Habichtswaldstadion Ehlen"
+        configured = str(facts.get("home_venue_display") or "").strip()
+        if configured:
+            return configured
+        venue = str(facts.get("venue") or "").strip()
+        return venue or "Heimspielstätte"
     venue = str(facts.get("venue") or "").strip()
     pitch = str(facts.get("pitch") or "").strip().lower()
     if venue.upper().startswith(("RP ", "KR ")):
@@ -457,14 +512,15 @@ def resolve_prompt(
 
 def sample_facts() -> dict:
     return {
-        "home_team": "SV Ehlen",
-        "away_team": "SG Beispiel",
-        "own_team": "SV Ehlen",
+        "home_team": "SV Beispielstadt",
+        "away_team": "FC Musterhausen",
+        "own_team": "SV Beispielstadt",
         "kickoff": "2026-08-09T13:00:00+00:00",
         "competition": "Kreisliga A",
-        "venue": "Ehlen",
+        "venue": "Sportpark Beispielstadt",
+        "home_venue_display": "Sportpark Beispielstadt",
         "pitch": "Rasenplatz",
         "primary_color": "#172554",
         "secondary_color": "#ffffff",
-        "hashtags": ["#SVEhlen", "#Spieltag"],
+        "hashtags": ["#Beispielstadt", "#Spieltag"],
     }

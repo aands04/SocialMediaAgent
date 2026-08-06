@@ -54,6 +54,13 @@ Aktive Vorlagen werden nicht überschrieben; Änderungen erzeugen neue Versionen
 Fixturetests vergleichen Versionen ohne externe Anbieteraufrufe und belasten
 kein Clubkontingent. Feature Flags besitzen entweder Plattform- oder Clubscope.
 
+Die Promptseite bietet für jede eingebaute Kombination und jede gespeicherte
+Version einen Bearbeitungsweg. Speichern legt stets einen Entwurf an; eine
+gesonderte Aktivierung ist erforderlich. Unter **KI-Generierungen** kann der
+PlatformAdmin die tatsächlich versandten Bild- und Textprompts nach Verein und
+Status filtern. Diese Inhalte sind geschützte Plattformdaten und dürfen nicht
+an Vereinsbenutzer weitergegeben werden.
+
 Verbrauchsdaten können über `/platform/usage.csv` exportiert werden.
 
 ## Speicherabgleich

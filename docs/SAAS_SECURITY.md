@@ -41,6 +41,11 @@ Generierungssnapshots enthalten Referenz-IDs, Versionen und SHA-256. Freitexte
 werden längenbegrenzt, escaped, auf Steueranweisungen geprüft und als Datenblock
 unterhalb unveränderlicher Sicherheitsregeln eingefügt.
 
+Finale Provider-Inputs liegen getrennt in `ai_prompt_dispatches` und werden nur
+über eine ausdrücklich PlatformAdmin-geschützte Route angezeigt. Clubseiten,
+Club-APIs und Club-Exporte fragen diese Tabelle nicht ab. Fehlerprotokolle
+speichern nur bereinigte Fehlerklassen; Prompttexte sind auch dort verboten.
+
 ## Audit
 
 Plattform- und Club-Audit sind logisch getrennt. Promptänderungen protokollieren

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.approvals.service import ApprovalError, approve, edit_text
 from app.auth.service import allowed, hash_password, normalize_email, validate_new_password
 from app.branding.service import (
+    STANDARD_FONTS,
     BrandingValidationError,
     branding_completion,
     branding_form_state,
@@ -77,6 +78,7 @@ from app.models import (
     User,
     UserTeam,
 )
+from app.platform.service import platform_audit
 from app.posts.manual import (
     MAX_MANUAL_IMAGE_BYTES,
     ManualPostError,
@@ -214,7 +216,7 @@ def club_branding(
     examples = dynamic_text_examples(
         club_name=club.name,
         club_short_name=club.short_name,
-        venue=text.get("home_venue"),
+        venue=text.get("home_venue_short") or text.get("home_venue"),
         team_name=selected_team["display_name"] if selected_team else None,
         text=text,
     )
@@ -242,6 +244,7 @@ def club_branding(
         image=image,
         text=text,
         fonts=fonts,
+        standard_fonts=STANDARD_FONTS,
         logos=logos,
         current_logo=current_logo,
         media_assets=media_assets,
@@ -307,6 +310,8 @@ def update_club_branding(
     max_hashtags: int = Form(default=10),
     primary_font_id: str = Form(default=""),
     secondary_font_id: str = Form(default=""),
+    primary_font_choice: str = Form(default=""),
+    secondary_font_choice: str = Form(default=""),
     feed_max_text_amount: str = Form(default="normal"),
     feed_use_player_image: str = Form(default=""),
     feed_show_sponsors: str = Form(default=""),
@@ -345,7 +350,32 @@ def update_club_branding(
         raise HTTPException(404)
     if club.version != club_version:
         raise HTTPException(409, "Der Verein wurde zwischenzeitlich geändert")
-    font_ids = [value for value in (primary_font_id, secondary_font_id) if value]
+    def resolve_font_choice(choice: str, legacy_id: str) -> tuple[str | None, str]:
+        value = (choice or legacy_id or "standard:system").strip()
+        if value.startswith("standard:"):
+            key = value.removeprefix("standard:")
+            if key not in STANDARD_FONTS:
+                raise HTTPException(422, "Unbekannte Standardschrift")
+            return None, key
+        asset_id = value.removeprefix("asset:")
+        if not asset_id:
+            return None, "system"
+        return asset_id, "system"
+
+    resolved_primary_font_id, primary_standard_font = resolve_font_choice(
+        primary_font_choice, primary_font_id
+    )
+    resolved_secondary_font_id, secondary_standard_font = resolve_font_choice(
+        secondary_font_choice, secondary_font_id
+    )
+    if action == "reset":
+        resolved_primary_font_id = resolved_secondary_font_id = None
+        primary_standard_font = secondary_standard_font = "system"
+    font_ids = [
+        value
+        for value in (resolved_primary_font_id, resolved_secondary_font_id)
+        if value
+    ]
     if font_ids:
         valid_fonts = set(
             db.scalars(
@@ -414,6 +444,8 @@ def update_club_branding(
                 "player_background_ratio": player_background_ratio,
                 "dynamics": dynamics,
                 "individualization": individualization,
+                "primary_standard_font": primary_standard_font,
+                "secondary_standard_font": secondary_standard_font,
                 "legacy_values": parse_structured_json(
                     legacy_image_json, "Übernommene Bildwerte"
                 ),
@@ -503,10 +535,13 @@ def update_club_branding(
         db.add(config)
     else:
         config.version += 1
+    if action != "save":
+        image_settings["primary_standard_font"] = primary_standard_font
+        image_settings["secondary_standard_font"] = secondary_standard_font
     config.image_settings = image_settings
     config.text_settings = text_settings
-    config.primary_font_id = primary_font_id or None
-    config.secondary_font_id = secondary_font_id or None
+    config.primary_font_id = resolved_primary_font_id
+    config.secondary_font_id = resolved_secondary_font_id
     config.updated_by = current.id
     selected_logo_id = selected_logo.id if selected_logo else None
     if club.logo_asset_id != selected_logo_id:
@@ -1582,6 +1617,7 @@ def prompts(request: Request, current=Depends(current_user), db: Session = Depen
         ALLOWED_PLACEHOLDERS,
         DEFAULT_IMAGE_PROMPT,
         DEFAULT_TEXT_PROMPT,
+        builtin_prompt_catalog,
     )
 
     require_platform_admin(current)
@@ -1591,6 +1627,18 @@ def prompts(request: Request, current=Depends(current_user), db: Session = Depen
         .order_by(PromptTemplate.name, PromptTemplate.version.desc())
     ).all()
     requested_run = request.query_params.get("test_run")
+    edit_id = request.query_params.get("edit")
+    builtin_key = request.query_params.get("builtin")
+    builtin_prompts = builtin_prompt_catalog()
+    if edit_id and builtin_key:
+        raise HTTPException(422, "Bitte nur eine Prompt-Ausgangsversion auswählen")
+    editing_prompt = db.get(PromptTemplate, edit_id) if edit_id else None
+    if edit_id and editing_prompt is None:
+        raise HTTPException(404, "Promptvorlage nicht gefunden")
+    if builtin_key:
+        editing_prompt = builtin_prompts.get(builtin_key)
+        if editing_prompt is None:
+            raise HTTPException(404, "Eingebaute Promptvorlage nicht gefunden")
     selected_test = db.get(PromptTestRun, requested_run) if requested_run else None
     return render(
         request,
@@ -1608,6 +1656,8 @@ def prompts(request: Request, current=Depends(current_user), db: Session = Depen
             select(PromptTestRun).order_by(PromptTestRun.created_at.desc()).limit(20)
         ).all(),
         selected_test=selected_test,
+        editing_prompt=editing_prompt,
+        builtin_prompts=builtin_prompts.values(),
         title="KI-Promptvorlagen",
     )
 
@@ -1630,6 +1680,7 @@ def preview_prompt(
         DEFAULT_TEXT_PROMPT,
         TEXT_SAFETY_PREFIX,
         PromptValidationError,
+        builtin_prompt_catalog,
         image_safety_prefix,
         prompt_context,
         render_body,
@@ -1686,6 +1737,8 @@ def preview_prompt(
             select(PromptTestRun).order_by(PromptTestRun.created_at.desc()).limit(20)
         ).all(),
         selected_test=None,
+        editing_prompt=None,
+        builtin_prompts=builtin_prompt_catalog().values(),
         title="KI-Promptvorlagen",
     )
 
@@ -1702,13 +1755,40 @@ def create_prompt(
     style_direction: str = Form(default=""),
     model: str = Form(),
     quality: str = Form(default="medium"),
+    base_prompt_id: str = Form(default=""),
+    builtin_prompt_key: str = Form(default=""),
+    change_description: str = Form(default=""),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    from app.prompts.service import PromptValidationError, validate_template
+    from app.prompts.service import (
+        PromptValidationError,
+        builtin_prompt_catalog,
+        validate_template,
+    )
 
     check_csrf(request, csrf_token_value)
     require_platform_admin(current)
+    base_prompt_id = base_prompt_id if isinstance(base_prompt_id, str) else ""
+    builtin_prompt_key = builtin_prompt_key if isinstance(builtin_prompt_key, str) else ""
+    if base_prompt_id and builtin_prompt_key:
+        raise HTTPException(422, "Bitte nur eine Prompt-Ausgangsversion auswählen")
+    base_prompt = db.get(PromptTemplate, base_prompt_id) if base_prompt_id else None
+    if base_prompt_id and base_prompt is None:
+        raise HTTPException(404, "Ausgangsversion nicht gefunden")
+    if base_prompt:
+        name = base_prompt.name
+        prompt_kind = base_prompt.prompt_kind
+        post_type = base_prompt.post_type
+        media_kind = base_prompt.media_kind
+    if builtin_prompt_key:
+        builtin = builtin_prompt_catalog().get(builtin_prompt_key)
+        if builtin is None:
+            raise HTTPException(404, "Eingebaute Promptvorlage nicht gefunden")
+        name = builtin["name"]
+        prompt_kind = builtin["prompt_kind"]
+        post_type = builtin["post_type"]
+        media_kind = builtin["media_kind"]
     name = name.strip()
     if (
         not name
@@ -1752,7 +1832,14 @@ def create_prompt(
         allowed_variables=allowed_variables,
         validation_rules={},
         created_by=current.id,
-        change_description="Neue geschützte Promptversion",
+        change_description=(
+            change_description.strip()
+            or (
+                f"Neue Version auf Basis von v{base_prompt.version}"
+                if base_prompt
+                else "Neue geschützte Promptversion"
+            )
+        ),
         style_direction=style_direction.strip() or None,
         model=model.strip(),
         quality=quality,
@@ -1761,7 +1848,7 @@ def create_prompt(
     )
     db.add(item)
     db.flush()
-    audit(
+    platform_audit(
         db,
         current,
         "prompt.created",
@@ -1770,7 +1857,10 @@ def create_prompt(
         details={"name": name, "version": version, "kind": prompt_kind, "media_kind": media_kind},
     )
     db.commit()
-    return redirect("/prompts", f"Prompt {name} Version {version} gespeichert")
+    return redirect(
+        f"/prompts?edit={item.id}#prompt-editor",
+        f"Prompt {name} Version {version} gespeichert",
+    )
 
 
 @router.get("/rules", response_class=HTMLResponse)

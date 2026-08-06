@@ -8,6 +8,7 @@ from app.config import Settings
 from app.imagegen.service import AIImageRenderer, ImageProvider
 from app.logos.service import store_logo
 from app.models import (
+    ClubBrandingConfiguration,
     Game,
     InstagramPage,
     MediaAsset,
@@ -17,7 +18,7 @@ from app.models import (
     Team,
     User,
 )
-from app.posts.service import create_post
+from app.posts.service import _facts, create_post
 from app.prompts.service import (
     PromptValidationError,
     builtin_prompt,
@@ -37,6 +38,7 @@ def facts(**updates):
         "kickoff": "2026-08-09T13:00:00+00:00",
         "competition": "Kreisliga A",
         "venue": "Sportplatz Ehlen",
+        "home_venue_display": "Habichtswaldstadion",
         "pitch": "Rasenplatz",
         "primary_color": "#172554",
         "secondary_color": "#ffffff",
@@ -47,13 +49,13 @@ def facts(**updates):
 
 def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     context = prompt_context(facts(), "feed")
-    assert context["venue_display"] == "Habichtswaldstadion Ehlen"
+    assert context["venue_display"] == "Habichtswaldstadion"
     assert context["weekday"] == "Sonntag"
     assert context["date_de"] == "09.08.2026"
     assert context["output_width"] == 1080
     prompt = builtin_prompt("image", "announcement", "feed", facts())
     assert "SV Ehlen gegen SG Beispiel" in prompt.rendered
-    assert "Habichtswaldstadion Ehlen" in prompt.rendered
+    assert "Habichtswaldstadion" in prompt.rendered
     assert "Referenzbild 2" in prompt.rendered
     assert "kein drittes Referenzbild" in prompt.rendered
     assert "oben links und oben rechts" not in prompt.rendered
@@ -72,6 +74,74 @@ def test_away_venue_requires_pitch_and_formats_only_place():
     assert venue_display(away | {"venue": "Jahnstraße 10, 34376 Immenhausen"}) == "RP Immenhausen"
     with pytest.raises(PromptValidationError, match="Platzart"):
         venue_display(away | {"pitch": None})
+
+
+def test_post_facts_prefer_configured_home_venue_over_provider_name(db):
+    page = InstagramPage(
+        internal_name="venue-test",
+        display_name="Venue Test",
+        username="venue_test",
+        club="Beispielverein",
+        active=True,
+    )
+    db.add(page)
+    db.flush()
+    team = Team(
+        internal_name="venue-team",
+        display_name="Beispielverein Erste",
+        short_name="Erste",
+        slug="venue-team",
+        club="Beispielverein",
+        fussball_url="https://example.invalid/venue-team",
+        instagram_page_id=page.id,
+        media_subdir="venue-team",
+    )
+    db.add(team)
+    db.flush()
+    game = Game(
+        team_id=team.id,
+        provider="fixture",
+        external_id="configured-home-venue",
+        home_team=team.display_name,
+        away_team="Gastverein",
+        kickoff=datetime.now(timezone.utc) + timedelta(days=2),
+        competition="Bezirksliga",
+        venue="RP Anbieter-Ortsname",
+        pitch="Rasenplatz",
+        source_url="https://example.invalid/game",
+    )
+    db.add_all(
+        [
+            game,
+            ClubBrandingConfiguration(
+                club_id=team.club_id,
+                image_settings={
+                    "primary_standard_font": "dejavu-sans",
+                    "secondary_standard_font": "liberation-serif",
+                },
+                text_settings={
+                    "home_venue": "Sportanlage Beispielstadt",
+                    "home_venue_short": "Beispielstadion",
+                },
+            ),
+        ]
+    )
+    db.commit()
+
+    prepared = _facts(
+        db,
+        game,
+        team,
+        None,
+        "announcement",
+        {"team": {}, "opponent": {"fallback": True}},
+    )
+
+    assert prepared["venue"] == "RP Anbieter-Ortsname"
+    assert prepared["home_venue_display"] == "Beispielstadion"
+    assert venue_display(prepared) == "Beispielstadion"
+    assert "DejaVu Sans" in prepared["primary_font_family"]
+    assert "Liberation Serif" in prepared["secondary_font_family"]
 
 
 def test_prompt_rejects_unknown_placeholders_and_resolves_latest_version(db):
@@ -107,7 +177,7 @@ def test_prompt_rejects_unknown_placeholders_and_resolves_latest_version(db):
     )
     assert resolved.version == 2
     assert resolved.quality == "high"
-    assert "Version zwei: Habichtswaldstadion Ehlen" in resolved.rendered
+    assert "Version zwei: Habichtswaldstadion" in resolved.rendered
 
 
 class FakeImageProvider(ImageProvider):

@@ -17,6 +17,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.limits.service import effective_limits
 from app.models import (
+    AiPromptDispatch,
     AuditLog,
     Club,
     ClubAdditionalAllowance,
@@ -124,6 +125,12 @@ def dashboard(
         )
         or 0
     )
+    prompt_template_count = int(
+        db.scalar(select(func.count()).select_from(PromptTemplate)) or 0
+    )
+    prompt_dispatch_count = int(
+        db.scalar(select(func.count()).select_from(AiPromptDispatch)) or 0
+    )
     near_limit_clubs: set[str] = set()
     over_limit_clubs: set[str] = set()
     clubs_list = list(db.scalars(select(Club).order_by(Club.name)))
@@ -185,6 +192,8 @@ def dashboard(
         storage_bytes=storage_bytes,
         usage=usage,
         failed_jobs=failed_jobs,
+        prompt_template_count=prompt_template_count,
+        prompt_dispatch_count=prompt_dispatch_count,
         clubs=clubs_list,
         club_names={club.id: club.name for club in clubs_list},
         near_limit_count=len(near_limit_clubs),
@@ -195,6 +204,71 @@ def dashboard(
             select(FeatureFlag).order_by(FeatureFlag.key, FeatureFlag.club_id)
         ).all(),
         title="Plattformübersicht",
+    )
+
+
+@router.get("/ai-generations", response_class=HTMLResponse)
+def ai_generation_prompts(
+    request: Request,
+    club_id: str = "",
+    prompt_kind: str = "",
+    status: str = "",
+    limit: int = 100,
+    page: int = 1,
+    current: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Inspect exact AI-provider inputs in the protected platform scope."""
+    require_platform_admin(current)
+    if prompt_kind not in {"", "text", "image"}:
+        raise HTTPException(422, "Unbekannte Prompt-Art")
+    if status not in {"", "dispatched", "completed", "failed"}:
+        raise HTTPException(422, "Unbekannter Versandstatus")
+    if club_id and db.get(Club, club_id) is None:
+        raise HTTPException(404, "Verein nicht gefunden")
+    limit = max(1, min(250, limit))
+    page = max(1, page)
+    conditions = []
+    if club_id:
+        conditions.append(AiPromptDispatch.club_id == club_id)
+    if prompt_kind:
+        conditions.append(AiPromptDispatch.prompt_kind == prompt_kind)
+    if status:
+        conditions.append(AiPromptDispatch.status == status)
+    total = int(
+        db.scalar(
+            select(func.count()).select_from(AiPromptDispatch).where(*conditions)
+        )
+        or 0
+    )
+    total_pages = max(1, (total + limit - 1) // limit)
+    page = min(page, total_pages)
+    statement = select(AiPromptDispatch).where(*conditions)
+    items = list(
+        db.scalars(
+            statement.order_by(AiPromptDispatch.dispatched_at.desc())
+            .offset((page - 1) * limit)
+            .limit(limit)
+        )
+    )
+    clubs = list(db.scalars(select(Club).order_by(Club.name)))
+    return render(
+        request,
+        "platform_ai_generations.html",
+        current,
+        items=items,
+        clubs=clubs,
+        club_names={club.id: club.name for club in clubs},
+        teams={team.id: team for team in db.scalars(select(Team))},
+        games={game.id: game for game in db.scalars(select(Game))},
+        selected_club_id=club_id,
+        selected_prompt_kind=prompt_kind,
+        selected_status=status,
+        selected_limit=limit,
+        selected_page=page,
+        total_items=total,
+        total_pages=total_pages,
+        title="KI-Generierungen und versandte Prompts",
     )
 
 

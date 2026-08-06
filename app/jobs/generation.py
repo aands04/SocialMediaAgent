@@ -19,6 +19,7 @@ from app.logos.service import (
 )
 from app.models import (
     AccountType,
+    AiPromptDispatch,
     AuditLog,
     Club,
     ClubStatus,
@@ -111,6 +112,64 @@ def _automatically_approve_created_outputs(
     return approved
 
 
+def _record_prompt_dispatch(
+    db: Session,
+    job: GenerationJob,
+    *,
+    prompt_kind: str,
+    media_kind: str,
+    rendered_prompt: str,
+    model: str,
+    call_index: int,
+    prompt=None,
+) -> AiPromptDispatch:
+    """Persist the exact provider input outside tenant-visible post data."""
+    if not rendered_prompt.strip():
+        raise RuntimeError("Der an den KI-Anbieter zu sendende Prompt ist leer")
+    attempt_number = max(1, int(job.attempts or 1))
+    idempotency_key = (
+        f"generation:{job.id}:attempt:{attempt_number}:"
+        f"{prompt_kind}:{media_kind}:{call_index}"
+    )
+    checksum = hashlib.sha256(rendered_prompt.encode("utf-8")).hexdigest()
+    existing = db.scalar(
+        select(AiPromptDispatch).where(
+            AiPromptDispatch.club_id == job.club_id,
+            AiPromptDispatch.idempotency_key == idempotency_key
+        )
+    )
+    if existing:
+        if existing.prompt_checksum != checksum:
+            raise RuntimeError(
+                "Prompt eines bereits protokollierten KI-Aufrufs hat sich widersprüchlich geändert"
+            )
+        return existing
+    item = AiPromptDispatch(
+        club_id=job.club_id,
+        generation_job_id=job.id,
+        post_id=job.post_id,
+        team_id=job.team_id,
+        game_id=job.game_id,
+        prompt_kind=prompt_kind,
+        post_type=job.post_type,
+        media_kind=media_kind,
+        provider="openai",
+        model=model,
+        prompt_template_id=getattr(prompt, "template_id", None),
+        prompt_name=getattr(prompt, "name", None),
+        prompt_version=getattr(prompt, "version", None),
+        prompt_checksum=checksum,
+        rendered_prompt=rendered_prompt,
+        attempt_number=attempt_number,
+        call_index=call_index,
+        status="dispatched",
+        idempotency_key=idempotency_key,
+    )
+    db.add(item)
+    db.flush()
+    return item
+
+
 class _ProgressTextGenerator:
     def __init__(self, inner, db: Session, job: GenerationJob):
         self.inner = inner
@@ -119,9 +178,14 @@ class _ProgressTextGenerator:
         self.is_ai = getattr(inner, "is_ai", False)
         self._calls = 0
 
-    def _before_provider(self) -> UsageLedgerEntry | None:
+    def _before_provider(
+        self,
+        rendered_prompt: str,
+        model: str,
+        prompt=None,
+    ) -> tuple[UsageLedgerEntry | None, AiPromptDispatch | None]:
         if not self.is_ai:
-            return None
+            return None, None
         self._calls += 1
         entry = reserve_usage(
             self.db,
@@ -130,37 +194,82 @@ class _ProgressTextGenerator:
             quantity=1,
             idempotency_key=f"generation:{self.job.id}:text:{self._calls}",
             provider="openai",
-            model=str(getattr(self.inner, "model", "unknown")),
+            model=model,
             user_id=self.job.requested_by,
             generation_job_id=self.job.id,
             post_id=self.job.post_id,
         )
+        dispatch = _record_prompt_dispatch(
+            self.db,
+            self.job,
+            prompt_kind="text",
+            media_kind="none",
+            rendered_prompt=rendered_prompt,
+            model=model,
+            call_index=self._calls,
+            prompt=prompt,
+        )
         if entry.status == UsageStatus.RESERVED:
             entry.status = UsageStatus.PROVIDER_PROCESSING
-            self.db.commit()
-        return entry
+        self.db.commit()
+        return entry, dispatch
 
-    def _after_provider(self, entry: UsageLedgerEntry | None) -> None:
+    def _after_provider(
+        self,
+        entry: UsageLedgerEntry | None,
+        dispatch: AiPromptDispatch | None,
+    ) -> None:
         if entry and entry.status in {
             UsageStatus.RESERVED,
             UsageStatus.PROVIDER_PROCESSING,
         }:
             complete_usage(self.db, entry, actual_quantity=1, post_id=self.job.post_id)
+        if dispatch:
+            dispatch.status = "completed"
+            dispatch.completed_at = _now()
+        self.db.commit()
+
+    def _failed_provider(self, dispatch: AiPromptDispatch | None, exc: Exception) -> None:
+        if dispatch:
+            dispatch.status = "failed"
+            dispatch.error_summary = type(exc).__name__
+            dispatch.completed_at = _now()
             self.db.commit()
 
     def generate(self, facts):
         _phase(self.db, self.job, "generating_text", 10)
-        usage = self._before_provider()
-        result = self.inner.generate(facts)
-        self._after_provider(usage)
+        if not self.is_ai:
+            result = self.inner.generate(facts)
+            _check_cancel(self.db, self.job)
+            return result
+        prepared = self.inner.prepare_generate(facts)
+        rendered, _version, model = prepared
+        usage, dispatch = self._before_provider(rendered, model, facts.get("text_prompt"))
+        try:
+            result = self.inner.generate(facts)
+        except Exception as exc:
+            self._failed_provider(dispatch, exc)
+            raise
+        self._after_provider(usage, dispatch)
         _check_cancel(self.db, self.job)
         return result
 
     def revise(self, facts, current_text, instruction):
         _phase(self.db, self.job, "generating_text", 10)
-        usage = self._before_provider()
-        result = self.inner.revise(facts, current_text, instruction)
-        self._after_provider(usage)
+        if not self.is_ai:
+            result = self.inner.revise(facts, current_text, instruction)
+            _check_cancel(self.db, self.job)
+            return result
+        rendered, _version, model = self.inner.prepare_revision(
+            facts, current_text, instruction
+        )
+        usage, dispatch = self._before_provider(rendered, model)
+        try:
+            result = self.inner.revise(facts, current_text, instruction)
+        except Exception as exc:
+            self._failed_provider(dispatch, exc)
+            raise
+        self._after_provider(usage, dispatch)
         _check_cancel(self.db, self.job)
         return result
 
@@ -173,9 +282,11 @@ class _ProgressRenderer:
         self.is_ai = getattr(inner, "is_ai", False)
         self._calls = 0
 
-    def _before_provider(self, context: dict) -> UsageLedgerEntry | None:
+    def _before_provider(
+        self, kind: str, context: dict
+    ) -> tuple[UsageLedgerEntry | None, AiPromptDispatch | None]:
         if not self.is_ai:
-            return None
+            return None, None
         self._calls += 1
         prompt = context.get("image_prompt")
         model = str(getattr(prompt, "model", None) or "unknown")
@@ -193,10 +304,25 @@ class _ProgressRenderer:
             post_id=self.job.post_id,
             prompt_version=prompt_version,
         )
+        rendered_prompt = str(getattr(prompt, "rendered", ""))
+        dispatch = (
+            _record_prompt_dispatch(
+                self.db,
+                self.job,
+                prompt_kind="image",
+                media_kind=kind,
+                rendered_prompt=rendered_prompt,
+                model=model,
+                call_index=self._calls,
+                prompt=prompt,
+            )
+            if rendered_prompt
+            else None
+        )
         if entry.status == UsageStatus.RESERVED:
             entry.status = UsageStatus.PROVIDER_PROCESSING
-            self.db.commit()
-        return entry
+        self.db.commit()
+        return entry, dispatch
 
     def render(self, kind, relative_path, context):
         phase = "generating_feed" if kind == "feed" else "generating_story"
@@ -224,14 +350,25 @@ class _ProgressRenderer:
                 completed,
             ),
         }
-        usage = self._before_provider(context)
-        path = self.inner.render(kind, relative_path, render_context)
+        usage, dispatch = self._before_provider(kind, context)
+        try:
+            path = self.inner.render(kind, relative_path, render_context)
+        except Exception as exc:
+            if dispatch:
+                dispatch.status = "failed"
+                dispatch.error_summary = type(exc).__name__
+                dispatch.completed_at = _now()
+                self.db.commit()
+            raise
         if usage and usage.status in {
             UsageStatus.RESERVED,
             UsageStatus.PROVIDER_PROCESSING,
         }:
             complete_usage(self.db, usage, actual_quantity=1, post_id=self.job.post_id)
-            self.db.commit()
+        if dispatch:
+            dispatch.status = "completed"
+            dispatch.completed_at = _now()
+        self.db.commit()
         _check_cancel(self.db, self.job)
         completed += 1
         progress = 20 + int(65 * completed / max(1, self.job.planned_outputs))
@@ -738,6 +875,10 @@ def _finalize_job_usage(db: Session, job: GenerationJob, post_id: str | None) ->
             select(UsageLedgerEntry).where(UsageLedgerEntry.generation_job_id == job.id)
         )
     )
+    for dispatch in db.scalars(
+        select(AiPromptDispatch).where(AiPromptDispatch.generation_job_id == job.id)
+    ):
+        dispatch.post_id = post_id or dispatch.post_id
     for entry in entries:
         if entry.status in {
             UsageStatus.COMPLETED_BILLABLE,

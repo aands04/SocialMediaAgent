@@ -4,20 +4,35 @@
 <div class="warning">Prompt-Vorschauen rufen keine KI auf. KI-Grafiken und KI-Texte werden erst bei der Beitragserstellung erzeugt und müssen vor jeder Veröffentlichung manuell geprüft und freigegeben werden.</div>
 
 <section>
-  <h2>Neue versionierte Promptvorlage</h2>
+  <h2>Eingebaute Standardvorlagen</h2>
+  <p>Wähle die konkrete Kombination aus Inhalt und Format. Beim Bearbeiten bleibt die eingebaute Vorlage unverändert; es entsteht eine neue, zunächst inaktive Entwurfsversion.</p>
+  <div class="prompt-catalog">
+    {% for item in builtin_prompts %}
+    <article><strong>{{item.label}}</strong><small>{{item.name}} · eingebaute Version {{item.version}}</small><a class="button" href="/prompts?builtin={{item.key}}#prompt-editor">Anzeigen / als neue Version bearbeiten</a></article>
+    {% endfor %}
+  </div>
+</section>
+
+<section id="prompt-editor">
+  <h2>{% if editing_prompt %}„{{editing_prompt.name}}“ als neue Version bearbeiten{% else %}Neue versionierte Promptvorlage{% endif %}</h2>
+  {% if editing_prompt %}<div class="notice">{% if editing_prompt.builtin %}Die eingebaute Version {{editing_prompt.version}} bleibt unverändert. Beim Speichern entsteht eine neue Entwurfsversion, die erst nach bewusster Aktivierung verwendet wird.{% else %}Die historische Version {{editing_prompt.version}} bleibt unverändert. Beim Speichern entsteht automatisch die nächste Entwurfsversion.{% endif %}</div>{% endif %}
   <form method="post" action="/prompts" class="gridform">
     <input type="hidden" name="csrf_token" value="{{csrf}}">
-    <label>Name<input name="name" placeholder="z. B. sve-emotional-feed" required></label>
-    <label>Art<select name="prompt_kind"><option value="image">Bild</option><option value="text">Begleittext</option></select></label>
-    <label>Beitragstyp<select name="post_type"><option value="announcement">Ankündigung</option><option value="reminder">Erinnerung</option><option value="result">Ergebnis</option></select></label>
-    <label>Format<select name="media_kind"><option value="feed">Feed</option><option value="story">Story</option><option value="none">Kein Bildformat (Text)</option></select></label>
-    <label>Modell<input name="model" value="gpt-image-2" required></label>
-    <label>Qualität<select name="quality"><option value="medium">medium</option><option value="high">high</option><option value="low">low</option><option value="auto">auto</option><option value="default">default (Text)</option></select></label>
-    <label>Stilrichtung<textarea name="style_direction" rows="3" placeholder="Optional; überschreibt für diesen Prompt den Mannschaftsstil"></textarea></label>
+    <input type="hidden" name="base_prompt_id" value="{{editing_prompt.id if editing_prompt and not editing_prompt.builtin else ''}}">
+    <input type="hidden" name="builtin_prompt_key" value="{{editing_prompt.key if editing_prompt and editing_prompt.builtin else ''}}">
+    <label>Name<input name="name" value="{{editing_prompt.name if editing_prompt else ''}}" placeholder="z. B. emotionaler-spieltag" {% if editing_prompt %}readonly{% endif %} required></label>
+    <label>Art<select name="prompt_kind" {% if editing_prompt %}disabled{% endif %}><option value="image" {% if not editing_prompt or editing_prompt.prompt_kind=='image' %}selected{% endif %}>Bild</option><option value="text" {% if editing_prompt and editing_prompt.prompt_kind=='text' %}selected{% endif %}>Begleittext</option></select>{% if editing_prompt %}<input type="hidden" name="prompt_kind" value="{{editing_prompt.prompt_kind}}">{% endif %}</label>
+    <label>Beitragstyp<select name="post_type" {% if editing_prompt %}disabled{% endif %}><option value="announcement" {% if not editing_prompt or editing_prompt.post_type=='announcement' %}selected{% endif %}>Ankündigung</option><option value="reminder" {% if editing_prompt and editing_prompt.post_type=='reminder' %}selected{% endif %}>Erinnerung</option><option value="result" {% if editing_prompt and editing_prompt.post_type=='result' %}selected{% endif %}>Ergebnis</option></select>{% if editing_prompt %}<input type="hidden" name="post_type" value="{{editing_prompt.post_type}}">{% endif %}</label>
+    <label>Format<select name="media_kind" {% if editing_prompt %}disabled{% endif %}><option value="feed" {% if not editing_prompt or editing_prompt.media_kind=='feed' %}selected{% endif %}>Feed</option><option value="story" {% if editing_prompt and editing_prompt.media_kind=='story' %}selected{% endif %}>Story</option><option value="none" {% if editing_prompt and editing_prompt.media_kind=='none' %}selected{% endif %}>Kein Bildformat (Text)</option></select>{% if editing_prompt %}<input type="hidden" name="media_kind" value="{{editing_prompt.media_kind}}">{% endif %}</label>
+    <label>Modell<input name="model" value="{{editing_prompt.model if editing_prompt else 'gpt-image-2'}}" required></label>
+    <label>Qualität<select name="quality">{% for value,label in [('medium','medium'),('high','high'),('low','low'),('auto','auto'),('default','default (Text)')] %}<option value="{{value}}" {% if (editing_prompt and editing_prompt.quality==value) or (not editing_prompt and value=='medium') %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
+    <label>Stilrichtung<textarea name="style_direction" rows="3" placeholder="Optional; ergänzt die Gestaltung dieses Prompts">{{(editing_prompt.style_direction or '') if editing_prompt else ''}}</textarea></label>
+    <label>Änderungsbeschreibung<input name="change_description" placeholder="Was wurde in dieser Version geändert?" required></label>
     <label style="grid-column:1/-1">Prompt
-      <textarea name="prompt_body" rows="24" required>{{default_image}}</textarea>
+      <textarea name="prompt_body" rows="24" required>{{editing_prompt.prompt_body if editing_prompt else default_image}}</textarea>
     </label>
-    <button>Als neue Version speichern</button>
+    <button>{% if editing_prompt %}Neue Entwurfsversion speichern{% else %}Als neue Version speichern{% endif %}</button>
+    {% if editing_prompt %}<a class="button secondary" href="/prompts#prompt-editor">Bearbeitung schließen</a>{% endif %}
   </form>
 </section>
 
@@ -69,9 +84,9 @@
 <section>
   <h2>Gespeicherte Versionen</h2>
   <table>
-    <tr><th>Name</th><th>Art</th><th>Typ</th><th>Format</th><th>Version</th><th>Modell</th><th>Qualität</th></tr>
+    <tr><th>Name</th><th>Art</th><th>Typ</th><th>Format</th><th>Version</th><th>Modell / Status</th><th>Aktionen</th></tr>
     {% for item in items %}
-    <tr><td>{{item.name}}</td><td>{{item.prompt_kind}}</td><td>{{item.post_type}}</td><td>{{item.media_kind}}</td><td>{{item.version}}</td><td>{{item.status.value}} · {{item.model}} · {{item.quality}}</td><td><code>{{item.checksum[:12]}}</code><br>{% if item.status.value != 'active' %}<form method="post" action="/platform/prompts/{{item.id}}/activate" style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Aktivieren</button></form>{% endif %}{% if item.status.value != 'archived' %}<form method="post" action="/platform/prompts/{{item.id}}/archive" style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Archivieren</button></form>{% endif %}</td></tr>
+    <tr><td><strong>{{item.name}}</strong><br><details><summary>Promptinhalt anzeigen</summary><pre class="protected-prompt">{{item.prompt_body}}</pre></details></td><td>{{'Bild' if item.prompt_kind=='image' else 'Begleittext'}}</td><td>{{{'announcement':'Ankündigung','reminder':'Erinnerung','result':'Ergebnis'}.get(item.post_type,item.post_type)}}</td><td>{{item.media_kind}}</td><td>v{{item.version}}<br><code>{{item.checksum[:12]}}</code></td><td>{{item.model}} · {{item.quality}}<br>{{item.status.value}}</td><td><a class="button" href="/prompts?edit={{item.id}}#prompt-editor">Anzeigen / bearbeiten</a><br>{% if item.status.value != 'active' %}<form method="post" action="/platform/prompts/{{item.id}}/activate" style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Aktivieren</button></form>{% endif %}{% if item.status.value != 'archived' %}<form method="post" action="/platform/prompts/{{item.id}}/archive" style="display:inline"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Archivieren</button></form>{% endif %}</td></tr>
     {% else %}<tr><td colspan="7">Noch keine eigenen Promptversionen gespeichert. Die eingebauten Standardvorlagen sind sofort verfügbar.</td></tr>{% endfor %}
   </table>
 </section>

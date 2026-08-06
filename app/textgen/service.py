@@ -37,8 +37,9 @@ class FixtureTextGenerator(TextGenerator):
             result = f"Endstand: {data['home_team']} {data['score']} {data['away_team']}."
         else:
             result = f"{data['home_team']} trifft {when} auf {data['away_team']}."
-        if data.get("venue"):
-            result += f" Spielort: {data['venue']}."
+        venue = data.get("venue_display") or data.get("home_venue_display") or data.get("venue")
+        if venue:
+            result += f" Spielort: {venue}."
         return GeneratedText(result + " " + " ".join(data.get("hashtags", [])), "fixture")
 
     def revise(self, data: dict, current_text: str, instruction: str) -> GeneratedText:
@@ -56,7 +57,7 @@ class OpenAITextGenerator(TextGenerator):
         self.client = OpenAI(api_key=key)
         self.model = model
 
-    def generate(self, data: dict) -> GeneratedText:
+    def prepare_generate(self, data: dict) -> tuple[str, str, str]:
         prompt = data.get("text_prompt")
         if hasattr(prompt, "rendered"):
             rendered = prompt.rendered
@@ -69,6 +70,10 @@ class OpenAITextGenerator(TextGenerator):
             )
             version = "de-facts-v1"
             model = self.model
+        return rendered, version, model
+
+    def generate(self, data: dict) -> GeneratedText:
+        rendered, version, model = self.prepare_generate(data)
         response = self.client.responses.create(model=model, input=rendered)
         return GeneratedText(
             response.output_text,
@@ -78,7 +83,9 @@ class OpenAITextGenerator(TextGenerator):
             rendered_prompt=rendered,
         )
 
-    def revise(self, data: dict, current_text: str, instruction: str) -> GeneratedText:
+    def prepare_revision(
+        self, data: dict, current_text: str, instruction: str
+    ) -> tuple[str, str, str]:
         allowed_facts = {
             key: data.get(key)
             for key in (
@@ -87,6 +94,8 @@ class OpenAITextGenerator(TextGenerator):
                 "own_team",
                 "kickoff",
                 "venue",
+                "venue_display",
+                "home_venue_display",
                 "pitch",
                 "competition",
                 "post_type",
@@ -108,11 +117,15 @@ class OpenAITextGenerator(TextGenerator):
             f"VORHANDENER TEXT:\n{current_text}\n\n"
             f"ÄNDERUNGSAUFTRAG:\n{instruction.strip()}"
         )
-        response = self.client.responses.create(model=self.model, input=rendered)
+        return rendered, "ai-revision-v1", self.model
+
+    def revise(self, data: dict, current_text: str, instruction: str) -> GeneratedText:
+        rendered, version, model = self.prepare_revision(data, current_text, instruction)
+        response = self.client.responses.create(model=model, input=rendered)
         return GeneratedText(
             response.output_text,
-            self.model,
-            prompt_version="ai-revision-v1",
+            model,
+            prompt_version=version,
             tokens=getattr(getattr(response, "usage", None), "total_tokens", None),
             rendered_prompt=rendered,
         )

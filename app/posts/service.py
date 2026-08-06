@@ -8,10 +8,12 @@ from PIL import Image
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.branding.service import STANDARD_FONTS, branding_form_state
 from app.config import get_settings
 from app.games.identity import resolve_team_side, team_aliases
 from app.logos.service import LogoCompositor, LogoValidationError, frozen_logo_set
 from app.models import (
+    ClubBrandingConfiguration,
     DesignTemplate,
     FontAsset,
     Game,
@@ -354,6 +356,23 @@ def _facts(
     opponent_logo = logos.get("opponent") or {}
     aliases = team_aliases(team)
     side = resolve_team_side(game.home_team, game.away_team, aliases)
+    branding = db.get(ClubBrandingConfiguration, team.club_id)
+    image_settings, text_settings = branding_form_state(
+        (branding.image_settings if branding else {}) or {},
+        (branding.text_settings if branding else {}) or {},
+    )
+    home_venue_display = (
+        str(text_settings.get("home_venue_short") or "").strip()
+        or str(text_settings.get("home_venue") or "").strip()
+    )
+    primary_standard_key = str(image_settings.get("primary_standard_font") or "system")
+    secondary_standard_key = str(image_settings.get("secondary_standard_font") or "system")
+    primary_family = STANDARD_FONTS.get(primary_standard_key, STANDARD_FONTS["system"])[
+        "family"
+    ]
+    secondary_family = STANDARD_FONTS.get(
+        secondary_standard_key, STANDARD_FONTS["system"]
+    )["family"]
     facts = {
         "club_id": team.club_id,
         "home_team": game.home_team,
@@ -362,6 +381,7 @@ def _facts(
         "own_team_aliases": list(aliases),
         "kickoff": kickoff.isoformat(),
         "venue": game.venue,
+        "home_venue_display": home_venue_display if side == "home" else "",
         "pitch": game.pitch,
         "competition": game.competition,
         "post_type": post_type,
@@ -379,6 +399,8 @@ def _facts(
         "logos": logos,
         "primary_font_asset": primary_font,
         "secondary_font_asset": secondary_font,
+        "primary_font_family": primary_family,
+        "secondary_font_family": secondary_family,
     }
     if post_type == "result" and game.result_confirmed:
         facts["score"] = f"{game.home_score}:{game.away_score}"
@@ -456,8 +478,10 @@ def create_post(
             "logos": logos,
             "media": {},
             "fonts": {
-                "primary": primary_font or {"family": team.primary_font, "fallback": True},
-                "secondary": secondary_font or {"family": team.secondary_font, "fallback": True},
+                "primary": primary_font
+                or {"family": facts["primary_font_family"], "fallback": True},
+                "secondary": secondary_font
+                or {"family": facts["secondary_font_family"], "fallback": True},
             },
             "colors": team.colors,
         },
@@ -816,9 +840,9 @@ def rerender_post(
         else None,
         "fonts": {
             "primary": facts["primary_font_asset"]
-            or {"family": team.primary_font, "fallback": True},
+            or {"family": facts["primary_font_family"], "fallback": True},
             "secondary": facts["secondary_font_asset"]
-            or {"family": team.secondary_font, "fallback": True},
+            or {"family": facts["secondary_font_family"], "fallback": True},
         },
         "colors": team.colors,
     }
