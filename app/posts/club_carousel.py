@@ -46,7 +46,12 @@ class ClubCarouselState:
     waiting_for: tuple[str, ...] = ()
 
 
-def matchday_bundle_posts(db: Session, post: Post) -> list[Post]:
+def matchday_bundle_posts(
+    db: Session,
+    post: Post,
+    *,
+    allow_incomplete: bool = False,
+) -> list[Post]:
     """Return a verified, ordered bundle without crossing the tenant boundary.
 
     Publication jobs deliberately keep their original ``post_id`` so edits,
@@ -72,11 +77,13 @@ def matchday_bundle_posts(db: Session, post: Post) -> list[Post]:
             )
         )
     }
-    if len(members) != len(member_ids):
+    if len(members) != len(member_ids) and not allow_incomplete:
         raise ClubCarouselConflict(
             "Mindestens ein Teilbeitrag des gemeinsamen Spieltags fehlt oder gehört zu einem anderen Verein"
         )
-    ordered = [members[item_id] for item_id in member_ids]
+    ordered = [members[item_id] for item_id in member_ids if item_id in members]
+    if not ordered or post.id not in members:
+        raise ClubCarouselConflict("Der gewählte Teilbeitrag ist nicht mehr verfügbar")
     for member in ordered:
         member_bundle = (member.design_snapshot or {}).get("club_matchday_carousel") or {}
         if (
@@ -90,7 +97,10 @@ def matchday_bundle_posts(db: Session, post: Post) -> list[Post]:
 
 
 def matchday_bundle_jobs(
-    db: Session, post: Post
+    db: Session,
+    post: Post,
+    *,
+    allow_incomplete: bool = False,
 ) -> tuple[Post, list[Post], list[PublicationJob], dict[str, Post]]:
     """Build the dashboard view for a complete matchday contribution.
 
@@ -98,7 +108,7 @@ def matchday_bundle_jobs(
     per-game story publication. Cancelled member feed jobs are intentionally
     excluded because their images already live in the carousel.
     """
-    members = matchday_bundle_posts(db, post)
+    members = matchday_bundle_posts(db, post, allow_incomplete=allow_incomplete)
     if len(members) == 1:
         jobs = list(
             db.scalars(
@@ -111,7 +121,7 @@ def matchday_bundle_jobs(
 
     bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
     primary_id = str(bundle["primary_post_id"])
-    primary = next(item for item in members if item.id == primary_id)
+    primary = next((item for item in members if item.id == primary_id), post)
     member_ids = [item.id for item in members]
     jobs = list(
         db.scalars(

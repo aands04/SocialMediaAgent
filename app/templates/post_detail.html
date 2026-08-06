@@ -9,6 +9,14 @@
   {{jobs|selectattr('kind','equalto','story')|list|length}} Storys werden hier gemeinsam angezeigt und freigegeben.
   Die Storys bleiben intern ihrem jeweiligen Spiel und ihrer Mannschaft zugeordnet.
 </div>
+{% if bundle_error %}
+<div class="alert">
+  <strong>Unvollständiger gemeinsamer Spieltagsbeitrag:</strong> {{bundle_error}}.
+  Die noch vorhandenen Teilbeiträge werden hier zusammengefasst. Eine Freigabe oder Neugenerierung
+  bleibt gesperrt; über „Gemeinsamen Beitrag löschen“ kann der beschädigte Rest kontrolliert entfernt
+  und anschließend neu erzeugt werden.
+</div>
+{% endif %}
 {% endif %}
 {% set is_manual=item.design_snapshot.get('source') == 'manual_upload' %}
 {% if item.critical_warnings %}<div class="alert"><strong>Kritische Hinweise:</strong> {{item.critical_warnings|join('; ')}}</div>{% endif %}
@@ -90,7 +98,7 @@
   {% else %}
   {% set source_post=job_posts.get(x.id,item) %}
   {% set source_team=job_teams.get(x.id) %}
-  <figure><figcaption>{{x.kind|upper}}{% if source_team %} · {{source_team.display_name}}{% endif %} · {{x.scheduled_at|berlin}}</figcaption><img src="/posts/{{source_post.id}}/media/{{x.id}}" alt="Vorschau {{x.kind}}{% if source_team %} {{source_team.display_name}}{% endif %}"><div class="media-check">{{checks[x.id]}}</div>{% if source_post.id != item.id %}<p><a href="/posts/{{source_post.id}}">Teilbeitrag einzeln bearbeiten</a></p>{% endif %}</figure>
+  <figure><figcaption>{{x.kind|upper}}{% if source_team %} · {{source_team.display_name}}{% endif %} · {{x.scheduled_at|berlin}}</figcaption><img src="/posts/{{source_post.id}}/media/{{x.id}}" alt="Vorschau {{x.kind}}{% if source_team %} {{source_team.display_name}}{% endif %}"><div class="media-check">{{checks[x.id]}}</div></figure>
   {% endif %}
   {% endfor %}
 </div>
@@ -236,21 +244,19 @@
 {% if not aggregate_bundle %}<form method="post" action="/posts/{{item.id}}/reject">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><label>Ablehnungsgrund (optional)<input name="reason"></label><button class="danger">Ablehnen</button>
 </form>{% endif %}
-{% if item.status.value not in ['published','partially_published'] %}
-{% if aggregate_bundle %}
-<div class="notice">Ein gemeinsamer Spieltagsbeitrag kann nicht teilweise gelöscht werden. Die einzelnen Spiele und ihre Medien bleiben aus Sicherheitsgründen getrennt gespeichert.</div>
 {% else %}
-<form method="post" action="/posts/{{item.id}}/delete" onsubmit="return confirm('Diesen unveröffentlichten Beitrag und seine Aufträge wirklich dauerhaft löschen?');">
+<div class="notice">Dieser Beitrag wartet auf die Freigabe durch einen Redakteur oder Administrator.</div>
+{% endif %}
+{% if can_delete %}
+{% if item.status.value not in ['published','partially_published'] %}
+<form method="post" action="/posts/{{item.id}}/delete" onsubmit="return confirm('{% if aggregate_bundle %}Den gesamten unveröffentlichten gemeinsamen Spieltagsbeitrag einschließlich aller Teilbeiträge und Aufträge wirklich dauerhaft löschen?{% else %}Diesen unveröffentlichten Beitrag und seine Aufträge wirklich dauerhaft löschen?{% endif %}');">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
   <input type="hidden" name="confirmation" value="BEITRAG LÖSCHEN">
-  <button class="danger">Beitrag löschen</button>
-  <small>Nur vollständig unveröffentlichte Beiträge können gelöscht werden. Vor dem Löschen folgt eine Sicherheitsabfrage.</small>
+  <button class="danger">{% if aggregate_bundle %}Gemeinsamen Beitrag löschen{% else %}Beitrag löschen{% endif %}</button>
+  <small>{% if aggregate_bundle %}Alle noch vorhandenen, unveröffentlichten Teilbeiträge sowie ihre Feed- und Story-Aufträge werden gemeinsam gelöscht.{% else %}Nur vollständig unveröffentlichte Beiträge können gelöscht werden.{% endif %} Vor dem Löschen folgt eine Sicherheitsabfrage.</small>
 </form>
-{% endif %}
 {% else %}
 <div class="warning">Dieser Beitrag wurde bereits ganz oder teilweise veröffentlicht und kann deshalb nicht gelöscht werden.</div>
 {% endif %}
-{% else %}
-<div class="notice">Dieser Beitrag wartet auf die Freigabe durch einen Redakteur oder Administrator.</div>
 {% endif %}
 {% endblock %}
