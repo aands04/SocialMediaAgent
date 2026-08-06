@@ -14,6 +14,20 @@ from sqlalchemy.orm import Session
 
 from app.approvals.service import ApprovalError, approve, edit_text
 from app.auth.service import allowed, hash_password, normalize_email, validate_new_password
+from app.branding.service import (
+    BrandingValidationError,
+    branding_completion,
+    branding_form_state,
+    default_branding_settings,
+    dynamic_text_examples,
+    normalize_colors,
+    normalize_hashtags,
+    normalize_mentions,
+    normalize_string_list,
+    parse_structured_json,
+    recommended_branding_settings,
+    validate_branding_settings,
+)
 from app.config import get_settings
 from app.db import get_db
 from app.games.identity import team_name_variants
@@ -119,6 +133,42 @@ def _structured_list(value: str) -> list[str]:
     return [item.strip() for item in value.replace(",", "\n").splitlines() if item.strip()]
 
 
+def _structured_values(values: list[str]) -> list[str]:
+    """Accept both repeated form fields and legacy comma/newline separated values."""
+    return [item for value in values for item in _structured_list(value)]
+
+
+def _branding_venues(db: Session, teams: list[Team], selected: str = "") -> list[str]:
+    own_names: set[str] = set()
+    for team in teams:
+        for value in (team.display_name, team.internal_name, team.short_name, team.club):
+            own_names.update(team_name_variants(value or ""))
+    venues = {
+        game.venue.strip()
+        for game in db.scalars(select(Game).where(Game.venue.is_not(None))).all()
+        if game.venue
+        and game.venue.strip()
+        and bool(team_name_variants(game.home_team) & own_names)
+    }
+    if selected:
+        venues.add(selected)
+    return sorted(venues, key=str.casefold)
+
+
+def _branding_team_rows(teams: list[Team], configured: list[dict]) -> list[dict]:
+    by_id = {str(item.get("team_id")): item for item in configured}
+    return [
+        {
+            "team_id": team.id,
+            "stored_name": team.display_name,
+            "display_name": by_id.get(team.id, {}).get("display_name") or team.display_name,
+            "short_name": by_id.get(team.id, {}).get("short_name") or team.short_name,
+            "active": by_id.get(team.id, {}).get("active", True),
+        }
+        for team in teams
+    ]
+
+
 @router.get("/branding", response_class=HTMLResponse)
 def club_branding(
     request: Request,
@@ -126,25 +176,80 @@ def club_branding(
     db: Session = Depends(get_db),
 ):
     require_admin(current)
+    if not current.club_id:
+        raise HTTPException(403, "Ein eindeutiger Verein ist erforderlich")
     club = db.get(Club, current.club_id)
     if club is None:
         raise HTTPException(404)
     config = db.get(ClubBrandingConfiguration, club.id)
+    teams = db.scalars(
+        select(Team).where(Team.archived_at.is_(None)).order_by(Team.display_name)
+    ).all()
+    fonts = db.scalars(
+        select(FontAsset).where(
+            FontAsset.active.is_(True),
+            FontAsset.archived_at.is_(None),
+        ).order_by(FontAsset.name)
+    ).all()
+    logos = db.scalars(
+        select(LogoAsset).where(
+            LogoAsset.logo_type == "team",
+            LogoAsset.active.is_(True),
+            LogoAsset.archived_at.is_(None),
+        ).order_by(LogoAsset.display_name, LogoAsset.version.desc())
+    ).all()
+    media_assets = db.scalars(
+        select(MediaAsset).where(
+            MediaAsset.active.is_(True),
+            MediaAsset.available.is_(True),
+        ).order_by(MediaAsset.filename)
+    ).all()
+    image, text = branding_form_state(
+        (config.image_settings if config else {}) or {},
+        (config.text_settings if config else {}) or {},
+    )
+    team_rows = _branding_team_rows(teams, text.get("team_names") or [])
+    selected_team = next((row for row in team_rows if row["active"]), None)
+    venues = _branding_venues(db, teams, text.get("home_venue") or "")
+    examples = dynamic_text_examples(
+        club_name=club.name,
+        club_short_name=club.short_name,
+        venue=text.get("home_venue"),
+        team_name=selected_team["display_name"] if selected_team else None,
+        text=text,
+    )
+    current_logo = db.get(LogoAsset, club.logo_asset_id) if club.logo_asset_id else None
+    if current_logo and (
+        current_logo.archived_at
+        or not current_logo.active
+        or current_logo.logo_type != "team"
+    ):
+        current_logo = None
+    progress = branding_completion(
+        club_name=club.name,
+        has_logo=current_logo is not None,
+        primary_font_id=config.primary_font_id if config else None,
+        secondary_font_id=config.secondary_font_id if config else None,
+        image=image,
+        text=text,
+    )
     return render(
         request,
         "branding.html",
         current,
         club=club,
         config=config,
-        image=(config.image_settings if config else {}) or {},
-        text=(config.text_settings if config else {}) or {},
-        fonts=db.scalars(
-            select(FontAsset).where(
-                FontAsset.club_id == club.id,
-                FontAsset.active.is_(True),
-                FontAsset.archived_at.is_(None),
-            ).order_by(FontAsset.name)
-        ).all(),
+        image=image,
+        text=text,
+        fonts=fonts,
+        logos=logos,
+        current_logo=current_logo,
+        media_assets=media_assets,
+        teams=teams,
+        team_rows=team_rows,
+        venues=venues,
+        examples=examples,
+        progress=progress,
         title="Vereinsbranding",
     )
 
@@ -154,20 +259,24 @@ def update_club_branding(
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
     version: int = Form(),
+    club_version: int = Form(),
+    action: str = Form(default="save"),
+    club_logo_id: str = Form(default=""),
     primary_color: str = Form(default="#172554"),
     secondary_color: str = Form(default="#ffffff"),
-    accent_colors: str = Form(default=""),
+    accent_colors: list[str] = Form(default=[]),
     graphic_style: str = Form(default=""),
     image_effect: str = Form(default=""),
+    image_effects: list[str] = Form(default=[]),
     background_style: str = Form(default=""),
     text_alignment: str = Form(default=""),
     logo_placement: str = Form(default=""),
     safe_margins: str = Form(default=""),
     player_position: str = Form(default=""),
-    allowed_elements: str = Form(default=""),
-    unwanted_elements: str = Form(default=""),
+    allowed_elements: list[str] = Form(default=[]),
+    unwanted_elements: list[str] = Form(default=[]),
     sponsor_rules: str = Form(default=""),
-    forbidden_colors: str = Form(default=""),
+    forbidden_colors: list[str] = Form(default=[]),
     feed_rules: str = Form(default=""),
     story_rules: str = Form(default=""),
     image_text_amount: str = Form(default=""),
@@ -178,25 +287,47 @@ def update_club_branding(
     tone: str = Form(default=""),
     text_length: str = Form(default=""),
     emoji_usage: str = Form(default=""),
-    hashtags: str = Form(default=""),
-    mentions: str = Form(default=""),
-    typical_phrases: str = Form(default=""),
-    unwanted_phrases: str = Form(default=""),
+    hashtags: list[str] = Form(default=[]),
+    mentions: list[str] = Form(default=[]),
+    typical_phrases: list[str] = Form(default=[]),
+    unwanted_phrases: list[str] = Form(default=[]),
     team_name_spelling: str = Form(default=""),
     home_label: str = Form(default=""),
     away_label: str = Form(default=""),
     call_to_action: str = Form(default=""),
+    cta_type: str = Form(default="none"),
+    cta_custom: str = Form(default=""),
+    home_venue: str = Form(default=""),
+    home_venue_short: str = Form(default=""),
+    team_names_json: str = Form(default="[]"),
+    sponsors_json: str = Form(default="[]"),
+    legacy_image_json: str = Form(default="{}"),
+    legacy_text_json: str = Form(default="{}"),
     sponsor_mentions: str = Form(default=""),
     max_hashtags: int = Form(default=10),
     primary_font_id: str = Form(default=""),
     secondary_font_id: str = Form(default=""),
+    feed_max_text_amount: str = Form(default="normal"),
+    feed_use_player_image: str = Form(default=""),
+    feed_show_sponsors: str = Form(default=""),
+    feed_show_club_logo: str = Form(default=""),
+    feed_highlight_result: str = Form(default=""),
+    feed_extra_rules: str = Form(default=""),
+    story_safe_top: int = Form(default=12),
+    story_safe_bottom: int = Form(default=15),
+    story_use_player_image: str = Form(default=""),
+    story_show_sponsors: str = Form(default=""),
+    story_show_club_logo: str = Form(default=""),
+    story_show_call_to_action: str = Form(default=""),
+    story_countdown_area: str = Form(default=""),
+    story_extra_rules: str = Form(default=""),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    from app.branding.service import BrandingValidationError, validate_branding_settings
-
     check_csrf(request, csrf_token_value)
     require_admin(current)
+    if not current.club_id:
+        raise HTTPException(403, "Ein eindeutiger Verein ist erforderlich")
     statement = select(ClubBrandingConfiguration).where(
         ClubBrandingConfiguration.club_id == current.club_id
     )
@@ -206,6 +337,14 @@ def update_club_branding(
     current_version = config.version if config else 0
     if version != current_version:
         raise HTTPException(409, "Das Vereinsbranding wurde zwischenzeitlich geändert")
+    club_statement = select(Club).where(Club.id == current.club_id)
+    if db.bind.dialect.name == "postgresql":
+        club_statement = club_statement.with_for_update()
+    club = db.scalar(club_statement)
+    if club is None:
+        raise HTTPException(404)
+    if club.version != club_version:
+        raise HTTPException(409, "Der Verein wurde zwischenzeitlich geändert")
     font_ids = [value for value in (primary_font_id, secondary_font_id) if value]
     if font_ids:
         valid_fonts = set(
@@ -220,49 +359,145 @@ def update_club_branding(
         )
         if valid_fonts != set(font_ids):
             raise HTTPException(422, "Mindestens eine Schriftart gehört nicht zu diesem Verein")
-    image_settings = {
-        "primary_color": primary_color,
-        "secondary_color": secondary_color,
-        "accent_colors": _structured_list(accent_colors),
-        "graphic_style": graphic_style,
-        "image_effect": image_effect,
-        "background_style": background_style,
-        "text_alignment": text_alignment,
-        "logo_placement": logo_placement,
-        "safe_margins": safe_margins,
-        "player_position": player_position,
-        "allowed_elements": _structured_list(allowed_elements),
-        "unwanted_elements": _structured_list(unwanted_elements),
-        "sponsor_rules": _structured_list(sponsor_rules),
-        "forbidden_colors": _structured_list(forbidden_colors),
-        "feed_rules": feed_rules,
-        "story_rules": story_rules,
-        "image_text_amount": image_text_amount,
-        "player_background_ratio": player_background_ratio,
-        "dynamics": dynamics,
-        "individualization": individualization,
-    }
-    text_settings = {
-        "address_style": address_style,
-        "tone": tone,
-        "text_length": text_length,
-        "emoji_usage": emoji_usage,
-        "hashtags": _structured_list(hashtags),
-        "mentions": _structured_list(mentions),
-        "typical_phrases": _structured_list(typical_phrases),
-        "unwanted_phrases": _structured_list(unwanted_phrases),
-        "team_name_spelling": team_name_spelling,
-        "home_label": home_label,
-        "away_label": away_label,
-        "call_to_action": call_to_action,
-        "sponsor_mentions": _structured_list(sponsor_mentions),
-        "max_hashtags": max_hashtags,
-    }
+    current_image = (config.image_settings if config else {}) or {}
+    current_text = (config.text_settings if config else {}) or {}
     try:
-        image_settings = validate_branding_settings(image_settings)
-        text_settings = validate_branding_settings(text_settings)
+        if action == "recommended":
+            image_settings, text_settings = recommended_branding_settings(
+                current_image, current_text
+            )
+        elif action == "reset":
+            image_settings, text_settings = default_branding_settings(current_image, current_text)
+        elif action == "save":
+            normalized_image_effects = normalize_string_list(
+                _structured_values(image_effects)
+            )
+            image_settings = {
+                "primary_color": primary_color,
+                "secondary_color": secondary_color,
+                "accent_colors": normalize_colors(_structured_values(accent_colors)),
+                "graphic_style": graphic_style,
+                "image_effect": ", ".join(normalized_image_effects) or image_effect,
+                "image_effects": normalized_image_effects,
+                "background_style": background_style,
+                "text_alignment": text_alignment,
+                "logo_placement": logo_placement,
+                "safe_margins": safe_margins,
+                "player_position": player_position,
+                "allowed_elements": normalize_string_list(_structured_values(allowed_elements)),
+                "unwanted_elements": normalize_string_list(
+                    _structured_values(unwanted_elements)
+                ),
+                "sponsor_rules": normalize_string_list(_structured_list(sponsor_rules)),
+                "forbidden_colors": normalize_colors(_structured_values(forbidden_colors)),
+                "feed_rules": feed_extra_rules or feed_rules,
+                "story_rules": story_extra_rules or story_rules,
+                "feed_settings": {
+                    "max_text_amount": feed_max_text_amount,
+                    "use_player_image": feed_use_player_image == "on",
+                    "show_sponsors": feed_show_sponsors == "on",
+                    "show_club_logo": feed_show_club_logo == "on",
+                    "highlight_result": feed_highlight_result == "on",
+                    "extra_rules": feed_extra_rules,
+                },
+                "story_settings": {
+                    "safe_top": story_safe_top,
+                    "safe_bottom": story_safe_bottom,
+                    "use_player_image": story_use_player_image == "on",
+                    "show_sponsors": story_show_sponsors == "on",
+                    "show_club_logo": story_show_club_logo == "on",
+                    "show_call_to_action": story_show_call_to_action == "on",
+                    "countdown_area": story_countdown_area == "on",
+                    "extra_rules": story_extra_rules,
+                },
+                "image_text_amount": image_text_amount,
+                "player_background_ratio": player_background_ratio,
+                "dynamics": dynamics,
+                "individualization": individualization,
+                "legacy_values": parse_structured_json(
+                    legacy_image_json, "Übernommene Bildwerte"
+                ),
+            }
+            text_settings = {
+                "address_style": address_style,
+                "tone": tone,
+                "text_length": text_length,
+                "emoji_usage": emoji_usage,
+                "hashtags": normalize_hashtags(_structured_values(hashtags)),
+                "mentions": normalize_mentions(_structured_values(mentions)),
+                "typical_phrases": normalize_string_list(
+                    _structured_values(typical_phrases)
+                ),
+                "unwanted_phrases": normalize_string_list(
+                    _structured_values(unwanted_phrases)
+                ),
+                "team_name_spelling": team_name_spelling,
+                "team_names": parse_structured_json(
+                    team_names_json, "Mannschaftsschreibweisen"
+                ),
+                "home_label": home_label,
+                "away_label": away_label,
+                "home_venue": home_venue,
+                "home_venue_short": home_venue_short,
+                "call_to_action": cta_custom if cta_type == "custom" else "",
+                "cta_type": cta_type,
+                "cta_custom": cta_custom,
+                "sponsors": parse_structured_json(sponsors_json, "Sponsoren"),
+                "sponsor_mentions": normalize_mentions(
+                    _structured_list(sponsor_mentions)
+                ),
+                "max_hashtags": max_hashtags,
+                "legacy_values": parse_structured_json(
+                    legacy_text_json, "Übernommene Textwerte"
+                ),
+            }
+            image_settings = validate_branding_settings(image_settings, strict_choices=True)
+            text_settings = validate_branding_settings(text_settings, strict_choices=True)
+        else:
+            raise BrandingValidationError("Unbekannte Branding-Aktion")
     except BrandingValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
+    teams = db.scalars(select(Team).where(Team.archived_at.is_(None))).all()
+    team_ids = {team.id for team in teams}
+    configured_team_ids = {item["team_id"] for item in text_settings.get("team_names", [])}
+    if not configured_team_ids.issubset(team_ids):
+        raise HTTPException(422, "Mindestens eine Mannschaft gehört nicht zu diesem Verein")
+    sponsor_team_ids = {
+        team_id
+        for sponsor in text_settings.get("sponsors", [])
+        for team_id in sponsor.get("team_ids", [])
+    }
+    if not sponsor_team_ids.issubset(team_ids):
+        raise HTTPException(422, "Sponsor enthält eine fremde Mannschaft")
+    sponsor_media_ids = {
+        sponsor["media_asset_id"]
+        for sponsor in text_settings.get("sponsors", [])
+        if sponsor.get("media_asset_id")
+    }
+    if sponsor_media_ids:
+        valid_media_ids = set(
+            db.scalars(
+                select(MediaAsset.id).where(
+                    MediaAsset.id.in_(sponsor_media_ids),
+                    MediaAsset.active.is_(True),
+                    MediaAsset.available.is_(True),
+                )
+            )
+        )
+        if valid_media_ids != sponsor_media_ids:
+            raise HTTPException(422, "Mindestens ein Sponsorenmedium gehört nicht zum Verein")
+    venues = _branding_venues(db, teams, current_text.get("home_venue") or "")
+    if text_settings.get("home_venue") and text_settings["home_venue"] not in venues:
+        raise HTTPException(422, "Die Heimspielstätte gehört nicht zum Verein")
+    selected_logo = db.get(LogoAsset, club_logo_id) if club_logo_id else None
+    if club_logo_id and selected_logo is None:
+        raise HTTPException(422, "Das Vereinslogo gehört nicht zum Verein")
+    if selected_logo and (
+        selected_logo.logo_type != "team"
+        or not selected_logo.active
+        or selected_logo.archived_at is not None
+    ):
+        raise HTTPException(422, "Das Vereinslogo gehört nicht zum Verein")
     if config is None:
         config = ClubBrandingConfiguration(club_id=current.club_id)
         db.add(config)
@@ -273,6 +508,10 @@ def update_club_branding(
     config.primary_font_id = primary_font_id or None
     config.secondary_font_id = secondary_font_id or None
     config.updated_by = current.id
+    selected_logo_id = selected_logo.id if selected_logo else None
+    if club.logo_asset_id != selected_logo_id:
+        club.logo_asset_id = selected_logo_id
+        club.version += 1
     audit(
         db,
         current,
@@ -286,7 +525,12 @@ def update_club_branding(
         },
     )
     db.commit()
-    return redirect("/branding", "Vereinsbranding wurde gespeichert")
+    messages = {
+        "save": "Vereinsbranding wurde gespeichert",
+        "recommended": "Empfohlene Branding-Einstellungen wurden übernommen",
+        "reset": "Branding wurde auf Standardwerte zurückgesetzt",
+    }
+    return redirect("/branding", messages[action])
 
 
 def _invalidate_posts_for_logo_change(db: Session, game: Game, reason: str) -> list[str]:
@@ -1225,6 +1469,29 @@ def assets(request: Request, current=Depends(current_user), db: Session = Depend
         designs=designs,
         title="Schriftarten und Designvorlagen",
     )
+
+
+@router.get("/fonts/{font_id}/preview")
+def preview_font(
+    font_id: str,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    require_admin(current)
+    font = db.get(FontAsset, font_id)
+    if not font or not font.active or font.archived_at:
+        raise HTTPException(404)
+    relative = Path(font.relative_path)
+    root = settings.upload_root.resolve()
+    path = relative.resolve() if relative.is_absolute() else (Path.cwd() / relative).resolve()
+    if (
+        not path.is_relative_to(root)
+        or path.is_symlink()
+        or not path.is_file()
+        or path.suffix.lower() not in {".woff2", ".ttf"}
+    ):
+        raise HTTPException(404)
+    return FileResponse(path, media_type=font.mime_type)
 
 
 @router.post("/fonts")

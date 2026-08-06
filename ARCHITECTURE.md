@@ -114,3 +114,14 @@ Clubbenutzer bearbeiten validierte strukturierte Bild- und Textparameter.
 Generierungssnapshots enthalten IDs, Versionen und Prüfsummen, aber keine
 Prompttexte. PlatformAdmin-Fixturetests werden auditiert und als nicht
 abrechenbare Plattformnutzung im Usage-Ledger erfasst.
+
+Der Vereinsbereich stellt diese strukturierten Parameter über einen
+fünfteiligen Branding-Assistenten bereit. `ClubBrandingConfiguration` bleibt
+versionierte Quelle; eindeutig übertragbare Altwerte werden normalisiert,
+unklare Werte unter `legacy_values` erhalten. Mannschaften, aus Heimspielen
+abgeleitete Spielstätten, Logos, Medien und Schriftarten werden im aktiven
+`TenantSession`-Scope geladen und beim Schreiben nochmals über ihre IDs
+geprüft. Die browserseitige Vorschau erhält ausschließlich diese validierten
+Brandingwerte und dynamische Bezeichnungen des aktuellen Vereins, jedoch keine
+zentralen oder zusammengesetzten Prompttexte. Details stehen in
+[`docs/BRANDING.md`](docs/BRANDING.md).
