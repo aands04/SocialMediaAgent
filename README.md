@@ -42,6 +42,17 @@ PUBLISHER_MODE=dry-run GLOBAL_PUBLISH_ENABLED=false docker compose -f docker-com
 2. **Mannschaft:** Namen/Slug, plausible `https://www.fussball.de/...`-URL, aktive Seite, relativen Medienunterordner, vorhandene Vorlagen/Fonts, Farben und Zeitzone anlegen. Löschen ist Soft-Delete/Archivierung.
 3. **Rechte:** Rolle und Mannschaftszuordnung sind getrennt. `all_teams=false` verlangt explizite `UserTeam`-Zeilen; direkte URLs und Services prüfen serverseitig.
 
+### Vereinsbranding
+
+Der tenant-sichere **Branding-Assistent** verwaltet Grunddesign,
+Bildgestaltung, Textsprache, strukturierte Sponsorenangaben sowie Feed- und
+Story-Vorgaben. Farben, Schriften, Mannschaftsschreibweisen und dynamische
+Beispiele können unmittelbar geprüft werden, ohne geschützte
+Plattform-Prompttexte an den Browser zu übertragen. Vorhandene Freitextwerte
+bleiben abwärtskompatibel erhalten. Bedienung, Datenstruktur, Rückfallwerte,
+Mandantenschutz und Grenzen der Live-Vorschau sind in
+[`docs/BRANDING.md`](docs/BRANDING.md) dokumentiert.
+
 ### Benutzerrollen
 
 - **Administrator:** Vollzugriff einschließlich Benutzerkonten, Rollen, Mannschaftsrechten und Systemeinstellungen.

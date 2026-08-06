@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 
 from app.auth.service import hash_password
@@ -22,6 +22,7 @@ from app.main import app
 from app.models import (
     AuditLog,
     Club,
+    ClubBrandingConfiguration,
     ClubStatus,
     Game,
     GenerationJob,
@@ -125,6 +126,167 @@ def csrf(client):
 def session_csrf(client):
     response = client.get("/teams")
     return re.search(r'name="csrf_token" value="([^"]+)', response.text).group(1)
+
+
+def test_branding_assistant_loads_and_saves_tenant_structured_values(browser):
+    client, factory = browser
+    with factory() as db:
+        club = db.scalar(select(Club))
+        page = InstagramPage(
+            internal_name="branding-page",
+            display_name="Branding-Seite",
+            username="branding_page",
+            club=club.name,
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="branding-team",
+            display_name="Beispielstadt Erste",
+            short_name="Erste",
+            slug="branding-team",
+            club=club.name,
+            fussball_url="https://example.invalid/branding-team",
+            instagram_page_id=page.id,
+            media_subdir="branding-team",
+        )
+        db.add(team)
+        db.flush()
+        db.add(
+            Game(
+                team_id=team.id,
+                provider="fixture",
+                external_id="branding-home",
+                home_team=team.display_name,
+                away_team="Gastverein",
+                kickoff=datetime.now(timezone.utc) + timedelta(days=2),
+                venue="Sportpark Beispielstadt",
+                source_url="https://example.invalid/game",
+            )
+        )
+        db.commit()
+        club_id = club.id
+        club_version = club.version
+        team_id = team.id
+
+    page = client.get("/branding")
+    assert page.status_code == 200
+    assert "Beispielstadt Erste" in page.text
+    assert "Sportpark Beispielstadt" in page.text
+    assert "system prompt" not in page.text.casefold()
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+    response = client.post(
+        "/branding",
+        data={
+            "csrf_token": token,
+            "version": "0",
+            "club_version": str(club_version),
+            "action": "save",
+            "primary_color": "#123456",
+            "secondary_color": "#FFFFFF",
+            "accent_colors": ["#ABCDEF", "#abcdef", "#FEDCBA"],
+            "graphic_style": "modern",
+            "image_effects": ["emotional", "modern"],
+            "background_style": "gradient",
+            "text_alignment": "center",
+            "logo_placement": "top-left",
+            "safe_margins": "normal",
+            "player_position": "center-right",
+            "image_text_amount": "normal",
+            "player_background_ratio": "65",
+            "dynamics": "balanced",
+            "individualization": "club",
+            "address_style": "ihr",
+            "tone": "emotional",
+            "text_length": "medium",
+            "emoji_usage": "sparse",
+            "hashtags": ["#Beispiel", "beispiel", "#Heimspiel"],
+            "mentions": ["@Test.Konto", "test.konto"],
+            "team_names_json": (
+                '[{"team_id":"%s","display_name":"Erste Mannschaft",'
+                '"short_name":"I","active":true}]' % team_id
+            ),
+            "home_label": "Heimspiel",
+            "away_label": "Auswärtsspiel",
+            "home_venue": "Sportpark Beispielstadt",
+            "home_venue_short": "Sportpark",
+            "cta_type": "support",
+            "sponsors_json": "[]",
+            "max_hashtags": "10",
+            "feed_max_text_amount": "normal",
+            "story_safe_top": "12",
+            "story_safe_bottom": "15",
+            "legacy_image_json": "{}",
+            "legacy_text_json": "{}",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with factory() as db:
+        config = db.get(ClubBrandingConfiguration, club_id)
+        assert config.image_settings["primary_color"] == "#123456"
+        assert config.image_settings["accent_colors"] == ["#ABCDEF", "#FEDCBA"]
+        assert config.image_settings["image_effects"] == ["emotional", "modern"]
+        assert config.text_settings["hashtags"] == ["#Beispiel", "#Heimspiel"]
+        assert config.text_settings["mentions"] == ["@test.konto"]
+        assert config.text_settings["team_names"][0]["team_id"] == team_id
+
+
+def test_branding_assistant_rejects_unknown_team_and_missing_csrf(browser):
+    client, factory = browser
+    page = client.get("/branding")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+    with factory() as db:
+        club = db.scalar(select(Club))
+        version = club.version
+    common = {
+        "version": "0",
+        "club_version": str(version),
+        "action": "save",
+        "primary_color": "#123456",
+        "secondary_color": "#FFFFFF",
+        "graphic_style": "modern",
+        "background_style": "gradient",
+        "text_alignment": "left",
+        "logo_placement": "top-left",
+        "safe_margins": "normal",
+        "player_position": "center-right",
+        "image_text_amount": "normal",
+        "player_background_ratio": "60",
+        "dynamics": "balanced",
+        "individualization": "club",
+        "address_style": "ihr",
+        "tone": "emotional",
+        "text_length": "medium",
+        "emoji_usage": "sparse",
+        "team_names_json": '[{"team_id":"fremd","display_name":"Fremd","short_name":"F","active":true}]',
+        "sponsors_json": "[]",
+        "cta_type": "none",
+        "max_hashtags": "10",
+        "legacy_image_json": "{}",
+        "legacy_text_json": "{}",
+    }
+    assert client.post("/branding", data=common).status_code == 422
+    common["csrf_token"] = token
+    response = client.post("/branding", data=common)
+    assert response.status_code == 422
+    assert "gehört nicht zu diesem Verein" in response.text
+
+    common["team_names_json"] = "[]"
+    common["club_logo_id"] = "manipuliertes-logo"
+    response = client.post("/branding", data=common)
+    assert response.status_code == 422
+    assert "Vereinslogo gehört nicht zum Verein" in response.text
+
+    common["club_logo_id"] = ""
+    common["sponsors_json"] = (
+        '[{"name":"Beispielsponsor","media_asset_id":"fremdes-medium",'
+        '"instagram_mention":"","placement":"footer","team_ids":[]}]'
+    )
+    response = client.post("/branding", data=common)
+    assert response.status_code == 422
+    assert "Sponsorenmedium gehört nicht zum Verein" in response.text
 
 
 def test_club_dashboard_shows_usage_and_next_seven_days_in_plain_language(browser):
@@ -1134,7 +1296,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260804-post-targeting" in teams_page
+    assert "/static/style.css?v=20260806-branding-assistant" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text

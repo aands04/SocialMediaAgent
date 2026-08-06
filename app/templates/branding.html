@@ -1,36 +1,184 @@
 {% extends 'base.html' %}
 {% block content %}
-<h1>Vereinsbranding</h1>
-<p>Hier werden ausschließlich strukturierte Vereinsvorgaben gepflegt. Die geschützten Plattform-Prompts werden weder angezeigt noch an den Browser übertragen.</p>
-<form method="post" action="/branding" class="gridform">
+<div class="branding-heading">
+  <div>
+    <p class="eyebrow">Erscheinungsbild des Vereins</p>
+    <h1>Vereinsbranding</h1>
+    <p>Gestalte Bilder und Texte verständlich und einheitlich. Technische Plattformvorgaben bleiben geschützt und werden hier nicht angezeigt.</p>
+  </div>
+  <div class="branding-progress" aria-label="Branding-Fortschritt {{progress.percent}} Prozent">
+    <strong>Branding zu {{progress.percent}} % eingerichtet</strong>
+    <progress value="{{progress.percent}}" max="100">{{progress.percent}} %</progress>
+    {% if progress.missing %}<small>Es fehlen noch: {{progress.missing[:3]|join(', ')}}{% if progress.missing|length > 3 %} und weitere Angaben{% endif %}.</small>{% endif %}
+  </div>
+</div>
+
+<form method="post" action="/branding" id="branding-form"
+      data-club-name="{{club.name or ''}}" data-club-short-name="{{club.short_name or ''}}"
+      data-initial-team="{{team_rows[0].display_name if team_rows else ''}}">
   <input type="hidden" name="csrf_token" value="{{csrf}}">
   <input type="hidden" name="version" value="{{config.version if config else 0}}">
-  <fieldset class="full-span"><legend>Bildgestaltung</legend><div class="gridform">
-    <label>Primärfarbe<input name="primary_color" value="{{image.get('primary_color','#172554')}}" pattern="#[0-9A-Fa-f]{6}" required></label>
-    <label>Sekundärfarbe<input name="secondary_color" value="{{image.get('secondary_color','#ffffff')}}" pattern="#[0-9A-Fa-f]{6}" required></label>
-    <label>Akzentfarben, je Zeile<input name="accent_colors" value="{{image.get('accent_colors',[])|join(', ')}}"></label>
-    <label>Grafikstil<input name="graphic_style" value="{{image.get('graphic_style','')}}" maxlength="500"></label>
-    <label>Bildwirkung<input name="image_effect" value="{{image.get('image_effect','')}}" maxlength="500"></label>
-    <label>Hintergrundstil<input name="background_style" value="{{image.get('background_style','')}}" maxlength="500"></label>
-    <label>Textausrichtung<input name="text_alignment" value="{{image.get('text_alignment','')}}" maxlength="500"></label>
-    <label>Logo-Platzierung<input name="logo_placement" value="{{image.get('logo_placement','')}}" maxlength="500"></label>
-    <label>Sicherheitsabstände<input name="safe_margins" value="{{image.get('safe_margins','')}}" maxlength="500"></label>
-    <label>Spielerposition<input name="player_position" value="{{image.get('player_position','')}}" maxlength="500"></label>
-    <label>Textmenge im Bild<input name="image_text_amount" value="{{image.get('image_text_amount','')}}" maxlength="500"></label>
-    <label>Spieler-/Hintergrundverhältnis<input name="player_background_ratio" value="{{image.get('player_background_ratio','')}}" maxlength="500"></label>
-    <label>Dynamik<input name="dynamics" value="{{image.get('dynamics','')}}" maxlength="500"></label>
-    <label>Individualisierung<input name="individualization" value="{{image.get('individualization','')}}" maxlength="500"></label>
-    <label>Primäre Schriftart<select name="primary_font_id"><option value="">System-Fallback</option>{% for font in fonts %}<option value="{{font.id}}" {% if config and config.primary_font_id==font.id %}selected{% endif %}>{{font.name}}</option>{% endfor %}</select></label>
-    <label>Sekundäre Schriftart<select name="secondary_font_id"><option value="">System-Fallback</option>{% for font in fonts %}<option value="{{font.id}}" {% if config and config.secondary_font_id==font.id %}selected{% endif %}>{{font.name}}</option>{% endfor %}</select></label>
-    {% for key,label in [('allowed_elements','Erlaubte Gestaltungselemente'),('unwanted_elements','Unerwünschte Gestaltungselemente'),('sponsor_rules','Sponsorenvorgaben'),('forbidden_colors','Verbotene Farben')] %}<label>{{label}}<textarea name="{{key}}" rows="4">{{image.get(key,[])|join('\n')}}</textarea></label>{% endfor %}
-    <label>Feed-Vorgaben<textarea name="feed_rules" rows="4">{{image.get('feed_rules','')}}</textarea></label>
-    <label>Story-Vorgaben<textarea name="story_rules" rows="4">{{image.get('story_rules','')}}</textarea></label>
-  </div></fieldset>
-  <fieldset class="full-span"><legend>Textgestaltung</legend><div class="gridform">
-    {% for key,label in [('address_style','Ansprache'),('tone','Tonalität'),('text_length','Textlänge'),('emoji_usage','Emoji-Nutzung'),('team_name_spelling','Schreibweise der Mannschaften'),('home_label','Heimspielbezeichnung'),('away_label','Auswärtsspielbezeichnung'),('call_to_action','Call-to-Action')] %}<label>{{label}}<input name="{{key}}" value="{{text.get(key,'')}}" maxlength="500"></label>{% endfor %}
-    <label>Maximale Hashtags<input type="number" name="max_hashtags" value="{{text.get('max_hashtags',10)}}" min="0" max="30"></label>
-    {% for key,label in [('hashtags','Standard-Hashtags'),('mentions','Erwähnungen'),('typical_phrases','Typische Formulierungen'),('unwanted_phrases','Unerwünschte Formulierungen'),('sponsor_mentions','Sponsorenerwähnungen')] %}<label>{{label}}, je Zeile<textarea name="{{key}}" rows="4">{{text.get(key,[])|join('\n')}}</textarea></label>{% endfor %}
-  </div></fieldset>
-  <button>Branding versioniert speichern</button>
+  <input type="hidden" name="club_version" value="{{club.version}}">
+  <input type="hidden" name="team_names_json" id="team-names-json" value='{{team_rows|tojson}}'>
+  <input type="hidden" name="sponsors_json" id="sponsors-json" value='{{text.get("sponsors",[])|tojson}}'>
+  <input type="hidden" name="legacy_image_json" value='{{image.get("legacy_values",{})|tojson}}'>
+  <input type="hidden" name="legacy_text_json" value='{{text.get("legacy_values",{})|tojson}}'>
+  <input type="hidden" name="image_effect" value="{{image.get('image_effect','')}}">
+  <input type="hidden" name="sponsor_rules" value="{{image.get('sponsor_rules',[])|join(', ')}}">
+  <input type="hidden" name="feed_rules" value="{{image.get('feed_rules','')}}">
+  <input type="hidden" name="story_rules" value="{{image.get('story_rules','')}}">
+  <input type="hidden" name="team_name_spelling" value="{{text.get('team_name_spelling','')}}">
+  <input type="hidden" name="call_to_action" value="{{text.get('call_to_action','')}}">
+  <input type="hidden" name="sponsor_mentions" value="{{text.get('sponsor_mentions',[])|join(', ')}}">
+
+  <div class="branding-actions" aria-label="Branding-Aktionen">
+    <span id="branding-dirty" role="status" hidden>Ungespeicherte Änderungen</span>
+    <button type="submit" name="action" value="save">Speichern</button>
+    <button type="button" class="button secondary" id="branding-discard">Änderungen verwerfen</button>
+    <button type="submit" name="action" value="recommended" class="button secondary">Empfohlene Einstellungen verwenden</button>
+    <button type="submit" name="action" value="reset" class="button danger" id="branding-reset">Auf Standardwerte zurücksetzen</button>
+  </div>
+
+  <div class="branding-layout">
+    <div class="branding-settings">
+      <nav class="branding-section-nav" aria-label="Bereiche des Branding-Assistenten">
+        <a href="#grunddesign">Grunddesign</a><a href="#bildgestaltung">Bildgestaltung</a>
+        <a href="#text-sprache">Text und Sprache</a><a href="#sponsoren">Sponsoren und Pflichtangaben</a>
+        <a href="#erweitert">Erweiterte Vorgaben</a>
+      </nav>
+
+      <section id="grunddesign" class="branding-section">
+        <h2>1. Grunddesign</h2>
+        <p>Die wichtigsten Merkmale für einen einheitlichen Vereinsauftritt.</p>
+        <div class="branding-field-grid">
+          <label class="full-span">Vereinslogo <span class="field-kind required">erforderlich</span>
+            <select name="club_logo_id" id="club-logo">
+              <option value="">Kein Vereinslogo</option>
+              {% for logo in logos %}<option value="{{logo.id}}" data-preview="/logos/{{logo.id}}/preview" {% if current_logo and current_logo.id==logo.id %}selected{% endif %}>{{logo.display_name}} · Version {{logo.version}}</option>{% endfor %}
+            </select>
+            <small>Es werden ausschließlich verifizierte Originaldateien dieses Vereins verwendet.</small>
+          </label>
+          {% for key,label,value in [('primary_color','Primärfarbe',image.primary_color),('secondary_color','Sekundärfarbe',image.secondary_color)] %}
+          <div class="color-field">
+            <label for="{{key}}">{{label}} <span class="field-kind required">erforderlich</span></label>
+            <div><input type="color" data-color-picker="{{key}}" value="{{value}}" aria-label="{{label}} auswählen"><input id="{{key}}" name="{{key}}" value="{{value}}" pattern="#[0-9A-Fa-f]{6}" maxlength="7" required></div>
+          </div>
+          {% endfor %}
+          <div class="full-span">
+            <label>Akzentfarben <span class="field-kind recommended">empfohlen</span></label>
+            <p class="field-help">Zusätzliche Vereinsfarben für Linien, Flächen und Hervorhebungen.</p>
+            <div class="repeat-list color-list" data-repeat-list="accent_colors">
+              {% for color in image.accent_colors %}<div class="repeat-row"><input type="color" value="{{color}}" aria-label="Akzentfarbe auswählen"><input name="accent_colors" value="{{color}}" pattern="#[0-9A-Fa-f]{6}"><button type="button" class="remove-row" aria-label="Akzentfarbe entfernen">Entfernen</button></div>{% endfor %}
+            </div>
+            <button type="button" class="button secondary add-row" data-add-color="accent_colors">Farbe hinzufügen</button>
+          </div>
+          <label>Primäre Schriftart <span class="field-kind recommended">empfohlen</span>
+            <select name="primary_font_id" id="primary-font"><option value="">Systemschrift</option>{% for font in fonts %}<option value="{{font.id}}" data-family="{{font.family}}" data-url="/fonts/{{font.id}}/preview" data-format="{{'truetype' if font.relative_path.lower().endswith('.ttf') else 'woff2'}}" {% if config and config.primary_font_id==font.id %}selected{% endif %}>{{font.name}}</option>{% endfor %}</select>
+            <span class="font-sample" id="primary-font-sample">Heimspiel – Gemeinsam für {{club.short_name or club.name or 'Dein Verein'}}</span>
+          </label>
+          <label>Sekundäre Schriftart <span class="field-kind optional">optional</span>
+            <select name="secondary_font_id" id="secondary-font"><option value="">Systemschrift</option>{% for font in fonts %}<option value="{{font.id}}" data-family="{{font.family}}" data-url="/fonts/{{font.id}}/preview" data-format="{{'truetype' if font.relative_path.lower().endswith('.ttf') else 'woff2'}}" {% if config and config.secondary_font_id==font.id %}selected{% endif %}>{{font.name}}</option>{% endfor %}</select>
+            <span class="font-sample" id="secondary-font-sample">Sonntag · 15:00 Uhr · Heimspiel</span>
+          </label>
+        </div>
+        <fieldset class="choice-cards full-span" data-preview-control><legend>Bevorzugter Grafikstil <span class="field-kind required">erforderlich</span></legend>
+          {% for value,label,icon in [('classic','Klassisch','▣'),('modern','Modern','◫'),('dynamic','Dynamisch','➜'),('minimal','Minimalistisch','□'),('emotional','Emotional','♥'),('stadium','Stadion-Look','◉')] %}
+          <label><input type="radio" name="graphic_style" value="{{value}}" {% if image.graphic_style==value %}checked{% endif %}><span class="choice-card-icon">{{icon}}</span><strong>{{label}}</strong></label>
+          {% endfor %}
+        </fieldset>
+      </section>
+
+      <section id="bildgestaltung" class="branding-section">
+        <h2>2. Bildgestaltung</h2>
+        <p>Lege fest, wie Spieler, Logo, Text und Hintergrund zusammenspielen.</p>
+        <fieldset class="chip-group"><legend>Bildwirkung <span class="field-kind recommended">empfohlen</span></legend>
+          {% for value,label in [('emotional','Emotional'),('modern','Modern'),('dynamic','Dynamisch'),('calm','Ruhig'),('premium','Hochwertig'),('classic','Klassisch')] %}<label><input type="checkbox" name="image_effects" value="{{value}}" {% if value in image.image_effects %}checked{% endif %}><span>{{label}}</span></label>{% endfor %}
+        </fieldset>
+        <fieldset class="choice-cards"><legend>Hintergrundstil</legend>
+          {% for value,label in [('club-color','Vereinsfarbe'),('gradient','Farbverlauf'),('photo','Foto'),('stadium','Stadion'),('abstract','Abstrakte Grafik'),('cutout','Freigestellt')] %}<label><input type="radio" name="background_style" value="{{value}}" {% if image.background_style==value %}checked{% endif %}><span class="background-swatch background-{{value}}"></span><strong>{{label}}</strong></label>{% endfor %}
+        </fieldset>
+        <div class="branding-field-grid">
+          <fieldset><legend>Textausrichtung</legend><div class="segmented">{% for value,label in [('left','Links'),('center','Zentriert'),('right','Rechts')] %}<label><input type="radio" name="text_alignment" value="{{value}}" {% if image.text_alignment==value %}checked{% endif %}><span>{{label}}</span></label>{% endfor %}</div></fieldset>
+          <label>Sicherheitsabstände<select name="safe_margins">{% for value,label in [('tight','Eng'),('normal','Normal'),('generous','Großzügig')] %}<option value="{{value}}" {% if image.safe_margins==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select><small>Bestimmt den Abstand wichtiger Inhalte zum Bildrand.</small></label>
+          <fieldset><legend>Logo-Platzierung</legend><div class="position-grid" data-position-grid>{% for value in ['top-left','top-center','top-right','center-left','center','center-right','bottom-left','bottom-center','bottom-right'] %}<label title="{{value}}"><input type="radio" name="logo_placement" value="{{value}}" {% if image.logo_placement==value %}checked{% endif %}><span></span></label>{% endfor %}</div></fieldset>
+          <fieldset><legend>Spielerposition</legend><div class="position-grid" data-position-grid>{% for value in ['top-left','top-center','top-right','center-left','center','center-right','bottom-left','bottom-center','bottom-right'] %}<label title="{{value}}"><input type="radio" name="player_position" value="{{value}}" {% if image.player_position==value %}checked{% endif %}><span></span></label>{% endfor %}</div></fieldset>
+          <label>Textmenge im Bild<select name="image_text_amount">{% for value,label in [('little','Wenig'),('normal','Normal'),('detailed','Ausführlich')] %}<option value="{{value}}" {% if image.image_text_amount==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
+          <label>Dynamik<select name="dynamics">{% for value,label in [('calm','Ruhig'),('balanced','Ausgewogen'),('dynamic','Dynamisch')] %}<option value="{{value}}" {% if image.dynamics==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
+          <label class="full-span">Spieler-/Hintergrundverhältnis<input type="range" name="player_background_ratio" min="0" max="100" value="{{image.player_background_ratio}}"><span class="range-label"><span>Hintergrund im Fokus</span><output>{{image.player_background_ratio}} % Spieler</output><span>Spieler im Fokus</span></span></label>
+          <label>Individualisierung<select name="individualization">{% for value,label in [('standard','Standarddesign'),('club','Vereinsspezifisch'),('strong','Stark individuell')] %}<option value="{{value}}" {% if image.individualization==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
+        </div>
+        {% for key,label,items in [('allowed_elements','Erlaubte Gestaltungselemente',image.allowed_elements),('unwanted_elements','Unerwünschte Gestaltungselemente',image.unwanted_elements)] %}
+        <div class="tag-editor" data-tag-editor="{{key}}"><label>{{label}}</label><div class="tag-items">{% for item in items %}<span class="tag"><span>{{item}}</span><input type="hidden" name="{{key}}" value="{{item}}"><button type="button" aria-label="{{item}} entfernen">×</button></span>{% endfor %}</div><div class="tag-entry"><input placeholder="Eigenen Eintrag ergänzen" maxlength="500"><button type="button" class="button secondary">Hinzufügen</button></div></div>
+        {% endfor %}
+      </section>
+
+      <section id="text-sprache" class="branding-section">
+        <h2>3. Text und Sprache</h2>
+        <p>Bestimme die Sprache eurer Beiträge. Die Tonalität ist bewusst eine Einzelauswahl, damit keine widersprüchlichen Stile entstehen.</p>
+        <div class="branding-field-grid">
+          <label>Ansprache<select name="address_style" data-example-select="address">{% for value,label in [('du','Du'),('ihr','Ihr'),('neutral','Neutral')] %}<option value="{{value}}" {% if text.address_style==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select><span class="example-text" data-example="address">{{examples.address}}</span></label>
+          <label>Tonalität<select name="tone" data-example-select="tone">{% for value,label in [('factual','Sachlich'),('emotional','Emotional'),('motivating','Motivierend'),('casual','Locker'),('professional','Professionell'),('traditional','Traditionsbewusst')] %}<option value="{{value}}" {% if text.tone==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select><span class="example-text" data-example="tone">{{examples.tone}}</span></label>
+          <label>Textlänge<select name="text_length" data-example-select="length">{% for value,label in [('short','Kurz'),('medium','Mittel'),('detailed','Ausführlich')] %}<option value="{{value}}" {% if text.text_length==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select><span class="example-text" data-example="length">{{examples.length}}</span></label>
+          <label>Emoji-Nutzung<select name="emoji_usage">{% for value,label in [('none','Keine'),('sparse','Sparsam'),('normal','Normal'),('frequent','Häufig')] %}<option value="{{value}}" {% if text.emoji_usage==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
+          <label>Bezeichnung für Heimspiele<input name="home_label" value="{{text.home_label}}" maxlength="500"></label>
+          <label>Bezeichnung für Auswärtsspiele<input name="away_label" value="{{text.away_label}}" maxlength="500"></label>
+          <label>Standard-Heimspielstätte<select name="home_venue" id="home-venue"><option value="">Keine Spielstätte ausgewählt</option>{% for venue in venues %}<option value="{{venue}}" {% if text.home_venue==venue %}selected{% endif %}>{{venue}}</option>{% endfor %}</select><small>Die Auswahl stammt aus Heimspielen dieses Vereins.</small></label>
+          <label>Kurzbezeichnung der Heimspielstätte <span class="field-kind optional">optional</span><input name="home_venue_short" value="{{text.home_venue_short}}" maxlength="500"></label>
+          <label>Call-to-Action<select name="cta_type" data-example-select="call_to_action">{% for value,label in [('support','Mannschaft unterstützen'),('share','Beitrag teilen'),('comment','Ergebnis kommentieren'),('attend','Zum Spiel kommen'),('none','Keine Handlungsaufforderung'),('custom','Eigene Formulierung')] %}<option value="{{value}}" {% if text.cta_type==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select><span class="example-text" data-example="call_to_action">{{examples.call_to_action}}</span></label>
+          <label>Eigene Handlungsaufforderung <span class="field-kind optional">optional</span><input name="cta_custom" value="{{text.cta_custom}}" maxlength="500"></label>
+          <label>Maximale Hashtags<input type="number" name="max_hashtags" value="{{text.max_hashtags}}" min="0" max="30" required><small>Erlaubt sind 0 bis 30 Hashtags.</small></label>
+        </div>
+        {% for key,label,items,placeholder in [('hashtags','Standard-Hashtags',text.hashtags,'#vereinsliebe'),('mentions','Erwähnungen',text.mentions,'@benutzername'),('typical_phrases','Typische Formulierungen',text.typical_phrases,'Formulierung ergänzen'),('unwanted_phrases','Unerwünschte Formulierungen',text.unwanted_phrases,'Formulierung ergänzen')] %}
+        <div class="tag-editor" data-tag-editor="{{key}}"><label>{{label}}</label><div class="tag-items">{% for item in items %}<span class="tag"><span>{{item}}</span><input type="hidden" name="{{key}}" value="{{item}}"><button type="button" aria-label="{{item}} entfernen">×</button></span>{% endfor %}</div><div class="tag-entry"><input placeholder="{{placeholder}}" maxlength="500"><button type="button" class="button secondary">Hinzufügen</button></div></div>
+        {% endfor %}
+
+        <h3>Mannschaftsschreibweisen</h3>
+        <p>Für jede Mannschaft des Vereins kann ein öffentlicher Name festgelegt werden.</p>
+        {% if team_rows %}<div class="team-naming-list" id="team-naming-list">{% for row in team_rows %}<div class="team-naming-row" data-team-id="{{row.team_id}}"><strong>{{row.stored_name}}</strong><label>Anzeigename<input data-team-display value="{{row.display_name}}" maxlength="120"></label><label>Kurzname<input data-team-short value="{{row.short_name}}" maxlength="30"></label><label class="checkbox-label"><input type="checkbox" data-team-active {% if row.active %}checked{% endif %}> Für Texte verwenden</label><span class="team-name-preview">Vorschau: <strong>{{row.display_name}}</strong>{% if row.short_name %} ({{row.short_name}}){% endif %}</span></div>{% endfor %}</div>{% else %}<p class="empty-state">Für diesen Verein sind noch keine Mannschaften vorhanden.</p>{% endif %}
+      </section>
+
+      <section id="sponsoren" class="branding-section">
+        <h2>4. Sponsoren und Pflichtangaben</h2>
+        <p>Sponsoren werden strukturiert zu Medien, Beitragsarten und Mannschaften zugeordnet.</p>
+        <div id="sponsor-list">
+          {% for sponsor in text.sponsors %}<article class="sponsor-row">
+            <div class="branding-field-grid"><label>Sponsorname<input data-sponsor-name value="{{sponsor.name}}" maxlength="500" required></label><label>Logo / Medienobjekt<select data-sponsor-media><option value="">Kein Medium</option>{% for asset in media_assets %}<option value="{{asset.id}}" {% if sponsor.media_asset_id==asset.id %}selected{% endif %}>{{asset.filename}}</option>{% endfor %}</select></label><label>Instagram-Erwähnung<input data-sponsor-mention value="{{sponsor.instagram_mention}}" placeholder="@benutzername"></label><label>Platzierung<select data-sponsor-placement>{% for value,label in [('top','Oben'),('bottom','Unten'),('left','Links'),('right','Rechts'),('footer','Fußbereich')] %}<option value="{{value}}" {% if sponsor.placement==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label></div>
+            <div class="checkbox-grid"><label><input type="checkbox" data-sponsor-flag="use_feed" {% if sponsor.use_feed %}checked{% endif %}> Im Feed</label><label><input type="checkbox" data-sponsor-flag="use_story" {% if sponsor.use_story %}checked{% endif %}> In Storys</label><label><input type="checkbox" data-sponsor-flag="use_announcement" {% if sponsor.use_announcement %}checked{% endif %}> Bei Ankündigungen</label><label><input type="checkbox" data-sponsor-flag="use_result" {% if sponsor.use_result %}checked{% endif %}> Bei Ergebnissen</label><label><input type="checkbox" data-sponsor-flag="required" {% if sponsor.required %}checked{% endif %}> Pflichtangabe</label></div>
+            <fieldset><legend>Zugeordnete Mannschaften</legend><div class="chip-group">{% for team in teams %}<label><input type="checkbox" data-sponsor-team value="{{team.id}}" {% if team.id in sponsor.team_ids %}checked{% endif %}><span>{{team.display_name}}</span></label>{% endfor %}</div></fieldset>
+            <div class="branding-field-grid"><label>Gültig ab<input type="date" data-sponsor-valid-from value="{{sponsor.valid_from}}"></label><label>Gültig bis<input type="date" data-sponsor-valid-until value="{{sponsor.valid_until}}"></label></div><button type="button" class="button danger remove-sponsor">Sponsor entfernen</button>
+          </article>{% endfor %}
+        </div>
+        <button type="button" class="button secondary" id="add-sponsor">Sponsor hinzufügen</button>
+        <template id="sponsor-template"><article class="sponsor-row"><div class="branding-field-grid"><label>Sponsorname<input data-sponsor-name maxlength="500" required></label><label>Logo / Medienobjekt<select data-sponsor-media><option value="">Kein Medium</option>{% for asset in media_assets %}<option value="{{asset.id}}">{{asset.filename}}</option>{% endfor %}</select></label><label>Instagram-Erwähnung<input data-sponsor-mention placeholder="@benutzername"></label><label>Platzierung<select data-sponsor-placement><option value="top">Oben</option><option value="bottom">Unten</option><option value="left">Links</option><option value="right">Rechts</option><option value="footer" selected>Fußbereich</option></select></label></div><div class="checkbox-grid"><label><input type="checkbox" data-sponsor-flag="use_feed" checked> Im Feed</label><label><input type="checkbox" data-sponsor-flag="use_story" checked> In Storys</label><label><input type="checkbox" data-sponsor-flag="use_announcement" checked> Bei Ankündigungen</label><label><input type="checkbox" data-sponsor-flag="use_result" checked> Bei Ergebnissen</label><label><input type="checkbox" data-sponsor-flag="required"> Pflichtangabe</label></div><fieldset><legend>Zugeordnete Mannschaften</legend><div class="chip-group">{% for team in teams %}<label><input type="checkbox" data-sponsor-team value="{{team.id}}"><span>{{team.display_name}}</span></label>{% endfor %}</div></fieldset><div class="branding-field-grid"><label>Gültig ab<input type="date" data-sponsor-valid-from></label><label>Gültig bis<input type="date" data-sponsor-valid-until></label></div><button type="button" class="button danger remove-sponsor">Sponsor entfernen</button></article></template>
+      </section>
+
+      <details id="erweitert" class="branding-section branding-advanced">
+        <summary><span><strong>5. Erweiterte Vorgaben</strong><small>Optionale Feinabstimmung für Feed, Story und besondere Gestaltungsregeln</small></span></summary>
+        <div class="advanced-content">
+          <h3>Feed-Vorgaben</h3><p><strong>Format: 1080 × 1350 Pixel.</strong> Dieses Instagram-Hochformat ist fest vorgegeben.</p>
+          <div class="branding-field-grid"><label>Maximale Textmenge<select name="feed_max_text_amount">{% for value,label in [('little','Wenig'),('normal','Normal'),('detailed','Ausführlich')] %}<option value="{{value}}" {% if image.feed_settings.max_text_amount==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label><div class="checkbox-grid"><label><input type="checkbox" name="feed_use_player_image" {% if image.feed_settings.use_player_image %}checked{% endif %}> Spielerbild verwenden</label><label><input type="checkbox" name="feed_show_sponsors" {% if image.feed_settings.show_sponsors %}checked{% endif %}> Sponsoren anzeigen</label><label><input type="checkbox" name="feed_show_club_logo" {% if image.feed_settings.show_club_logo %}checked{% endif %}> Vereinslogo anzeigen</label><label><input type="checkbox" name="feed_highlight_result" {% if image.feed_settings.highlight_result %}checked{% endif %}> Ergebnis hervorheben</label></div><label class="full-span">Weitere Feed-Vorgaben <span class="field-kind optional">optional</span><textarea name="feed_extra_rules" rows="3" maxlength="1200">{{image.feed_settings.extra_rules}}</textarea></label></div>
+          <h3>Story-Vorgaben</h3><p><strong>Format: 1080 × 1920 Pixel.</strong> Die Sicherheitsbereiche halten Inhalte von Bedienelementen der Instagram-App fern.</p>
+          <div class="branding-field-grid"><label>Sicherheitsbereich oben (%)<input type="number" name="story_safe_top" value="{{image.story_settings.safe_top}}" min="0" max="35"></label><label>Sicherheitsbereich unten (%)<input type="number" name="story_safe_bottom" value="{{image.story_settings.safe_bottom}}" min="0" max="35"></label><div class="checkbox-grid full-span"><label><input type="checkbox" name="story_use_player_image" {% if image.story_settings.use_player_image %}checked{% endif %}> Spielerbild verwenden</label><label><input type="checkbox" name="story_show_sponsors" {% if image.story_settings.show_sponsors %}checked{% endif %}> Sponsoren anzeigen</label><label><input type="checkbox" name="story_show_club_logo" {% if image.story_settings.show_club_logo %}checked{% endif %}> Vereinslogo anzeigen</label><label><input type="checkbox" name="story_show_call_to_action" {% if image.story_settings.show_call_to_action %}checked{% endif %}> Call-to-Action anzeigen</label><label><input type="checkbox" name="story_countdown_area" {% if image.story_settings.countdown_area %}checked{% endif %}> Countdown-Bereich vorsehen</label></div><label class="full-span">Weitere Story-Vorgaben <span class="field-kind optional">optional</span><textarea name="story_extra_rules" rows="3" maxlength="1200">{{image.story_settings.extra_rules}}</textarea></label></div>
+          <div><label>Verbotene Farben</label><div class="repeat-list color-list" data-repeat-list="forbidden_colors">{% for color in image.forbidden_colors %}<div class="repeat-row"><input type="color" value="{{color}}" aria-label="Verbotene Farbe auswählen"><input name="forbidden_colors" value="{{color}}" pattern="#[0-9A-Fa-f]{6}"><button type="button" class="remove-row">Entfernen</button></div>{% endfor %}</div><button type="button" class="button secondary add-row" data-add-color="forbidden_colors">Farbe hinzufügen</button></div>
+          {% if image.legacy_values or text.legacy_values %}<div class="legacy-values"><h3>Übernommene Altwerte</h3><p>Nicht eindeutig konvertierbare frühere Angaben bleiben erhalten und werden beim Speichern nicht verworfen.</p><dl>{% for key,value in image.legacy_values.items() %}<dt>{{key}}</dt><dd>{{value}}</dd>{% endfor %}{% for key,value in text.legacy_values.items() %}<dt>{{key}}</dt><dd>{{value}}</dd>{% endfor %}</dl></div>{% endif %}
+        </div>
+      </details>
+    </div>
+
+    <aside class="branding-preview-panel" aria-label="Live-Vorschau">
+      <div class="preview-toolbar"><strong>Live-Vorschau</strong><div class="segmented"><label><input type="radio" name="preview_format" value="feed" checked><span>Feed</span></label><label><input type="radio" name="preview_format" value="story"><span>Story</span></label></div><div class="segmented"><label><input type="radio" name="preview_type" value="announcement" checked><span>Spielankündigung</span></label><label><input type="radio" name="preview_type" value="result"><span>Ergebnisbeitrag</span></label></div></div>
+      <div id="branding-preview" class="branding-preview preview-feed" data-logo-position="{{image.logo_placement}}" data-player-position="{{image.player_position}}" data-safe-margins="{{image.safe_margins}}" style="--brand-primary:{{image.primary_color}};--brand-secondary:{{image.secondary_color}};--brand-accent:{{image.accent_colors[0] if image.accent_colors else image.primary_color}}">
+        <div class="preview-background"></div><div class="preview-safe-area"></div>
+        <div class="preview-logo">{% if current_logo %}<img src="/logos/{{current_logo.id}}/preview" alt="Vereinslogo in der Vorschau">{% else %}<span>Vereinslogo</span>{% endif %}</div>
+        <div class="preview-player" aria-hidden="true"><span>Spieler</span></div>
+        <div class="preview-copy"><small class="preview-kicker">SPIELANKÜNDIGUNG</small><strong class="preview-club">{{examples.team_name}}</strong><span class="preview-versus">VS. NÄCHSTER GEGNER</span><span class="preview-details">SONNTAG · {{examples.venue}}</span></div>
+        <div class="preview-sponsor">Sponsor</div>
+      </div>
+      <p class="preview-note">Die Vorschau nutzt dieselben strukturierten Vereinswerte wie die Beitragserzeugung. KI-Motive und konkrete Spielerfotos können im fertigen Beitrag abweichen.</p>
+      <button type="button" class="button secondary" id="refresh-preview">Vorschau aktualisieren</button>
+    </aside>
+  </div>
 </form>
+
+<script src="/static/branding.js?v=20260806-branding-assistant" defer></script>
 {% endblock %}
