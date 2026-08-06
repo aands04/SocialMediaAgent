@@ -533,10 +533,14 @@ def enqueue_bundle_create(
         by_game = {item.game_id: item for item in existing_posts}
         return None, by_game[games[0].id]
     if existing_posts:
-        raise ValueError(
-            "Mindestens ein verbundener Teilbeitrag existiert bereits. Bitte vorhandene "
-            "Beiträge prüfen oder die Spiele bewusst trennen."
-        )
+        # Older versions allowed one member of a generated bundle to be
+        # deleted independently. Open the surviving contribution instead of
+        # trapping the user between a failed regeneration and an inaccessible
+        # partial bundle. The detail page offers the guarded whole-bundle
+        # cleanup; no existing AI result is deleted automatically.
+        by_game = {item.game_id: item for item in existing_posts}
+        existing = next(by_game[item.id] for item in games if item.id in by_game)
+        return None, existing
     digest = hashlib.sha256(":".join(game_ids).encode("utf-8")).hexdigest()[:24]
     key = f"create-bundle:{post_type}:{digest}"
     existing_job = db.scalar(

@@ -2822,14 +2822,23 @@ def post_detail(
         )
     )
     bundle = (item.design_snapshot or {}).get("club_matchday_carousel") or {}
-    aggregate_bundle = bundle.get("role") == "primary"
+    aggregate_bundle = bool(bundle.get("primary_post_id") and bundle.get("member_post_ids"))
+    bundle_error = None
     if aggregate_bundle:
         try:
             primary, bundle_posts, jobs, job_posts = matchday_bundle_jobs(db, item)
         except ClubCarouselConflict as exc:
-            raise HTTPException(409, str(exc)) from exc
+            bundle_error = str(exc)
+            primary, bundle_posts, jobs, job_posts = matchday_bundle_jobs(
+                db,
+                item,
+                allow_incomplete=True,
+            )
         if primary.id != item.id:
-            raise HTTPException(409, "Der gemeinsame Hauptbeitrag ist widersprüchlich")
+            return redirect(
+                f"/posts/{primary.id}",
+                "Der gemeinsame Spieltagsbeitrag wird vollständig angezeigt",
+            )
         for member in bundle_posts:
             require(current, db, "view", member.team_id)
     else:
@@ -2931,9 +2940,13 @@ def post_detail(
     can_edit_all = all(
         allowed(db, current, "edit_post", member.team_id) for member in bundle_posts
     )
+    can_delete_all = all(
+        allowed(db, current, "approve", member.team_id) for member in bundle_posts
+    )
     carousel_job = next((job for job in jobs if job.kind == "carousel"), None)
     can_reorder_carousel = bool(
         aggregate_bundle
+        and not bundle_error
         and can_edit_all
         and carousel_job
         and carousel_job.status
@@ -2965,6 +2978,7 @@ def post_detail(
         logo_recompose=logo_recompose_availability(item, own_jobs),
         bundle_posts=bundle_posts,
         aggregate_bundle=aggregate_bundle,
+        bundle_error=bundle_error,
         job_posts=job_posts,
         job_teams=job_teams,
         schedule_values=schedule_values,
@@ -2982,12 +2996,12 @@ def post_detail(
         current_media_asset=current_media_asset,
         alternative_media_assets=alternative_media_assets,
         can_edit=can_edit_all,
-        can_generate=all(
+        can_generate=not bundle_error
+        and all(
             allowed(db, current, "generate", member.team_id) for member in bundle_posts
         ),
-        can_approve=all(
-            allowed(db, current, "approve", member.team_id) for member in bundle_posts
-        ),
+        can_approve=not bundle_error and can_delete_all,
+        can_delete=can_delete_all,
         now=now,
         title="Beitrag prüfen",
     )
@@ -3431,7 +3445,12 @@ def delete_post(
         raise HTTPException(422, str(exc)) from exc
     return redirect(
         "/posts",
-        f"Beitrag gelöscht; {result.publication_jobs} unveröffentlichte Aufträge entfernt",
+        (
+            f"{result.posts} verbundene Beiträge gelöscht; "
+            f"{result.publication_jobs} unveröffentlichte Aufträge entfernt"
+            if result.posts > 1
+            else f"Beitrag gelöscht; {result.publication_jobs} unveröffentlichte Aufträge entfernt"
+        ),
     )
 
 

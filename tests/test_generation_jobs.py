@@ -201,6 +201,12 @@ def test_progress_text_generator_records_exact_provider_prompt(db):
 
 def test_grouped_dashboard_click_enqueues_one_coordinator_job(db):
     page, first, first_game, user = graph(db)
+    first_game.kickoff = first_game.kickoff.replace(
+        hour=13,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
     first.rules = {
         **(first.rules or {}),
         "announcement_enabled": True,
@@ -242,6 +248,64 @@ def test_grouped_dashboard_click_enqueues_one_coordinator_job(db):
     assert job.parameters["single_shared_text_prompt"] is True
     assert job.parameters["bundle_game_ids"] == [first_game.id, second_game.id]
     assert db.query(GenerationJob).count() == 1
+
+
+def test_incomplete_bundle_click_opens_surviving_post_without_new_ai_job(db):
+    page, first, first_game, user = graph(db)
+    first_game.kickoff = first_game.kickoff.replace(
+        hour=13,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    first.rules = {
+        **(first.rules or {}),
+        "announcement_enabled": True,
+        "club_matchday_feed_mode": "announcements",
+    }
+    second = Team(
+        internal_name="jobs-incomplete-two",
+        display_name="SV Jobs II",
+        short_name="SVJ II",
+        slug="jobs-incomplete-two",
+        club=first.club,
+        fussball_url="https://www.fussball.de/jobs-incomplete-two",
+        instagram_page_id=page.id,
+        media_subdir="jobs-incomplete-two",
+        rules={
+            "announcement_enabled": True,
+            "club_matchday_feed_mode": "announcements",
+        },
+    )
+    db.add(second)
+    db.flush()
+    second_game = Game(
+        team_id=second.id,
+        provider="mock",
+        external_id="generation-job-incomplete-two",
+        home_team=second.display_name,
+        away_team="FC Test II",
+        kickoff=first_game.kickoff + timedelta(hours=2),
+        source_url="fixture://jobs-incomplete-two",
+    )
+    surviving_post = Post(
+        game_id=first_game.id,
+        team_id=first.id,
+        instagram_page_id=page.id,
+        post_type="announcement",
+        status=PostStatus.PENDING,
+        text="Vorhandener Teilbeitrag",
+    )
+    db.add_all([second_game, surviving_post])
+    db.commit()
+
+    job, existing = generation.enqueue_bundle_create(
+        db, second_game, second, user, "announcement"
+    )
+
+    assert job is None
+    assert existing.id == surviving_post.id
+    assert db.query(GenerationJob).count() == 0
 
 
 def test_progress_renderer_records_exact_image_provider_prompt(db, tmp_path):

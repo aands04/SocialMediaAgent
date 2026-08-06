@@ -124,6 +124,111 @@ def test_unpublished_post_is_deleted_with_files_jobs_and_audit(db, tmp_path):
     assert audit.details["reason"] == "Fehlentwurf"
 
 
+def test_deleting_bundle_removes_every_unpublished_member_and_file(db, tmp_path):
+    page, first_team, first_game, user = graph(db)
+    generated = tmp_path / "generated"
+    upload = tmp_path / "uploads"
+    generated.mkdir()
+    upload.mkdir()
+    second_team = Team(
+        internal_name="post-management-two",
+        display_name="SV Test II",
+        short_name="SVT II",
+        slug="post-management-two",
+        club=first_team.club,
+        fussball_url="https://www.fussball.de/test-two",
+        instagram_page_id=page.id,
+        media_subdir="test-two",
+    )
+    db.add(second_team)
+    db.flush()
+    second_game = Game(
+        team_id=second_team.id,
+        provider="mock",
+        external_id="post-management-two",
+        home_team="SV Test II",
+        away_team="FC Beispiel II",
+        kickoff=first_game.kickoff + timedelta(hours=2),
+        competition="Testliga",
+        venue="Teststadion",
+        pitch="Rasenplatz",
+        source_url="fixture://post-management-two",
+    )
+    db.add(second_game)
+    db.flush()
+    first_media = generated / "first.png"
+    second_media = generated / "second.png"
+    first_media.write_bytes(b"first")
+    second_media.write_bytes(b"second")
+    primary, first_publication = post_with_feed(
+        db, page, first_team, first_game, first_media
+    )
+    member, second_publication = post_with_feed(
+        db, page, second_team, second_game, second_media
+    )
+    member_ids = [primary.id, member.id]
+    for item, role in ((primary, "primary"), (member, "member")):
+        item.design_snapshot = {
+            "club_matchday_carousel": {
+                "primary_post_id": primary.id,
+                "member_post_ids": member_ids,
+                "role": role,
+            }
+        }
+    db.commit()
+
+    result = delete_unpublished_post(
+        db,
+        Settings(generated_root=generated, upload_root=upload),
+        primary,
+        user,
+        expected_version=primary.version,
+    )
+
+    assert result.posts == 2
+    assert result.publication_jobs == 2
+    assert db.get(Post, primary.id) is None
+    assert db.get(Post, member.id) is None
+    assert db.get(PublicationJob, first_publication.id) is None
+    assert db.get(PublicationJob, second_publication.id) is None
+    assert not first_media.exists()
+    assert not second_media.exists()
+    assert db.query(AuditLog).filter_by(action="post.deleted").count() == 2
+
+
+def test_deleting_incomplete_legacy_bundle_removes_surviving_post(db, tmp_path):
+    page, team, game, user = graph(db)
+    generated = tmp_path / "generated"
+    upload = tmp_path / "uploads"
+    generated.mkdir()
+    upload.mkdir()
+    media = generated / "legacy.png"
+    media.write_bytes(b"legacy")
+    post, publication = post_with_feed(db, page, team, game, media)
+    missing_post_id = "00000000-0000-0000-0000-000000000099"
+    post.design_snapshot = {
+        "club_matchday_carousel": {
+            "primary_post_id": post.id,
+            "member_post_ids": [post.id, missing_post_id],
+            "role": "primary",
+        }
+    }
+    db.commit()
+
+    result = delete_unpublished_post(
+        db,
+        Settings(generated_root=generated, upload_root=upload),
+        post,
+        user,
+        expected_version=post.version,
+    )
+
+    assert result.posts == 1
+    assert db.get(Post, post.id) is None
+    assert db.get(PublicationJob, publication.id) is None
+    assert not media.exists()
+
+
 def test_published_post_cannot_be_deleted(db, tmp_path):
     page, team, game, user = graph(db)
     generated = tmp_path / "generated"

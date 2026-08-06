@@ -1690,6 +1690,7 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
         state = coordinate_club_matchday_feed(db, posts[-1], requested_by=None)
         db.commit()
         primary_id = state.primary_post_id
+        member_id = next(post.id for post in posts if post.id != primary_id)
         team_ids = [team.id for team in teams]
         carousel_version = db.query(PublicationJob).filter_by(
             post_id=primary_id,
@@ -1707,6 +1708,12 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
     assert "Dashboard Mannschaft 2" in response.text
     assert "Reihenfolge des Karussells" in response.text
     assert "Erstes Bild festlegen" in response.text
+    assert "Gemeinsamen Beitrag löschen" in response.text
+    assert "Teilbeitrag einzeln bearbeiten" not in response.text
+
+    member_response = client.get(f"/posts/{member_id}", follow_redirects=False)
+    assert member_response.status_code == 303
+    assert member_response.headers["location"].startswith(f"/posts/{primary_id}")
 
     reordered = client.post(
         f"/posts/{primary_id}/carousel/order",
@@ -1722,6 +1729,101 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
         primary = db.get(Post, primary_id)
         members = matchday_bundle_jobs(db, primary)[1]
         assert [member.team_id for member in members] == [team_ids[1], team_ids[0]]
+
+
+def test_incomplete_legacy_matchday_post_can_be_opened_and_deleted(browser, tmp_path):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="broken-bundle-page",
+            display_name="Beschädigte Bündelung",
+            username="broken_bundle",
+            club="Dashboard Testverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="broken-bundle-team",
+            display_name="Dashboard Mannschaft I",
+            short_name="DM I",
+            slug="broken-bundle-team",
+            club="Dashboard Testverein",
+            fussball_url="https://example.invalid/broken-bundle",
+            instagram_page_id=page.id,
+            media_subdir="broken-bundle-team",
+        )
+        db.add(team)
+        db.flush()
+        game = Game(
+            team_id=team.id,
+            provider="mock",
+            external_id="broken-bundle-game",
+            home_team=team.display_name,
+            away_team="Gegner",
+            kickoff=datetime(2026, 8, 16, 15, tzinfo=timezone.utc),
+            competition="Kreisliga",
+            venue="Sportplatz",
+            pitch="Rasenplatz",
+            source_url="fixture://broken-bundle-game",
+        )
+        db.add(game)
+        db.flush()
+        media_path = tmp_path / "broken-bundle-feed.png"
+        Image.new("RGB", (1080, 1350), "blue").save(media_path)
+        post = Post(
+            game_id=game.id,
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="announcement",
+            status=PostStatus.PENDING,
+            text="Unvollständiger gemeinsamer Beitrag",
+            feed_path=str(media_path),
+            critical_warnings=[],
+        )
+        db.add(post)
+        db.flush()
+        missing_id = "00000000-0000-0000-0000-000000000099"
+        post.design_snapshot = {
+            "club_matchday_carousel": {
+                "primary_post_id": post.id,
+                "member_post_ids": [post.id, missing_id],
+                "role": "primary",
+            }
+        }
+        publication = PublicationJob(
+            post_id=post.id,
+            game_id=game.id,
+            team_id=team.id,
+            instagram_page_id=page.id,
+            kind="feed",
+            media_path=str(media_path),
+            scheduled_at=game.kickoff - timedelta(days=2),
+            idempotency_key=f"{post.id}:feed:v1",
+        )
+        db.add(publication)
+        db.commit()
+        post_id = post.id
+        version = post.version
+
+    response = client.get(f"/posts/{post_id}")
+    assert response.status_code == 200
+    assert "Unvollständiger gemeinsamer Spieltagsbeitrag" in response.text
+    assert "Gemeinsamen Beitrag löschen" in response.text
+    assert "ausdrücklich freigeben" not in response.text
+
+    deleted = client.post(
+        f"/posts/{post_id}/delete",
+        data={
+            "csrf_token": session_csrf(client),
+            "version": version,
+            "confirmation": "BEITRAG LÖSCHEN",
+        },
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    with factory() as db:
+        assert db.get(Post, post_id) is None
 
 
 def test_dashboard_admin_flow(browser):
