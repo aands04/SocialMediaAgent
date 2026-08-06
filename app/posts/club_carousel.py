@@ -11,10 +11,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.games.bundles import generation_bundle_games
+from app.logos.service import normalize_club_name
 from app.models import (
     AuditLog,
     Game,
     JobStatus,
+    MetaPublishingAttempt,
     Post,
     PostStatus,
     PublicationJob,
@@ -133,6 +135,198 @@ def matchday_bundle_jobs(
     )
     post_by_id = {member.id: member for member in members}
     return primary, members, visible, {job.id: post_by_id[job.post_id] for job in visible}
+
+
+def reorder_matchday_carousel(
+    db: Session,
+    post: Post,
+    *,
+    first_team_id: str,
+    expected_job_version: int,
+    requested_by: str,
+    save_as_default: bool = False,
+) -> PublicationJob:
+    """Move one team to the first carousel position without regenerating media."""
+    members = matchday_bundle_posts(db, post)
+    bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
+    if len(members) < 2 or bundle.get("role") != "primary":
+        raise ClubCarouselConflict("Dieser Beitrag ist kein gemeinsames Vereinskarussell")
+
+    member_ids = [member.id for member in members]
+    locked_members = {
+        member.id: member
+        for member in db.scalars(
+            select(Post)
+            .where(Post.club_id == post.club_id, Post.id.in_(member_ids))
+            .with_for_update()
+        )
+    }
+    if len(locked_members) != len(member_ids):
+        raise ClubCarouselConflict("Mindestens ein Teilbeitrag ist nicht mehr verfügbar")
+    members = [locked_members[member_id] for member_id in member_ids]
+    teams = {
+        team.id: team
+        for team in db.scalars(
+            select(Team).where(
+                Team.club_id == post.club_id,
+                Team.id.in_([member.team_id for member in members]),
+            )
+        )
+    }
+    if first_team_id not in teams or not any(
+        member.team_id == first_team_id for member in members
+    ):
+        raise ClubCarouselConflict("Die ausgewählte Mannschaft gehört nicht zu diesem Karussell")
+
+    carousel = db.scalar(
+        select(PublicationJob)
+        .where(
+            PublicationJob.club_id == post.club_id,
+            PublicationJob.post_id == post.id,
+            PublicationJob.kind == "carousel",
+        )
+        .with_for_update()
+    )
+    if not carousel:
+        raise ClubCarouselConflict("Der Karussell-Veröffentlichungsauftrag fehlt")
+    if carousel.version != expected_job_version:
+        raise ClubCarouselConflict(
+            "Das Karussell wurde zwischenzeitlich geändert. Bitte die Seite neu laden."
+        )
+    if (
+        carousel.status
+        in {
+            JobStatus.PUBLISHING,
+            JobStatus.PUBLISHED,
+            JobStatus.RETRY,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.SKIPPED,
+            JobStatus.UNCERTAIN,
+        }
+        or carousel.published_at
+        or carousel.platform_id
+        or carousel.attempts
+        or carousel.locked_at
+        or db.scalar(
+            select(MetaPublishingAttempt.id).where(
+                MetaPublishingAttempt.publication_job_id == carousel.id
+            )
+        )
+    ):
+        raise ClubCarouselConflict(
+            "Die Reihenfolge kann nach Beginn eines Plattformvorgangs nicht mehr geändert werden"
+        )
+
+    media_items = list(
+        db.scalars(
+            select(PublicationMediaItem)
+            .where(PublicationMediaItem.publication_job_id == carousel.id)
+            .order_by(PublicationMediaItem.position)
+            .with_for_update()
+        )
+    )
+    if len(media_items) != len(members):
+        raise ClubCarouselConflict(
+            "Die Zahl der Karussellbilder stimmt nicht mit den Teilbeiträgen überein"
+        )
+
+    old_team_ids = [member.team_id for member in members]
+    selected_member = next(member for member in members if member.team_id == first_team_id)
+    ordered_members = [selected_member, *[member for member in members if member.id != selected_member.id]]
+    new_team_ids = [member.team_id for member in ordered_members]
+
+    if save_as_default:
+        selected_team = teams[first_team_id]
+        siblings = list(
+            db.scalars(
+                select(Team).where(
+                    Team.club_id == post.club_id,
+                    Team.instagram_page_id == selected_team.instagram_page_id,
+                    Team.active.is_(True),
+                    Team.archived_at.is_(None),
+                )
+            )
+        )
+        for sibling in siblings:
+            if normalize_club_name(sibling.club) != normalize_club_name(selected_team.club):
+                continue
+            rules = dict(sibling.rules or {})
+            rules["club_matchday_primary_team_id"] = first_team_id
+            sibling.rules = rules
+            sibling.version += 1
+
+    if old_team_ids != new_team_ids:
+        media_by_post = dict(zip(member_ids, media_items, strict=True))
+        for position, media in enumerate(media_items, start=1):
+            media.position = -position
+        db.flush()
+        for position, member in enumerate(ordered_members, start=1):
+            media = media_by_post[member.id]
+            media.position = position
+            media.version += 1
+
+        carousel.media_path = media_by_post[ordered_members[0].id].media_path
+        carousel.status = JobStatus.UNAPPROVED
+        carousel.approval_status = "reapproval_required"
+        carousel.approved_post_version = None
+        carousel.error = "Karussell-Reihenfolge geändert; erneute Freigabe erforderlich"
+        carousel.version += 1
+
+        primary = locked_members[post.id]
+        if primary.status in {PostStatus.APPROVED, PostStatus.SCHEDULED}:
+            primary.status = PostStatus.REAPPROVAL
+        primary.approved_version = None
+        primary.approved_by = None
+        primary.approved_at = None
+        primary.last_edited_by = requested_by
+        primary.version += 1
+        carousel.idempotency_key = (
+            f"{primary.id}:club-carousel:{primary.post_type}:v{primary.version}:order"
+        )
+        for open_job in db.scalars(
+            select(PublicationJob).where(
+                PublicationJob.post_id == primary.id,
+                PublicationJob.status.not_in(
+                    [JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED]
+                ),
+            )
+        ):
+            open_job.status = JobStatus.UNAPPROVED
+            open_job.approval_status = "reapproval_required"
+            open_job.approved_post_version = None
+            if open_job.id != carousel.id:
+                open_job.error = (
+                    "Karussell-Reihenfolge geändert; erneute Freigabe erforderlich"
+                )
+
+        new_member_ids = [member.id for member in ordered_members]
+        new_game_ids = [member.game_id for member in ordered_members]
+        for member in ordered_members:
+            snapshot = dict(member.design_snapshot or {})
+            member_bundle = dict(snapshot.get("club_matchday_carousel") or {})
+            member_bundle["member_post_ids"] = new_member_ids
+            member_bundle["game_ids"] = new_game_ids
+            snapshot["club_matchday_carousel"] = member_bundle
+            member.design_snapshot = snapshot
+
+    db.add(
+        AuditLog(
+            user_id=requested_by,
+            team_id=post.team_id,
+            action="post.club_matchday_carousel_reordered",
+            entity_type="post",
+            entity_id=post.id,
+            details={
+                "old_team_ids": old_team_ids,
+                "new_team_ids": new_team_ids,
+                "saved_as_default": save_as_default,
+                "no_ai_generation": True,
+            },
+        )
+    )
+    db.flush()
+    return carousel
 
 
 def _utc(value: datetime) -> datetime:

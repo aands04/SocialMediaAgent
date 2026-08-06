@@ -8,6 +8,7 @@ from app.approvals.service import approve, approve_matchday_bundle
 from app.config import Settings
 from app.games.bundles import connect_games, generation_bundle_games, separate_games
 from app.models import (
+    AuditLog,
     Game,
     InstagramPage,
     JobStatus,
@@ -19,7 +20,12 @@ from app.models import (
     Team,
     User,
 )
-from app.posts.club_carousel import coordinate_club_matchday_feed, matchday_bundle_jobs
+from app.posts.club_carousel import (
+    ClubCarouselConflict,
+    coordinate_club_matchday_feed,
+    matchday_bundle_jobs,
+    reorder_matchday_carousel,
+)
 from app.posts.service import create_matchday_bundle_posts, create_post, feed_time
 from app.prompts.service import ResolvedPrompt
 from app.publishing.service import DryRunPublisher, PublishError
@@ -506,6 +512,131 @@ def test_preferred_team_image_is_first_even_when_it_plays_later(db, tmp_path):
         first_post.feed_path,
         second_post.feed_path,
     ]
+
+
+def test_default_order_prefers_first_team_even_when_second_team_plays_earlier(db):
+    page = _page(db)
+    first = _team(db, page, number=1, mode="announcements")
+    second = _team(db, page, number=2, mode="announcements")
+    second_game = _game(db, second, hour=13, number=2)
+    first_game = _game(db, first, hour=15, number=1)
+    db.commit()
+
+    bundled, _, key = generation_bundle_games(
+        db, second_game, second, "announcement"
+    )
+
+    assert key is not None
+    assert [item.id for item in bundled] == [first_game.id, second_game.id]
+
+
+def test_existing_carousel_can_be_reordered_and_saved_as_default(db, tmp_path):
+    page = _page(db)
+    first = _team(db, page, number=1, mode="announcements")
+    second = _team(db, page, number=2, mode="announcements")
+    first.rules = {**first.rules, "club_matchday_primary_team_id": second.id}
+    second.rules = {**second.rules, "club_matchday_primary_team_id": second.id}
+    second_game = _game(db, second, hour=13, number=2)
+    first_game = _game(db, first, hour=15, number=1)
+    second_post = _feed_post(db, tmp_path, second, second_game, number=2)
+    first_post = _feed_post(db, tmp_path, first, first_game, number=1)
+    editor = User(
+        email="carousel-order@example.invalid",
+        password_hash="not-used",
+        role=Role.ADMIN,
+        all_teams=True,
+        active=True,
+    )
+    db.add(editor)
+    db.commit()
+
+    completed = coordinate_club_matchday_feed(db, first_post, requested_by=editor.id)
+    db.commit()
+    primary = db.get(Post, completed.primary_post_id)
+    carousel = db.query(PublicationJob).filter_by(
+        post_id=primary.id, kind="carousel"
+    ).one()
+    primary.status = PostStatus.APPROVED
+    primary.approved_by = editor.id
+    primary.approved_version = primary.version
+    carousel.status = JobStatus.SCHEDULED
+    carousel.approval_status = "approved"
+    carousel.approved_post_version = primary.version
+    db.commit()
+
+    reorder_matchday_carousel(
+        db,
+        primary,
+        first_team_id=first.id,
+        expected_job_version=carousel.version,
+        requested_by=editor.id,
+        save_as_default=True,
+    )
+    db.commit()
+
+    db.refresh(primary)
+    db.refresh(carousel)
+    members = matchday_bundle_jobs(db, primary)[1]
+    media = (
+        db.query(PublicationMediaItem)
+        .filter_by(publication_job_id=carousel.id)
+        .order_by(PublicationMediaItem.position)
+        .all()
+    )
+    assert [member.team_id for member in members] == [first.id, second.id]
+    assert [item.media_path for item in media] == [
+        first_post.feed_path,
+        second_post.feed_path,
+    ]
+    assert carousel.media_path == first_post.feed_path
+    assert carousel.status == JobStatus.UNAPPROVED
+    assert carousel.approval_status == "reapproval_required"
+    assert primary.status == PostStatus.REAPPROVAL
+    assert first.rules["club_matchday_primary_team_id"] == first.id
+    assert second.rules["club_matchday_primary_team_id"] == first.id
+    audit = db.query(AuditLog).filter_by(
+        action="post.club_matchday_carousel_reordered",
+        entity_id=primary.id,
+    ).one()
+    assert audit.details["new_team_ids"] == [first.id, second.id]
+    assert audit.details["no_ai_generation"] is True
+
+
+def test_published_carousel_cannot_be_reordered(db, tmp_path):
+    page = _page(db)
+    first = _team(db, page, number=1, mode="announcements")
+    second = _team(db, page, number=2, mode="announcements")
+    first_game = _game(db, first, hour=15, number=1)
+    second_game = _game(db, second, hour=13, number=2)
+    _feed_post(db, tmp_path, first, first_game, number=1)
+    second_post = _feed_post(db, tmp_path, second, second_game, number=2)
+    editor = User(
+        email="published-carousel@example.invalid",
+        password_hash="not-used",
+        role=Role.ADMIN,
+        all_teams=True,
+        active=True,
+    )
+    db.add(editor)
+    db.commit()
+    completed = coordinate_club_matchday_feed(db, second_post, requested_by=editor.id)
+    db.commit()
+    primary = db.get(Post, completed.primary_post_id)
+    carousel = db.query(PublicationJob).filter_by(
+        post_id=primary.id, kind="carousel"
+    ).one()
+    carousel.status = JobStatus.PUBLISHED
+    carousel.platform_id = "instagram-media-id"
+    db.commit()
+
+    with pytest.raises(ClubCarouselConflict, match="Plattformvorgangs"):
+        reorder_matchday_carousel(
+            db,
+            primary,
+            first_team_id=second.id,
+            expected_job_version=carousel.version,
+            requested_by=editor.id,
+        )
 
 
 def test_shared_result_feed_waits_for_every_club_result(db, tmp_path):
