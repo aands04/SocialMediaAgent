@@ -906,6 +906,15 @@ def test_nginx_proxies_refresh_web_container_address_via_docker_dns():
         assert "proxy_pass http://web:8000;" not in config
 
 
+def test_nginx_proxy_healthcheck_uses_ipv4_loopback():
+    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "http://127.0.0.1/health" in compose
+    assert "http://localhost/health" not in compose
+    assert "start_period: 20s" in compose
+
+
 def test_player_image_upload_rejects_fake_images(browser, tmp_path, monkeypatch):
     client, factory = browser
     import app.admin_routes as admin_routes
