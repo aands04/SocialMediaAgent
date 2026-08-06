@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, time, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -73,15 +74,61 @@ def _sort_games(games: list[Game], teams: dict[str, Team], reference_team: Team)
             )
             if preferred:
                 break
+    if preferred:
+        return sorted(
+            games,
+            key=lambda item: (
+                0 if item.team_id == preferred else 1,
+                _utc(item.kickoff),
+                teams[item.team_id].display_name,
+                item.id,
+            ),
+        )
     return sorted(
         games,
         key=lambda item: (
-            0 if item.team_id == preferred else 1,
+            _squad_rank(teams[item.team_id]),
             _utc(item.kickoff),
             teams[item.team_id].display_name,
             item.id,
         ),
     )
+
+
+def _squad_rank(team: Team) -> int:
+    """Prefer senior squads without confusing founding years with team numbers."""
+    roman = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
+    words = {
+        "erste": 1,
+        "ersten": 1,
+        "zweite": 2,
+        "zweiten": 2,
+        "dritte": 3,
+        "dritten": 3,
+    }
+    club = normalize_club_name(team.club)
+    for value in (team.display_name, team.internal_name, team.short_name):
+        cleaned = re.sub(r"[._-]+", " ", (value or "").strip())
+        if cleaned and normalize_club_name(cleaned) == club:
+            return 1
+        tokens = cleaned.split()
+        if not tokens:
+            continue
+        last = tokens[-1].rstrip(".")
+        if last.upper() in roman and last == last.upper():
+            return roman[last.upper()]
+        if last.isdigit() and 1 <= int(last) <= 20:
+            return int(last)
+        if len(tokens) >= 2 and last.casefold() == "mannschaft":
+            squad = tokens[-2].rstrip(".")
+            if squad.upper() in roman and squad == squad.upper():
+                return roman[squad.upper()]
+            if squad.isdigit() and 1 <= int(squad) <= 20:
+                return int(squad)
+        for token in (item.casefold().rstrip(".") for item in tokens[-2:]):
+            if token in words:
+                return words[token]
+    return 100
 
 
 def generation_bundle_games(

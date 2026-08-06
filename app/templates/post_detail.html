@@ -94,6 +94,29 @@
   {% endif %}
   {% endfor %}
 </div>
+{% if aggregate_bundle and carousel_job %}
+<section>
+  <h2>Reihenfolge des Karussells</h2>
+  {% if can_reorder_carousel %}
+  <form method="post" action="/posts/{{item.id}}/carousel/order">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <input type="hidden" name="job_version" value="{{carousel_job.version}}">
+    <label>Mannschaft auf dem ersten Bild
+      <select name="first_team_id" required>
+        {% for bundle_team in bundle_team_choices %}
+        <option value="{{bundle_team.id}}" {% if loop.first %}selected{% endif %}>{{bundle_team.display_name}}</option>
+        {% endfor %}
+      </select>
+    </label>
+    {% if can_save_carousel_default %}<label><input type="checkbox" name="save_as_default" value="true" checked> Diese Mannschaft auch bei künftigen gemeinsamen Spieltagen zuerst anzeigen</label>{% endif %}
+    <button>Erstes Bild festlegen</button>
+    <small>Die vorhandenen Bilder werden nur umsortiert; es erfolgt kein neuer KI-Aufruf. Bei einer geänderten Reihenfolge ist anschließend eine erneute Freigabe erforderlich.</small>
+  </form>
+  {% else %}
+  <p class="notice">Die Reihenfolge kann nicht mehr geändert werden, weil die Veröffentlichung oder ein Plattformvorgang bereits begonnen hat.</p>
+  {% endif %}
+</section>
+{% endif %}
 {% if not is_manual and can_generate %}
 <form method="post" action="/posts/{{item.id}}/ai-revision">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">

@@ -173,12 +173,12 @@
       </label>
       <label>Erstes Bild im Vereinskarussell
         <select name="club_matchday_primary_team_id">
-          <option value="">Automatisch nach Anstoßzeit</option>
+          <option value="">Automatisch: 1. Mannschaft zuerst</option>
           {% for carousel_team in carousel_teams %}
           <option value="{{carousel_team.id}}" {% if selected.rules.get('club_matchday_primary_team_id')==carousel_team.id %}selected{% endif %}>{{carousel_team.display_name}}</option>
           {% endfor %}
         </select>
-        <small>Die gewählte Mannschaft steht im Karussell immer vorne. Die weiteren Spielbilder folgen chronologisch.</small>
+        <small>Ohne Auswahl wird die 1. Mannschaft vor der 2. Mannschaft einsortiert. Eine ausdrücklich gewählte Mannschaft steht immer vorne; die weiteren Spielbilder folgen chronologisch.</small>
       </label>
     </div>
     <p class="warning">Automatische Freigaben können bei aktivierter Instagram-Automatik ohne weitere manuelle Prüfung veröffentlicht werden. Fehlende Medien, Logos, Rechte oder Sicherheitsprüfungen blockieren weiterhin.</p>

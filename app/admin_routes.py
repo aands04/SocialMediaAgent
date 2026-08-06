@@ -84,7 +84,11 @@ from app.models import (
     UserTeam,
 )
 from app.platform.service import platform_audit
-from app.posts.club_carousel import ClubCarouselConflict, matchday_bundle_jobs
+from app.posts.club_carousel import (
+    ClubCarouselConflict,
+    matchday_bundle_jobs,
+    reorder_matchday_carousel,
+)
 from app.posts.manual import (
     MAX_MANUAL_IMAGE_BYTES,
     ManualPostError,
@@ -2890,6 +2894,13 @@ def post_detail(
             )
         )
     )
+    platform_attempt_job_ids = set(
+        db.scalars(
+            select(MetaPublishingAttempt.publication_job_id).where(
+                MetaPublishingAttempt.publication_job_id.in_([job.id for job in jobs])
+            )
+        )
+    )
     schedule_values = {}
     schedule_timezones = {}
     can_reschedule_jobs = {}
@@ -2917,6 +2928,30 @@ def post_detail(
             and not job.locked_at
             and job.id not in active_attempt_job_ids
         )
+    can_edit_all = all(
+        allowed(db, current, "edit_post", member.team_id) for member in bundle_posts
+    )
+    carousel_job = next((job for job in jobs if job.kind == "carousel"), None)
+    can_reorder_carousel = bool(
+        aggregate_bundle
+        and can_edit_all
+        and carousel_job
+        and carousel_job.status
+        not in {
+            JobStatus.PUBLISHING,
+            JobStatus.PUBLISHED,
+            JobStatus.RETRY,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.SKIPPED,
+            JobStatus.UNCERTAIN,
+        }
+        and not carousel_job.published_at
+        and not carousel_job.platform_id
+        and not carousel_job.attempts
+        and not carousel_job.locked_at
+        and carousel_job.id not in platform_attempt_job_ids
+    )
     return render(
         request,
         "post_detail.html",
@@ -2935,6 +2970,10 @@ def post_detail(
         schedule_values=schedule_values,
         schedule_timezones=schedule_timezones,
         can_reschedule_jobs=can_reschedule_jobs,
+        carousel_job=carousel_job,
+        can_reorder_carousel=can_reorder_carousel,
+        can_save_carousel_default=current.role == Role.ADMIN,
+        bundle_team_choices=[db.get(Team, member.team_id) for member in bundle_posts],
         carousel_teams={
             job.id: [db.get(Team, member.team_id) for member in bundle_posts]
             for job in jobs
@@ -2942,7 +2981,7 @@ def post_detail(
         },
         current_media_asset=current_media_asset,
         alternative_media_assets=alternative_media_assets,
-        can_edit=all(allowed(db, current, "edit_post", member.team_id) for member in bundle_posts),
+        can_edit=can_edit_all,
         can_generate=all(
             allowed(db, current, "generate", member.team_id) for member in bundle_posts
         ),
@@ -3165,6 +3204,54 @@ def recompose_post_media_logos(
         f"/generation-jobs/{job.id}",
         "Logo-Neuzusammensetzung wurde ohne neuen KI-Aufruf eingereiht",
     )
+
+
+@router.post("/posts/{post_id}/carousel/order")
+def change_carousel_order(
+    post_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    first_team_id: str = Form(),
+    job_version: int = Form(),
+    save_as_default: bool = Form(default=False),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    item = db.get(Post, post_id)
+    if not item:
+        raise HTTPException(404)
+    require(current, db, "view", item.team_id)
+    try:
+        primary, members, _jobs, _job_posts = matchday_bundle_jobs(db, item)
+    except ClubCarouselConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if primary.id != item.id or len(members) < 2:
+        raise HTTPException(409, "Dieser Beitrag ist kein gemeinsames Vereinskarussell")
+    for member in members:
+        require(current, db, "edit_post", member.team_id)
+    if save_as_default:
+        require_admin(current)
+    order_changed = members[0].team_id != first_team_id
+    try:
+        reorder_matchday_carousel(
+            db,
+            item,
+            first_team_id=first_team_id,
+            expected_job_version=job_version,
+            requested_by=current.id,
+            save_as_default=save_as_default,
+        )
+        db.commit()
+    except ClubCarouselConflict as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    message = "Karussell-Reihenfolge gespeichert"
+    if save_as_default:
+        message += "; Mannschaft auch für künftige Karussells priorisiert"
+    if order_changed:
+        message += "; erneute Freigabe erforderlich"
+    return redirect(f"/posts/{item.id}", message)
 
 
 @router.post("/posts/{post_id}/approve")

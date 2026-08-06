@@ -46,7 +46,7 @@ from app.models import (
     Team,
     User,
 )
-from app.posts.club_carousel import coordinate_club_matchday_feed
+from app.posts.club_carousel import coordinate_club_matchday_feed, matchday_bundle_jobs
 from app.tenancy.state import system_scope, tenant_scope
 from app.web import berlin_datetime
 
@@ -1610,6 +1610,7 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
         db.add(page)
         db.flush()
         posts = []
+        teams = []
         for number, hour in ((1, 13), (2, 15)):
             team = Team(
                 internal_name=f"combined-team-{number}",
@@ -1627,6 +1628,7 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
             )
             db.add(team)
             db.flush()
+            teams.append(team)
             game = Game(
                 team_id=team.id,
                 provider="mock",
@@ -1688,6 +1690,11 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
         state = coordinate_club_matchday_feed(db, posts[-1], requested_by=None)
         db.commit()
         primary_id = state.primary_post_id
+        team_ids = [team.id for team in teams]
+        carousel_version = db.query(PublicationJob).filter_by(
+            post_id=primary_id,
+            kind="carousel",
+        ).one().version
 
     response = client.get(f"/posts/{primary_id}")
 
@@ -1698,6 +1705,23 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
     assert response.text.count("Zeitpunkt ändern") == 5
     assert "Dashboard Mannschaft 1" in response.text
     assert "Dashboard Mannschaft 2" in response.text
+    assert "Reihenfolge des Karussells" in response.text
+    assert "Erstes Bild festlegen" in response.text
+
+    reordered = client.post(
+        f"/posts/{primary_id}/carousel/order",
+        data={
+            "csrf_token": session_csrf(client),
+            "first_team_id": team_ids[1],
+            "job_version": carousel_version,
+        },
+        follow_redirects=False,
+    )
+    assert reordered.status_code == 303
+    with factory() as db:
+        primary = db.get(Post, primary_id)
+        members = matchday_bundle_jobs(db, primary)[1]
+        assert [member.team_id for member in members] == [team_ids[1], team_ids[0]]
 
 
 def test_dashboard_admin_flow(browser):
