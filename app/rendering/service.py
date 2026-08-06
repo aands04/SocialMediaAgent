@@ -154,9 +154,15 @@ class Renderer:
             "team_logo": self._asset(data.get("team_logo")),
             "opponent_logo": self._asset(data.get("opponent_logo")),
         }
-        primary_rule, primary = self._font_face(data.get("primary_font_asset"), "primary", "Arial")
+        primary_rule, primary = self._font_face(
+            data.get("primary_font_asset"),
+            "primary",
+            data.get("primary_font_family") or "Arial",
+        )
         secondary_rule, secondary = self._font_face(
-            data.get("secondary_font_asset"), "secondary", "Arial"
+            data.get("secondary_font_asset"),
+            "secondary",
+            data.get("secondary_font_family") or "Arial",
         )
         css = (
             f":root{{--primary:{data.get('primary_color') or '#172554'};--secondary:{data.get('secondary_color') or '#fff'};--primary-font:{primary};--secondary-font:{secondary}}}"

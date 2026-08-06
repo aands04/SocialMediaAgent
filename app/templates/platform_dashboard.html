@@ -18,6 +18,15 @@
   <div><strong>{{failed_jobs}}</strong><span>fehlgeschlagene / zu prüfende Generierungen</span></div>
   <div><strong>{{reconciliation_alerts}}</strong><span>offene Speicherabweichungen</span></div>
 </div>
+<section>
+  <h2>KI-Prompts und Generierungen</h2>
+  <p>Zentrale Vorlagen bearbeiten und die tatsächlich an den KI-Anbieter versandten Bild- und Textprompts vereinsübergreifend prüfen.</p>
+  <div class="cards">
+    <div><strong>{{prompt_template_count}}</strong><span>gespeicherte Promptversionen</span></div>
+    <div><strong>{{prompt_dispatch_count}}</strong><span>protokollierte KI-Aufrufe</span></div>
+  </div>
+  <p><a class="button" href="/prompts">Promptvorlagen verwalten</a> <a class="button secondary" href="/platform/ai-generations">Versandte Prompts prüfen</a></p>
+</section>
 <h2>Vereine</h2>
 <table><tr><th>Verein</th><th>Status</th><th>Slug</th><th>Aktion</th></tr>
 {% for club in clubs %}<tr><td>{{club.name}}</td><td>{{club.status.value}}</td><td>{{club.slug}}</td><td><a class="button" href="/platform/clubs/{{club.id}}">Öffnen</a></td></tr>{% endfor %}</table>

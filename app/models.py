@@ -974,6 +974,53 @@ class ClubPromptOverride(Base, Timestamped):
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
 
 
+class AiPromptDispatch(Base):
+    """Exact provider input, visible only inside the PlatformAdmin area.
+
+    Tenant-owned posts deliberately keep only non-secret prompt metadata.  This
+    separate table allows platform support to audit actual provider requests
+    without exposing protected prompt contents through club routes or exports.
+    """
+
+    __tablename__ = "ai_prompt_dispatches"
+    __table_args__ = (
+        UniqueConstraint("club_id", "idempotency_key", name="uq_ai_prompt_dispatch_idempotency"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    post_id: Mapped[str | None] = mapped_column(
+        ForeignKey("posts.id", ondelete="SET NULL"), index=True
+    )
+    team_id: Mapped[str | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="SET NULL"), index=True
+    )
+    game_id: Mapped[str | None] = mapped_column(
+        ForeignKey("games.id", ondelete="SET NULL"), index=True
+    )
+    prompt_kind: Mapped[str] = mapped_column(String(20), index=True)
+    post_type: Mapped[str] = mapped_column(String(30), index=True)
+    media_kind: Mapped[str] = mapped_column(String(10), default="none", index=True)
+    provider: Mapped[str] = mapped_column(String(80), default="openai")
+    model: Mapped[str] = mapped_column(String(120))
+    prompt_template_id: Mapped[str | None] = mapped_column(
+        ForeignKey("prompt_templates.id", ondelete="SET NULL"), index=True
+    )
+    prompt_name: Mapped[str | None] = mapped_column(String(160))
+    prompt_version: Mapped[int | None] = mapped_column(Integer)
+    prompt_checksum: Mapped[str] = mapped_column(String(64), index=True)
+    rendered_prompt: Mapped[str] = mapped_column(Text)
+    attempt_number: Mapped[int] = mapped_column(Integer, default=1)
+    call_index: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(30), default="dispatched", index=True)
+    error_summary: Mapped[str | None] = mapped_column(String(500))
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    dispatched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class ProviderSnapshot(Base):
     __tablename__ = "provider_snapshots"
     __table_args__ = (

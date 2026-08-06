@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.branding.service import (
+    STANDARD_FONTS,
     BrandingValidationError,
     branding_completion,
     branding_form_state,
@@ -51,6 +52,26 @@ def test_invalid_structured_choices_are_rejected_on_write():
         validate_branding_settings({"graphic_style": "geheim"}, strict_choices=True)
     with pytest.raises(BrandingValidationError, match="erforderlich"):
         validate_branding_settings({"primary_color": ""}, strict_choices=True)
+    with pytest.raises(BrandingValidationError, match="Auswahl"):
+        validate_branding_settings(
+            {"primary_standard_font": "nicht-installiert"}, strict_choices=True
+        )
+
+
+def test_standard_fonts_are_controlled_and_available_to_branding():
+    assert {
+        "system",
+        "dejavu-sans",
+        "dejavu-serif",
+        "dejavu-mono",
+        "liberation-sans",
+        "liberation-serif",
+        "liberation-mono",
+    }.issubset(STANDARD_FONTS)
+    image, _text = branding_form_state(
+        {"primary_standard_font": "dejavu-sans"}, {}
+    )
+    assert image["primary_standard_font"] == "dejavu-sans"
 
 
 def test_active_team_requires_display_name_and_custom_cta_requires_text():
@@ -116,9 +137,10 @@ def test_completion_and_reset_keep_nonconvertible_values():
 
 def test_frontend_contains_no_real_club_or_venue_names():
     root = Path(__file__).parents[1]
-    sources = (
-        (root / "app/templates/branding.html").read_text(encoding="utf-8")
-        + (root / "app/static/branding.js").read_text(encoding="utf-8")
+    sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for pattern in ("*.py", "*.html", "*.js")
+        for path in (root / "app").rglob(pattern)
     )
     assert "SV Ehlen" not in sources
     assert "Habichtswaldstadion" not in sources

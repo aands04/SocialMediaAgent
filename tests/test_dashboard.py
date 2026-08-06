@@ -174,6 +174,8 @@ def test_branding_assistant_loads_and_saves_tenant_structured_values(browser):
     assert page.status_code == 200
     assert "Beispielstadt Erste" in page.text
     assert "Sportpark Beispielstadt" in page.text
+    assert "DejaVu Sans" in page.text
+    assert "Liberation Serif" in page.text
     assert "system prompt" not in page.text.casefold()
     token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
     response = client.post(
@@ -197,6 +199,8 @@ def test_branding_assistant_loads_and_saves_tenant_structured_values(browser):
             "player_background_ratio": "65",
             "dynamics": "balanced",
             "individualization": "club",
+            "primary_font_choice": "standard:dejavu-sans",
+            "secondary_font_choice": "standard:liberation-serif",
             "address_style": "ihr",
             "tone": "emotional",
             "text_length": "medium",
@@ -228,6 +232,10 @@ def test_branding_assistant_loads_and_saves_tenant_structured_values(browser):
         assert config.image_settings["primary_color"] == "#123456"
         assert config.image_settings["accent_colors"] == ["#ABCDEF", "#FEDCBA"]
         assert config.image_settings["image_effects"] == ["emotional", "modern"]
+        assert config.image_settings["primary_standard_font"] == "dejavu-sans"
+        assert config.image_settings["secondary_standard_font"] == "liberation-serif"
+        assert config.primary_font_id is None
+        assert config.secondary_font_id is None
         assert config.text_settings["hashtags"] == ["#Beispiel", "#Heimspiel"]
         assert config.text_settings["mentions"] == ["@test.konto"]
         assert config.text_settings["team_names"][0]["team_id"] == team_id

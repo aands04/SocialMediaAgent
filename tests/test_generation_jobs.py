@@ -5,6 +5,7 @@ from sqlalchemy import select
 from app.config import Settings
 from app.jobs import generation
 from app.models import (
+    AiPromptDispatch,
     Club,
     ClubStatus,
     Game,
@@ -17,6 +18,7 @@ from app.models import (
     Team,
     User,
 )
+from app.textgen.service import GeneratedText
 
 
 def graph(db):
@@ -153,6 +155,85 @@ def test_progress_renderer_passes_persistent_job_identity(db, tmp_path):
     renderer.render("feed", "post/feed-v1.png", {})
 
     assert inner.context["_generation_job_id"] == job.id
+
+
+def test_progress_text_generator_records_exact_provider_prompt(db):
+    _, _team, _game, user = graph(db)
+    job = generation.enqueue_create(
+        db,
+        db.query(Game).one(),
+        db.query(Team).one(),
+        user,
+        "announcement",
+    )[0]
+
+    class Prompt:
+        rendered = "EXAKTER VERSANDPROMPT MIT LAUFZEITDATEN"
+        name = "test-prompt"
+        version = 7
+        model = "test-text-model"
+        template_id = None
+
+    class TextProvider:
+        is_ai = True
+
+        def prepare_generate(self, data):
+            return data["text_prompt"].rendered, "test-prompt:v7", "test-text-model"
+
+        def generate(self, data):
+            assert data["text_prompt"].rendered == Prompt.rendered
+            return GeneratedText("Ergebnistext", "test-text-model", "test-prompt:v7")
+
+    result = generation._ProgressTextGenerator(TextProvider(), db, job).generate(
+        {"text_prompt": Prompt()}
+    )
+    dispatch = db.query(AiPromptDispatch).one()
+
+    assert result.text == "Ergebnistext"
+    assert dispatch.club_id == job.club_id
+    assert dispatch.generation_job_id == job.id
+    assert dispatch.prompt_kind == "text"
+    assert dispatch.rendered_prompt == Prompt.rendered
+    assert dispatch.prompt_name == "test-prompt"
+    assert dispatch.prompt_version == 7
+    assert dispatch.status == "completed"
+
+
+def test_progress_renderer_records_exact_image_provider_prompt(db, tmp_path):
+    _, team, game, user = graph(db)
+    job = generation.enqueue_create(db, game, team, user, "announcement")[0]
+
+    class Prompt:
+        rendered = "EXAKTER BILDPROMPT MIT SPIEL- UND BRANDINGDATEN"
+        name = "image-test-prompt"
+        version = 4
+        model = "test-image-model"
+        template_id = None
+
+    class ImageProvider:
+        is_ai = True
+
+        def render(self, kind, relative_path, context):
+            assert kind == "story"
+            assert context["image_prompt"].rendered == Prompt.rendered
+            return tmp_path / relative_path
+
+    result = generation._ProgressRenderer(ImageProvider(), db, job).render(
+        "story",
+        "post/story-v1.png",
+        {"image_prompt": Prompt()},
+    )
+    dispatch = db.query(AiPromptDispatch).one()
+
+    assert result == tmp_path / "post/story-v1.png"
+    assert dispatch.club_id == job.club_id
+    assert dispatch.generation_job_id == job.id
+    assert dispatch.prompt_kind == "image"
+    assert dispatch.media_kind == "story"
+    assert dispatch.rendered_prompt == Prompt.rendered
+    assert dispatch.prompt_name == "image-test-prompt"
+    assert dispatch.prompt_version == 4
+    assert dispatch.status == "completed"
 
 
 def test_ambiguous_openai_timeout_requires_manual_review(db, monkeypatch, tmp_path):

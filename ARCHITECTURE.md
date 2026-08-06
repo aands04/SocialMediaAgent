@@ -16,7 +16,7 @@ Externe Systeme liegen hinter Ports: `GameDataProvider`/`FussballDeProvider`, `S
 `User`, `UserTeam`, `Team`, `InstagramPage`, `Game`, `MediaAsset`, `LogoAsset`, `StoryRule`, `PromptTemplate`, `Post`, `PublicationJob`, `AuditLog`, `Notification` und `SystemSetting` bilden das Kernmodell. Eindeutige Constraints verhindern doppelte Spiele, Hauptbeiträge, Story-Regeln, Promptversionen, Medienpfade, Logo-Prüfsummen und Idempotency Keys. Das einmalige `reserved_game_id` erlaubt dasselbe Bild für Feed und Story eines Spiels, nicht für andere Spiele. Beiträge speichern Seite, Design-, Prompt-, Farb-, Font-, Logo-, Medien- und Textversionen als Snapshot.
 
 ## KI-Generierung und Promptinvarianten
-Bild- und Textprompts werden durch eine `SandboxedEnvironment` mit `StrictUndefined` gerendert. Nur explizit zugelassene Faktenplatzhalter sind erlaubt. Unveränderliche Sicherheitspräfixe verbieten erfundene Spielinformationen, Fantasielogos und zusätzliche Personen. Der Spielort wird vor dem Modellaufruf deterministisch normalisiert: Heimspiel `Habichtswaldstadion Ehlen`, Auswärtsrasen `RP [Ort]`, Auswärtskunstrasen `KR [Ort]`; eine fehlende Platzart blockiert den KI-Aufruf.
+Bild- und Textprompts werden durch eine `SandboxedEnvironment` mit `StrictUndefined` gerendert. Nur explizit zugelassene Faktenplatzhalter sind erlaubt. Unveränderliche Sicherheitspräfixe verbieten erfundene Spielinformationen, Fantasielogos und zusätzliche Personen. Der Spielort wird vor dem Modellaufruf deterministisch normalisiert: Bei Heimspielen gilt zuerst die im Vereinsbranding hinterlegte Kurzbezeichnung, danach die ausgewählte Standard-Heimspielstätte und erst danach der Spielort des Providers. Auswärtsrasen wird als `RP [Ort]`, Auswärtskunstrasen als `KR [Ort]` ausgegeben; eine fehlende Platzart blockiert den KI-Aufruf.
 
 Im KI-Bildmodus werden lokale Referenzen in fester semantischer Reihenfolge übergeben: Spielerfoto, verifiziertes eigenes Mannschaftslogo und optional das verifizierte Gegnerlogo. Der versionierte Prompt weist `gpt-image-2` an, die Logos als Bestandteil der Sportgrafik einzusetzen, ohne ihre Form, Farben, Schriftzüge oder Emblembestandteile umzudeuten. Fehlt das Gegnerlogo, verlangt der Prompt ausschließlich einen neutralen typografischen Gegnernamen. Die Referenz-IDs, Versionen, Prüfsummen, Reihenfolge und Prompt-Policy werden im Design-Snapshot eingefroren.
 
@@ -114,6 +114,14 @@ Clubbenutzer bearbeiten validierte strukturierte Bild- und Textparameter.
 Generierungssnapshots enthalten IDs, Versionen und Prüfsummen, aber keine
 Prompttexte. PlatformAdmin-Fixturetests werden auditiert und als nicht
 abrechenbare Plattformnutzung im Usage-Ledger erfasst.
+
+`AiPromptDispatch` speichert den finalen Provider-Input unmittelbar vor einem
+echten KI-Aufruf in einem separaten, tenantreferenzierten Plattformdatensatz.
+Die Plattformroute `/platform/ai-generations` ist von Clubrouten getrennt und
+erfordert ausdrücklich `PlatformAdmin`. Ein zusammengesetzter Idempotency Key
+aus Job, Versuch, Prompt-Art, Medium und Aufrufindex verhindert doppelte
+Dispatch-Einträge bei einer Wiederaufnahme. Club-Snapshots und Club-Exporte
+enthalten weiterhin nur nicht geheime Metadaten.
 
 Der Vereinsbereich stellt diese strukturierten Parameter über einen
 fünfteiligen Branding-Assistenten bereit. `ClubBrandingConfiguration` bleibt

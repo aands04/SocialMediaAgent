@@ -10,9 +10,11 @@ im HTML noch im JavaScript oder in API-Antworten ausgeliefert.
 
 Die vorhandene, versionierte `ClubBrandingConfiguration` bleibt die einzige
 Quelle der Branding-Einstellungen. Strukturierte Bildwerte werden weiterhin in
-`image_settings`, Textwerte in `text_settings` gespeichert. Schriftarten
-bleiben über `primary_font_id` und `secondary_font_id` referenziert. Deshalb ist
-für den Assistenten keine neue Datenbankmigration erforderlich.
+`image_settings`, Textwerte in `text_settings` gespeichert. Eigene Schriftarten
+bleiben über `primary_font_id` und `secondary_font_id` referenziert. Zusätzlich
+werden kontrollierte Standardschrift-Schlüssel in `image_settings` gespeichert;
+das Produktionsimage enthält DejaVu und Liberation. Deshalb ist für den
+Assistenten keine neue Datenbankmigration erforderlich.
 
 Sichere Standardwerte verwenden unter anderem Dunkelblau und Weiß als neutrale
 Ausgangsfarben, einen modernen Grafikstil, normale Sicherheitsabstände, eine
@@ -53,6 +55,11 @@ sind nicht als Rückfallwerte im Quellcode hinterlegt. Änderungen an
 Mannschaftsschreibweise oder Spielstätte aktualisieren die Beispiele im Browser
 ohne externen Dienstaufruf.
 
+Für generierte Heimspieltexte gilt dieselbe Priorität: Kurzbezeichnung der
+Heimspielstätte, ausgewählte Standard-Heimspielstätte, danach der konkrete
+Provider-Spielort. Bei Auswärtsspielen wird diese Vereinsvorgabe nicht anstelle
+des tatsächlichen Auswärtsspielorts verwendet.
+
 ## Mandantenschutz und Berechtigungen
 
 `GET /branding`, `POST /branding` und Schriftvorschauen verlangen eine aktive
@@ -90,4 +97,3 @@ Mannschaften des Vereins referenzieren. Diese Struktur kann später ohne
 Ohne JavaScript bleiben Felder, Altwerte und Speichern verfügbar. Dynamische
 Komfortfunktionen wie Tag-Eingabe, Sponsorenzeilen, Schriftvorschau,
 Live-Vorschau und Warnung vor ungespeicherten Änderungen benötigen JavaScript.
-

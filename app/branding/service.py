@@ -52,6 +52,34 @@ EMOJI_USAGE = {"none", "sparse", "normal", "frequent"}
 CTA_TYPES = {"support", "share", "comment", "attend", "none", "custom"}
 SPONSOR_PLACEMENTS = {"top", "bottom", "left", "right", "footer"}
 
+# Browser- und Chromium-taugliche Standardschriften. Vereinsbenutzer wählen
+# ausschließlich einen stabilen Schlüssel; die serverseitig kontrollierte
+# Font-Familie wird nie als beliebiger CSS-Wert aus einem Formular übernommen.
+STANDARD_FONTS = {
+    "system": {
+        "label": "Systemschrift",
+        "family": "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    },
+    "dejavu-sans": {"label": "DejaVu Sans", "family": "'DejaVu Sans', Arial, sans-serif"},
+    "dejavu-serif": {"label": "DejaVu Serif", "family": "'DejaVu Serif', Georgia, serif"},
+    "dejavu-mono": {
+        "label": "DejaVu Sans Mono",
+        "family": "'DejaVu Sans Mono', 'Courier New', monospace",
+    },
+    "liberation-sans": {
+        "label": "Liberation Sans",
+        "family": "'Liberation Sans', Arial, sans-serif",
+    },
+    "liberation-serif": {
+        "label": "Liberation Serif",
+        "family": "'Liberation Serif', Georgia, serif",
+    },
+    "liberation-mono": {
+        "label": "Liberation Mono",
+        "family": "'Liberation Mono', 'Courier New', monospace",
+    },
+}
+
 FEED_SETTING_KEYS = {
     "max_text_amount",
     "use_player_image",
@@ -110,6 +138,8 @@ SAFE_KEYS = {
     "player_background_ratio",
     "dynamics",
     "individualization",
+    "primary_standard_font",
+    "secondary_standard_font",
     "address_style",
     "tone",
     "text_length",
@@ -183,6 +213,8 @@ DEFAULT_IMAGE_SETTINGS = {
     "player_background_ratio": 60,
     "dynamics": "balanced",
     "individualization": "club",
+    "primary_standard_font": "system",
+    "secondary_standard_font": "system",
     "legacy_values": {},
 }
 
@@ -461,6 +493,8 @@ def validate_branding_settings(settings: dict | None, *, strict_choices: bool = 
         "text_length": TEXT_LENGTHS,
         "emoji_usage": EMOJI_USAGE,
         "cta_type": CTA_TYPES,
+        "primary_standard_font": set(STANDARD_FONTS),
+        "secondary_standard_font": set(STANDARD_FONTS),
     }
     for key, value in settings.items():
         if key in {"primary_color", "secondary_color"}:
@@ -675,8 +709,8 @@ def branding_completion(
         (bool(text.get("address_style")), "Ansprache"),
         (bool(text.get("tone")), "Tonalität"),
         (bool(image.get("accent_colors")), "Akzentfarbe"),
-        (bool(primary_font_id), "primäre Schriftart"),
-        (bool(secondary_font_id), "sekundäre Schriftart"),
+        (bool(primary_font_id or image.get("primary_standard_font")), "primäre Schriftart"),
+        (bool(secondary_font_id or image.get("secondary_standard_font")), "sekundäre Schriftart"),
         (bool(image.get("background_style")), "Hintergrundstil"),
         (bool(image.get("safe_margins")), "Sicherheitsabstände"),
         (bool(text.get("home_venue")), "Standard-Heimspielstätte"),
@@ -772,6 +806,11 @@ def prompt_data_block(snapshot: dict, prompt_kind: str) -> str:
         for key, value in snapshot["image" if prompt_kind == "image" else "text"].items()
         if key != "legacy_values"
     }
+    if prompt_kind == "image":
+        for key in ("primary_standard_font", "secondary_standard_font"):
+            font = STANDARD_FONTS.get(str(selected.get(key) or ""))
+            if font:
+                selected[key] = font["label"]
     payload = {
         "club_name": snapshot["club_name"],
         "club_short_name": snapshot["club_short_name"],
