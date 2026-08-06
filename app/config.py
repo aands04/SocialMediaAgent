@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     meta_scheduler_enabled: bool = False
     meta_automatic_publish_enabled: bool = False
     meta_connection_max_age_seconds: int = 86400
+    meta_connection_check_interval_seconds: int = 43200
     meta_container_poll_interval_seconds: int = 30
     meta_container_max_wait_seconds: int = 900
     meta_scheduler_batch_size: int = 5

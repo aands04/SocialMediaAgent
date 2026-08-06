@@ -57,6 +57,22 @@ Unmittelbar vor jedem externen Schritt prüft der Worker erneut:
 Der Benutzer, der die Beitragsversion freigegeben hat, muss weiterhin aktiv
 sein. Eine inaktive oder entfernte Freigabeperson stoppt den Auftrag.
 
+## Automatische Verbindungsprüfung
+
+Bei aktiver Produktionsautomatik prüft der Worker jede aktive, verbundene
+Instagram-Seite automatisch zweimal täglich über den offiziellen lesenden
+Profilaufruf. Das Standardintervall beträgt 43.200 Sekunden und wird mit
+`META_CONNECTION_CHECK_INTERVAL_SECONDS` konfiguriert. Es muss kleiner als
+`META_CONNECTION_MAX_AGE_SECONDS` bleiben. Die Prüfung aktualisiert Kontoart,
+Benutzername, Verbindungsstatus und Prüfzeitpunkt, wird mandantenbezogen
+auditiert und löst weder Containererstellung noch Veröffentlichung aus.
+
+Schlägt die Prüfung fehl, speichert die Anwendung ausschließlich die bereinigte
+Fehlermeldung, markiert die Verbindung als fehlerhaft und blockiert weiterhin
+sicher jede Veröffentlichung. Nach einem temporären Fehler erfolgt der nächste
+Versuch im konfigurierten Intervall; eine erneute OAuth-Verbindung wird nicht
+automatisch vorgenommen.
+
 ## Zustandsablauf und Idempotenz
 
 Der PostgreSQL-Worker beansprucht fällige Aufträge transaktional mit

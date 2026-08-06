@@ -225,12 +225,17 @@ def check_connection(
     db: Session,
     settings: Settings,
     connection: InstagramConnection,
-    user: User,
+    user: User | None,
     api: MetaApiClient,
 ) -> InstagramConnection:
     assert_meta_environment(settings, external_call=True)
-    token = TokenCipher(settings.meta_token_encryption_key).decrypt(connection.encrypted_token)
+    page = db.get(InstagramPage, connection.instagram_page_id)
+    if page is None or page.club_id != connection.club_id:
+        raise MetaApiError("Instagram-Seite der Verbindung ist nicht eindeutig zugeordnet")
     try:
+        token = TokenCipher(settings.meta_token_encryption_key).decrypt(
+            connection.encrypted_token
+        )
         profile = api.profile(token)
         # Instagram Login has no supported /me/permissions edge.  Revalidate
         # the token and account through /me and retain the exact scope grant
@@ -239,18 +244,26 @@ def check_connection(
         connection.confirmed_username = str(profile.get("username") or "")
         connection.account_type = str(profile.get("account_type") or "").upper()
         connection.scopes = sorted(scopes)
-        connection.last_check_at = datetime.now(timezone.utc)
+        checked_at = datetime.now(timezone.utc)
+        connection.last_check_at = checked_at
+        page.last_check_at = checked_at
         if connection.account_type != "BUSINESS" or not REQUIRED_SCOPES.issubset(scopes):
             connection.status = "invalid"
             connection.last_error = "Kontoart oder Berechtigungen genügen nicht"
         else:
             connection.status = "connected"
-            connection.last_success_at = datetime.now(timezone.utc)
+            connection.last_success_at = checked_at
             connection.last_error = None
+        page.connection_status = connection.status
+        page.last_error = connection.last_error
         db.add(
             AuditLog(
-                user_id=user.id,
-                action="meta.connection_checked",
+                user_id=user.id if user else None,
+                action=(
+                    "meta.connection_checked"
+                    if user
+                    else "meta.connection_checked_automatic"
+                ),
                 entity_type="instagram_connection",
                 entity_id=connection.id,
                 details={
@@ -263,9 +276,27 @@ def check_connection(
         db.commit()
         return connection
     except Exception as exc:
+        checked_at = datetime.now(timezone.utc)
+        safe_error = _safe_error(exc)
         connection.status = "error"
-        connection.last_check_at = datetime.now(timezone.utc)
-        connection.last_error = _safe_error(exc)
+        connection.last_check_at = checked_at
+        connection.last_error = safe_error
+        page.connection_status = "error"
+        page.last_check_at = checked_at
+        page.last_error = safe_error
+        db.add(
+            AuditLog(
+                user_id=user.id if user else None,
+                action=(
+                    "meta.connection_check_failed"
+                    if user
+                    else "meta.connection_check_failed_automatic"
+                ),
+                entity_type="instagram_connection",
+                entity_id=connection.id,
+                details={"error": safe_error},
+            )
+        )
         db.commit()
         raise
 

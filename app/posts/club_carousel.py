@@ -44,6 +44,97 @@ class ClubCarouselState:
     waiting_for: tuple[str, ...] = ()
 
 
+def matchday_bundle_posts(db: Session, post: Post) -> list[Post]:
+    """Return a verified, ordered bundle without crossing the tenant boundary.
+
+    Publication jobs deliberately keep their original ``post_id`` so edits,
+    retries and publishing checks continue to use the correct game and team.
+    This helper provides the aggregate read model used by the dashboard.
+    """
+    bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
+    primary_post_id = str(bundle.get("primary_post_id") or "").strip()
+    raw_member_ids = bundle.get("member_post_ids") or []
+    member_ids = [str(item).strip() for item in raw_member_ids if str(item).strip()]
+    member_ids = list(dict.fromkeys(member_ids))
+    if not primary_post_id or len(member_ids) < 2 or post.id not in member_ids:
+        return [post]
+    if primary_post_id not in member_ids:
+        raise ClubCarouselConflict("Der gemeinsame Beitrag besitzt keinen gültigen Hauptbeitrag")
+
+    members = {
+        item.id: item
+        for item in db.scalars(
+            select(Post).where(
+                Post.club_id == post.club_id,
+                Post.id.in_(member_ids),
+            )
+        )
+    }
+    if len(members) != len(member_ids):
+        raise ClubCarouselConflict(
+            "Mindestens ein Teilbeitrag des gemeinsamen Spieltags fehlt oder gehört zu einem anderen Verein"
+        )
+    ordered = [members[item_id] for item_id in member_ids]
+    for member in ordered:
+        member_bundle = (member.design_snapshot or {}).get("club_matchday_carousel") or {}
+        if (
+            member_bundle.get("primary_post_id") != primary_post_id
+            or list(member_bundle.get("member_post_ids") or []) != member_ids
+        ):
+            raise ClubCarouselConflict(
+                "Die Zuordnung der Teilbeiträge zum gemeinsamen Spieltag ist widersprüchlich"
+            )
+    return ordered
+
+
+def matchday_bundle_jobs(
+    db: Session, post: Post
+) -> tuple[Post, list[Post], list[PublicationJob], dict[str, Post]]:
+    """Build the dashboard view for a complete matchday contribution.
+
+    It contains the single carousel publication of the primary post and every
+    per-game story publication. Cancelled member feed jobs are intentionally
+    excluded because their images already live in the carousel.
+    """
+    members = matchday_bundle_posts(db, post)
+    if len(members) == 1:
+        jobs = list(
+            db.scalars(
+                select(PublicationJob)
+                .where(PublicationJob.post_id == post.id)
+                .order_by(PublicationJob.scheduled_at)
+            )
+        )
+        return post, members, jobs, {job.id: post for job in jobs}
+
+    bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
+    primary_id = str(bundle["primary_post_id"])
+    primary = next(item for item in members if item.id == primary_id)
+    member_ids = [item.id for item in members]
+    jobs = list(
+        db.scalars(
+            select(PublicationJob).where(PublicationJob.post_id.in_(member_ids))
+        )
+    )
+    visible = [
+        job
+        for job in jobs
+        if job.kind == "story"
+        or (job.post_id == primary.id and job.kind in {"feed", "carousel"})
+    ]
+    member_order = {member.id: position for position, member in enumerate(members)}
+    visible.sort(
+        key=lambda job: (
+            0 if job.kind in {"feed", "carousel"} else 1,
+            job.scheduled_at,
+            member_order[job.post_id],
+            job.id,
+        )
+    )
+    post_by_id = {member.id: member for member in members}
+    return primary, members, visible, {job.id: post_by_id[job.post_id] for job in visible}
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)

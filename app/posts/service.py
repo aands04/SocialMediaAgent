@@ -727,9 +727,15 @@ def create_matchday_bundle_posts(
             rendered=(
                 shared_prompt.rendered
                 + "\n\nVERBINDLICHER GEMEINSAMER KARUSSELL-AUFTRAG:\n"
-                + "Erstelle genau einen zusammenhängenden Begleittext, der sich "
-                + "gleichwertig auf alle folgenden Spiele bezieht. Lasse kein Spiel weg "
-                + "und vermische keine Spielorte, Uhrzeiten oder Ergebnisse.\n"
+                + "Erstelle genau einen lebendigen, zusammenhängenden Social-Media-Begleittext "
+                + "im Stil der oben festgelegten Vereins- und Textvorgaben. Der Text muss sich "
+                + "gleichwertig auf alle folgenden Spiele und Mannschaften beziehen. Lasse kein "
+                + "Spiel weg und vermische keine Spielorte, Uhrzeiten oder Ergebnisse. Formuliere "
+                + "keine bloße nüchterne Aneinanderreihung der Fakten. Einleitung, Übergänge und "
+                + "Schluss müssen den gemeinsamen Spieltag erkennbar verbinden. Bevorzuge keine "
+                + "Mannschaft, insbesondere nicht die Mannschaft des ersten aufgelisteten Spiels. "
+                + "Eine Handlungsaufforderung muss allen beteiligten Mannschaften gelten oder jede "
+                + "Mannschaft ausdrücklich gleichwertig nennen. Erfinde keine zusätzlichen Fakten.\n"
                 + match_list
             ),
         )

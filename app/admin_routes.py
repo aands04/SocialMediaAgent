@@ -12,7 +12,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.approvals.service import ApprovalError, approve, edit_text
+from app.approvals.service import ApprovalError, approve_matchday_bundle, edit_text
 from app.auth.service import allowed, hash_password, normalize_email, validate_new_password
 from app.branding.service import (
     STANDARD_FONTS,
@@ -84,6 +84,7 @@ from app.models import (
     UserTeam,
 )
 from app.platform.service import platform_audit
+from app.posts.club_carousel import ClubCarouselConflict, matchday_bundle_jobs
 from app.posts.manual import (
     MAX_MANUAL_IMAGE_BYTES,
     ManualPostError,
@@ -94,6 +95,11 @@ from app.posts.manual import (
     validate_manual_image,
 )
 from app.posts.service import logo_recompose_availability
+from app.publishing.schedule import (
+    EDITABLE_JOB_STATUSES,
+    PublicationScheduleError,
+    reschedule_publication_job,
+)
 from app.web import (
     berlin_datetime,
     check_csrf,
@@ -2579,6 +2585,10 @@ def posts(
         PublicationJob.published_at >= published_since,
         PublicationJob.published_at <= now,
     )
+    overdue_query = select(PublicationJob).where(
+        PublicationJob.scheduled_at < now,
+        PublicationJob.status.notin_([JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED]),
+    )
     planned_query = select(PublicationJob).where(
         PublicationJob.scheduled_at >= now,
         PublicationJob.scheduled_at <= planned_until,
@@ -2586,11 +2596,17 @@ def posts(
     )
     if selected_kinds:
         published_query = published_query.where(PublicationJob.kind.in_(selected_kinds))
+        overdue_query = overdue_query.where(PublicationJob.kind.in_(selected_kinds))
         planned_query = planned_query.where(PublicationJob.kind.in_(selected_kinds))
 
     published_jobs = [
         job
         for job in db.scalars(published_query.order_by(PublicationJob.published_at.desc()))
+        if require_visible(db, current, job.team_id)
+    ]
+    overdue_jobs = [
+        job
+        for job in db.scalars(overdue_query.order_by(PublicationJob.scheduled_at.desc()))
         if require_visible(db, current, job.team_id)
     ]
     planned_jobs = [
@@ -2599,7 +2615,7 @@ def posts(
         if require_visible(db, current, job.team_id)
     ]
 
-    calendar_jobs = [*published_jobs, *planned_jobs]
+    calendar_jobs = [*published_jobs, *overdue_jobs, *planned_jobs]
     post_ids = {job.post_id for job in calendar_jobs}
     game_ids = {job.game_id for job in calendar_jobs if job.game_id}
     page_ids = {job.instagram_page_id for job in calendar_jobs}
@@ -2646,7 +2662,7 @@ def posts(
         JobStatus.FAILED,
         JobStatus.UNCERTAIN,
     }
-    attention_count = sum(
+    attention_count = len(overdue_jobs) + sum(
         job.approval_status != "approved"
         or job.status in attention_statuses
         or job.stale_time
@@ -2660,6 +2676,7 @@ def posts(
         items=items,
         teams=teams,
         published_jobs=published_jobs,
+        overdue_jobs=overdue_jobs,
         planned_jobs=planned_jobs,
         calendar_posts=calendar_posts,
         games=games,
@@ -2793,11 +2810,28 @@ def post_detail(
     if not item:
         raise HTTPException(404)
     require(current, db, "view", item.team_id)
-    jobs = db.scalars(
-        select(PublicationJob)
-        .where(PublicationJob.post_id == item.id)
-        .order_by(PublicationJob.scheduled_at)
-    ).all()
+    own_jobs = list(
+        db.scalars(
+            select(PublicationJob)
+            .where(PublicationJob.post_id == item.id)
+            .order_by(PublicationJob.scheduled_at)
+        )
+    )
+    bundle = (item.design_snapshot or {}).get("club_matchday_carousel") or {}
+    aggregate_bundle = bundle.get("role") == "primary"
+    if aggregate_bundle:
+        try:
+            primary, bundle_posts, jobs, job_posts = matchday_bundle_jobs(db, item)
+        except ClubCarouselConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if primary.id != item.id:
+            raise HTTPException(409, "Der gemeinsame Hauptbeitrag ist widersprüchlich")
+        for member in bundle_posts:
+            require(current, db, "view", member.team_id)
+    else:
+        bundle_posts = [item]
+        jobs = own_jobs
+        job_posts = {job.id: item for job in jobs}
     pages = db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
     current_media_asset = db.get(MediaAsset, item.media_asset_id) if item.media_asset_id else None
     alternative_media_assets = db.scalars(
@@ -2847,6 +2881,42 @@ def post_detail(
                 checks[job.id] = f"PNG geprüft – {report['width']} × {report['height']}"
         except ValueError as exc:
             checks[job.id] = f"Prüfung fehlgeschlagen – {exc}"
+    job_teams = {job.id: db.get(Team, job.team_id) for job in jobs}
+    active_attempt_job_ids = set(
+        db.scalars(
+            select(MetaPublishingAttempt.publication_job_id).where(
+                MetaPublishingAttempt.publication_job_id.in_([job.id for job in jobs]),
+                MetaPublishingAttempt.active_key.is_not(None),
+            )
+        )
+    )
+    schedule_values = {}
+    schedule_timezones = {}
+    can_reschedule_jobs = {}
+    for job in jobs:
+        job_team = job_teams[job.id]
+        timezone_name = (job_team.timezone if job_team else None) or settings.timezone
+        schedule_timezones[job.id] = timezone_name
+        scheduled_at = job.scheduled_at
+        if scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+        schedule_values[job.id] = scheduled_at.astimezone(ZoneInfo(timezone_name)).strftime(
+            "%Y-%m-%dT%H:%M"
+        )
+        permitted = bool(job_team and allowed(db, current, "edit_post", job.team_id))
+        if aggregate_bundle and job.kind == "carousel":
+            permitted = permitted and all(
+                allowed(db, current, "edit_post", member.team_id) for member in bundle_posts
+            )
+        can_reschedule_jobs[job.id] = bool(
+            permitted
+            and job.status in EDITABLE_JOB_STATUSES
+            and not job.published_at
+            and not job.platform_id
+            and not job.attempts
+            and not job.locked_at
+            and job.id not in active_attempt_job_ids
+        )
     return render(
         request,
         "post_detail.html",
@@ -2857,12 +2927,28 @@ def post_detail(
         checks=checks,
         carousel_items=carousel_items,
         late_jobs=late_jobs,
-        logo_recompose=logo_recompose_availability(item, jobs),
+        logo_recompose=logo_recompose_availability(item, own_jobs),
+        bundle_posts=bundle_posts,
+        aggregate_bundle=aggregate_bundle,
+        job_posts=job_posts,
+        job_teams=job_teams,
+        schedule_values=schedule_values,
+        schedule_timezones=schedule_timezones,
+        can_reschedule_jobs=can_reschedule_jobs,
+        carousel_teams={
+            job.id: [db.get(Team, member.team_id) for member in bundle_posts]
+            for job in jobs
+            if job.kind == "carousel"
+        },
         current_media_asset=current_media_asset,
         alternative_media_assets=alternative_media_assets,
-        can_edit=allowed(db, current, "edit_post", item.team_id),
-        can_generate=allowed(db, current, "generate", item.team_id),
-        can_approve=allowed(db, current, "approve", item.team_id),
+        can_edit=all(allowed(db, current, "edit_post", member.team_id) for member in bundle_posts),
+        can_generate=all(
+            allowed(db, current, "generate", member.team_id) for member in bundle_posts
+        ),
+        can_approve=all(
+            allowed(db, current, "approve", member.team_id) for member in bundle_posts
+        ),
         now=now,
         title="Beitrag prüfen",
     )
@@ -3095,10 +3181,92 @@ def approve_post(
     if not item:
         raise HTTPException(404)
     try:
-        approve(db, item, current, job_ids or None)
+        approve_matchday_bundle(db, item, current, job_ids or None)
     except ApprovalError as e:
         raise HTTPException(422, str(e)) from e
     return redirect(f"/posts/{item.id}", "Beitrag ausdrücklich freigegeben")
+
+
+@router.post("/posts/{post_id}/publications/{job_id}/schedule")
+def change_publication_schedule(
+    post_id: str,
+    job_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    scheduled_at_value: str = Form(alias="scheduled_at"),
+    job_version: int = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    display_post = db.get(Post, post_id)
+    job = db.get(PublicationJob, job_id)
+    if not display_post or not job:
+        raise HTTPException(404)
+    require(current, db, "view", display_post.team_id)
+
+    source_post = db.get(Post, job.post_id)
+    if not source_post:
+        raise HTTPException(404)
+    if source_post.id != display_post.id:
+        try:
+            primary, members, visible_jobs, job_posts = matchday_bundle_jobs(db, display_post)
+        except ClubCarouselConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        visible_ids = {visible.id for visible in visible_jobs}
+        if (
+            primary.id != display_post.id
+            or job.id not in visible_ids
+            or job_posts[job.id].id != source_post.id
+        ):
+            raise HTTPException(404)
+        for member in members:
+            require(current, db, "view", member.team_id)
+
+    require(current, db, "edit_post", job.team_id)
+    if job.kind == "carousel" and display_post.id != source_post.id:
+        raise HTTPException(409, "Karussellauftrag ist keinem gültigen Hauptbeitrag zugeordnet")
+    if job.kind == "carousel" and (display_post.design_snapshot or {}).get(
+        "club_matchday_carousel"
+    ):
+        try:
+            _primary, members, _visible_jobs, _job_posts = matchday_bundle_jobs(db, display_post)
+        except ClubCarouselConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        for member in members:
+            require(current, db, "edit_post", member.team_id)
+
+    locked_post = db.scalar(select(Post).where(Post.id == source_post.id).with_for_update())
+    locked_job = db.scalar(
+        select(PublicationJob)
+        .where(PublicationJob.id == job.id, PublicationJob.post_id == source_post.id)
+        .with_for_update()
+    )
+    if not locked_post or not locked_job:
+        raise HTTPException(404)
+    team = db.get(Team, locked_job.team_id)
+    if not team:
+        raise HTTPException(404)
+    try:
+        scheduled_at = parse_manual_publication_time(
+            scheduled_at_value, team.timezone or settings.timezone
+        )
+        change = reschedule_publication_job(
+            db,
+            post=locked_post,
+            job=locked_job,
+            user=current,
+            scheduled_at=scheduled_at,
+            expected_job_version=job_version,
+        )
+    except ManualPostError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except PublicationScheduleError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    message = "Veröffentlichungszeitpunkt geändert"
+    if change.approval_invalidated:
+        message += "; erneute Freigabe erforderlich"
+    return redirect(f"/posts/{display_post.id}", message)
 
 
 @router.post("/posts/{post_id}/reject")

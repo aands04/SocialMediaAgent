@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from app.approvals.service import approve
+from app.approvals.service import approve, approve_matchday_bundle
 from app.config import Settings
 from app.games.bundles import connect_games, generation_bundle_games, separate_games
 from app.models import (
@@ -19,7 +19,7 @@ from app.models import (
     Team,
     User,
 )
-from app.posts.club_carousel import coordinate_club_matchday_feed
+from app.posts.club_carousel import coordinate_club_matchday_feed, matchday_bundle_jobs
 from app.posts.service import create_matchday_bundle_posts, create_post, feed_time
 from app.prompts.service import ResolvedPrompt
 from app.publishing.service import DryRunPublisher, PublishError
@@ -284,6 +284,72 @@ def test_same_club_same_day_builds_one_feed_carousel_and_separate_stories(db, tm
     assert all(job.status != JobStatus.CANCELLED for job in stories)
 
 
+def test_matchday_dashboard_collects_and_approves_all_member_stories(db, tmp_path):
+    page = _page(db)
+    first = _team(db, page, number=1, mode="announcements")
+    second = _team(db, page, number=2, mode="announcements")
+    first_game = _game(db, first, hour=13, number=1)
+    second_game = _game(db, second, hour=15, number=2)
+    first_post = _feed_post(db, tmp_path, first, first_game, number=1)
+    second_post = _feed_post(db, tmp_path, second, second_game, number=2)
+    for number, member in enumerate((first_post, second_post), start=1):
+        extra_path = tmp_path / f"story-extra-{number}.png"
+        Image.new("RGB", (1080, 1920), "navy").save(extra_path)
+        db.add(
+            PublicationJob(
+                post_id=member.id,
+                game_id=member.game_id,
+                team_id=member.team_id,
+                instagram_page_id=member.instagram_page_id,
+                kind="story",
+                media_path=str(extra_path),
+                scheduled_at=datetime(2026, 8, 9, 9 + number, tzinfo=timezone.utc),
+                idempotency_key=f"{member.id}:story:extra:v1",
+            )
+        )
+        member.design_snapshot = {
+            "logos": {
+                "team": {
+                    "id": f"verified-{number}",
+                    "checksum": "a" * 64,
+                    "verified": True,
+                }
+            }
+        }
+        member.critical_warnings = []
+    db.commit()
+
+    state = coordinate_club_matchday_feed(db, second_post, requested_by=None)
+    db.commit()
+    primary = db.get(Post, state.primary_post_id)
+    resolved_primary, members, jobs, job_posts = matchday_bundle_jobs(db, primary)
+
+    assert resolved_primary.id == primary.id
+    assert len(members) == 2
+    assert [job.kind for job in jobs].count("carousel") == 1
+    assert [job.kind for job in jobs].count("story") == 4
+    assert {job_posts[job.id].id for job in jobs if job.kind == "story"} == {
+        first_post.id,
+        second_post.id,
+    }
+
+    approver = User(
+        email="bundle-approval@example.invalid",
+        password_hash="not-used",
+        role=Role.APPROVER,
+        all_teams=True,
+        active=True,
+    )
+    db.add(approver)
+    db.commit()
+    approve_matchday_bundle(db, primary, approver, [job.id for job in jobs])
+
+    db.expire_all()
+    approved_jobs = [db.get(PublicationJob, job.id) for job in jobs]
+    assert all(job.approval_status == "approved" for job in approved_jobs)
+    assert all(job.status == JobStatus.SCHEDULED for job in approved_jobs)
+
+
 def test_games_can_be_consciously_connected_and_separated(db):
     page = _page(db)
     first = _team(db, page, number=1, mode="separate")
@@ -362,6 +428,10 @@ def test_shared_matchday_generation_uses_one_text_prompt_and_per_game_media(
     db.commit()
 
     assert len(calls) == 1
+    assert "Bevorzuge keine Mannschaft" in calls[0]["text_prompt"].rendered
+    assert "Eine Handlungsaufforderung muss allen beteiligten Mannschaften gelten" in calls[0][
+        "text_prompt"
+    ].rendered
     assert calls[0]["matchday_games"] == [
         {
             "position": 1,

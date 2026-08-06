@@ -1,10 +1,10 @@
 {% extends 'base.html' %}
 
-{% macro publication_row(job, published=false) %}
+{% macro publication_row(job, published=false, overdue=false) %}
   {% set post = calendar_posts.get(job.post_id) %}
   {% set game = games.get(job.game_id) if job.game_id else none %}
   {% set media = carousel_items.get(job.id, []) %}
-  <tr class="publication-row{% if job.approval_status != 'approved' or job.error or job.stale_time %} publication-attention{% endif %}" data-publication-kind="{{ job.kind }}">
+  <tr class="publication-row{% if overdue or job.approval_status != 'approved' or job.error or job.stale_time %} publication-attention{% endif %}" data-publication-kind="{{ job.kind }}">
     <td class="publication-preview-cell">
       {% if post and job.kind == 'carousel' and media %}
         <div class="publication-carousel-preview" aria-label="Karussell mit {{ media|length }} Bildern">
@@ -41,6 +41,7 @@
     </td>
     <td>
       <span class="badge publication-status-{{ job.status.value }}">{{ status_labels.get(job.status, job.status.value) }}</span>
+      {% if overdue %}<small class="publication-warning">Überfällig – noch nicht veröffentlicht</small>{% endif %}
       {% if job.approval_status != 'approved' %}<small class="publication-warning">Freigabe: {{ job.approval_status }}</small>{% endif %}
       {% if job.stale_time %}<small class="publication-warning">Zeitpunkt muss geprüft werden</small>{% endif %}
       {% if job.error %}<small class="publication-warning">{{ job.error|truncate(100) }}</small>{% endif %}
@@ -65,7 +66,7 @@
   <div class="publication-calendar-toolbar">
     <div>
       <h2>Veröffentlichungsplan</h2>
-      <small>Rückblick: letzte 2 Tage · Vorschau: nächste {{ future_days }} Tage</small>
+      <small>Rückblick: letzte 2 Tage · überfällige Aufträge · Vorschau: nächste {{ future_days }} Tage</small>
     </div>
     <form method="get" action="/posts" class="publication-range-form">
       <label for="publication-days">Vorschauzeitraum</label>
@@ -111,6 +112,21 @@
       </tbody>
     </table>
   </div>
+
+  {% if overdue_jobs %}
+    <h3>Überfällige Veröffentlichungen</h3>
+    <p class="publication-section-hint">Diese Aufträge waren bereits fällig, wurden aber noch nicht abgeschlossen. Bitte Freigabe, Instagram-Verbindung und angezeigte Hinweise prüfen.</p>
+    <div class="publication-table-wrap">
+      <table class="publication-table">
+        <thead><tr><th>Vorschau</th><th>Geplant</th><th>Mannschaft / Seite</th><th>Format</th><th>Inhalt</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          {% for job in overdue_jobs %}
+            {{ publication_row(job, false, true) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
 
   <h3>Geplant für die nächsten {{ future_days }} Tage</h3>
   <div class="publication-table-wrap">

@@ -10,6 +10,7 @@ from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.games.automatic import run_automatic_fussball_cycle
 from app.jobs.generation import claim_next, process_generation_job
+from app.meta.connection_health import run_automatic_connection_check_cycle
 from app.meta.publishing import MetaPublishingError
 from app.meta.scheduler import run_automatic_publishing_cycle
 from app.models import Club, ClubStatus, GenerationJob, JobStatus, PublicationJob
@@ -127,6 +128,7 @@ def run():
         loops += 1
         due_count = 0
         automatic_result = None
+        connection_check_result = None
         fussball_result = None
         with SessionLocal() as db:
             if loops == 1 or loops % 240 == 0:
@@ -189,6 +191,18 @@ def run():
                         log.warning("dry_run_job_blocked", job_id=job.id, error=str(exc))
             elif scheduler_enabled:
                 try:
+                    connection_check_result = run_automatic_connection_check_cycle(
+                        db, settings
+                    )
+                    if connection_check_result.checked:
+                        log.info(
+                            "automatic_meta_connections_checked",
+                            **connection_check_result.__dict__,
+                        )
+                except (MetaPublishingError, ValueError) as exc:
+                    db.rollback()
+                    log.error("automatic_connection_checks_blocked", error=str(exc))
+                try:
                     automatic_result = run_automatic_publishing_cycle(db, settings)
                     due_count = automatic_result.queued
                     processed += automatic_result.published
@@ -213,6 +227,11 @@ def run():
             "publisher": worker_mode,
             "automatic_cycle": (
                 automatic_result.__dict__ if automatic_result is not None else None
+            ),
+            "automatic_connection_checks": (
+                connection_check_result.__dict__
+                if connection_check_result is not None
+                else None
             ),
             "fussball_cycle": (fussball_result.__dict__ if fussball_result is not None else None),
         }
