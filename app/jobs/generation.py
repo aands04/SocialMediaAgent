@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.approvals.service import ApprovalError, approve
 from app.auth.service import allowed
 from app.config import Settings
+from app.games.bundles import generation_bundle_games
 from app.generation import build_renderer, build_text_generator
 from app.logos.service import (
     LogoValidationError,
@@ -39,6 +40,7 @@ from app.models import (
 from app.posts.club_carousel import ClubCarouselState, coordinate_club_matchday_feed
 from app.posts.service import (
     RerenderConflict,
+    create_matchday_bundle_posts,
     create_post,
     logo_recompose_preflight,
     recompose_post_logos,
@@ -491,6 +493,103 @@ def enqueue_create(
             return existing_job, None
         raise
     _audit(db, job, "generation.queued", {"job_type": job.job_type.value})
+    db.commit()
+    return job, None
+
+
+def enqueue_bundle_create(
+    db: Session,
+    game: Game,
+    team: Team,
+    user: User,
+    post_type: str,
+) -> tuple[GenerationJob | None, Post | None]:
+    games, teams, bundle_key = generation_bundle_games(db, game, team, post_type)
+    if not bundle_key or len(games) < 2:
+        return enqueue_create(db, game, team, user, post_type)
+    if post_type == "result":
+        missing = [teams[item.team_id].display_name for item in games if not item.result_confirmed]
+        if missing:
+            raise ValueError(
+                "Für den gemeinsamen Ergebnisbeitrag fehlen bestätigte Ergebnisse: "
+                + ", ".join(missing)
+            )
+    for item in games:
+        if item.status == "provisional" or (item.overrides or {}).get("automation_blocked"):
+            raise ValueError("Vorläufige oder gesperrte Spiele dürfen nicht verarbeitet werden")
+        if not allowed(db, user, "generate", item.team_id):
+            raise PermissionError("Keine Generierungsberechtigung für alle verbundenen Spiele")
+    game_ids = [item.id for item in games]
+    existing_posts = list(
+        db.scalars(
+            select(Post).where(
+                Post.game_id.in_(game_ids),
+                Post.post_type == post_type,
+                Post.active_key == "active",
+            )
+        )
+    )
+    if len(existing_posts) == len(games):
+        by_game = {item.game_id: item for item in existing_posts}
+        return None, by_game[games[0].id]
+    if existing_posts:
+        raise ValueError(
+            "Mindestens ein verbundener Teilbeitrag existiert bereits. Bitte vorhandene "
+            "Beiträge prüfen oder die Spiele bewusst trennen."
+        )
+    digest = hashlib.sha256(":".join(game_ids).encode("utf-8")).hexdigest()[:24]
+    key = f"create-bundle:{post_type}:{digest}"
+    existing_job = db.scalar(
+        select(GenerationJob).where(
+            or_(GenerationJob.active_key == key, GenerationJob.idempotency_key == key)
+        )
+    )
+    if existing_job:
+        return existing_job, None
+    logos = {item.id: frozen_logo_set(db, item, teams[item.team_id]) for item in games}
+    planned_outputs = sum(
+        _feed_count(teams[item.team_id], post_type)
+        + _story_count(db, teams[item.team_id], post_type)
+        for item in games
+    )
+    job = GenerationJob(
+        job_type=GenerationJobType.CREATE_POST,
+        game_id=games[0].id,
+        team_id=games[0].team_id,
+        post_type=post_type,
+        requested_by=user.id,
+        status=GenerationJobStatus.QUEUED,
+        phase="preparing",
+        planned_outputs=planned_outputs,
+        idempotency_key=key,
+        active_key=key,
+        parameters={
+            "post_type": post_type,
+            "matchday_bundle_key": bundle_key,
+            "bundle_game_ids": game_ids,
+            "logos_by_game": logos,
+            "single_shared_text_prompt": True,
+        },
+    )
+    db.add(job)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing_job = db.scalar(
+            select(GenerationJob).where(
+                or_(GenerationJob.active_key == key, GenerationJob.idempotency_key == key)
+            )
+        )
+        if existing_job:
+            return existing_job, None
+        raise
+    _audit(
+        db,
+        job,
+        "generation.matchday_bundle_queued",
+        {"game_ids": game_ids, "post_type": post_type, "bundle_key": bundle_key},
+    )
     db.commit()
     return job, None
 
@@ -953,6 +1052,78 @@ def process_generation_job(
                 "Das Spiel ist vorläufig, abgesagt, verschoben oder für Automatisierung gesperrt."
             )
         parameters = dict(job.parameters or {})
+        bundle_game_ids = list(parameters.get("bundle_game_ids") or [])
+        if job.job_type == GenerationJobType.CREATE_POST and bundle_game_ids:
+            bundle_games = [db.get(Game, item_id) for item_id in bundle_game_ids]
+            if any(item is None for item in bundle_games):
+                raise ValueError("Mindestens ein verbundenes Spiel ist nicht mehr vorhanden")
+            if [item.id for item in bundle_games] != bundle_game_ids:
+                raise ValueError("Die eingefrorene Reihenfolge der verbundenen Spiele ist ungültig")
+            bundle_teams = {item.team_id: db.get(Team, item.team_id) for item in bundle_games}
+            for item in bundle_games:
+                member_team = bundle_teams.get(item.team_id)
+                if not member_team or item.club_id != job.club_id or member_team.club_id != job.club_id:
+                    raise PermissionError("Ein verbundenes Spiel gehört nicht zum Generierungsverein")
+                if not allowed(db, user, "generate", item.team_id):
+                    raise PermissionError(
+                        "Der auslösende Benutzer besitzt nicht mehr alle Mannschaftsrechte"
+                    )
+                if item.status in {"provisional", "cancelled", "postponed"} or (
+                    item.overrides or {}
+                ).get("automation_blocked"):
+                    raise ValueError("Ein verbundenes Spiel ist gesperrt oder nicht mehr regulär")
+                if job.post_type == "result" and not item.result_confirmed:
+                    raise ValueError("Nicht alle verbundenen Ergebnisse sind bestätigt")
+            logos_by_game = dict(parameters.get("logos_by_game") or {})
+            for item in bundle_games:
+                frozen = dict(logos_by_game.get(item.id) or {})
+                team_logo = validate_frozen_logo(db, frozen.get("team"), "team")
+                opponent_logo = validate_frozen_logo(db, frozen.get("opponent"), "opponent")
+                member_team = bundle_teams[item.team_id]
+                if settings.image_generator_mode == "openai" and not team_logo:
+                    raise LogoValidationError(
+                        f"Eigenes Mannschaftslogo fehlt: {member_team.display_name}"
+                    )
+                if team_logo and member_team.logo_asset_id != team_logo.id:
+                    raise LogoValidationError(
+                        f"Mannschaftslogo wurde geändert: {member_team.display_name}"
+                    )
+                if opponent_logo and item.opponent_logo_id != opponent_logo.id:
+                    raise LogoValidationError(
+                        f"Gegnerlogo wurde nach dem Einreihen geändert: {member_team.display_name}"
+                    )
+                validate_frozen_file(team_logo, settings.upload_root)
+                validate_frozen_file(opponent_logo, settings.upload_root)
+            _phase(db, job, "preparing", 5)
+            posts = create_matchday_bundle_posts(
+                db,
+                bundle_games,
+                bundle_teams,
+                _ProgressTextGenerator(build_text_generator(settings), db, job),
+                _ProgressRenderer(build_renderer(settings), db, job),
+                job.post_type,
+                logos_by_game,
+                str(parameters.get("matchday_bundle_key") or job.id),
+            )
+            carousel = coordinate_club_matchday_feed(
+                db, posts[-1], requested_by=job.requested_by
+            )
+            post = db.get(Post, carousel.primary_post_id) if carousel.primary_post_id else posts[0]
+            if not post:
+                raise ValueError("Der gemeinsame Hauptbeitrag konnte nicht bestimmt werden")
+            job.result_post_id = post.id
+            job.post_id = post.id
+            job.parameters = {
+                **parameters,
+                "result_post_ids": [item.id for item in posts],
+                "carousel_primary_post_id": carousel.primary_post_id,
+            }
+            db.commit()
+            _phase(db, job, "validating", 90, job.planned_outputs)
+            _phase(db, job, "saving", 95, job.planned_outputs)
+            _finalize_job_usage(db, job, post.id)
+            _finish(db, job, GenerationJobStatus.SUCCEEDED)
+            return db.get(GenerationJob, job_id)
         logos = dict(parameters.get("logos") or {})
         needs_images = (
             job.job_type == GenerationJobType.CREATE_POST

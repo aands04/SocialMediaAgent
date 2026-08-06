@@ -46,6 +46,25 @@
   </div>
 </section>
 {% endif %}
+{% if shared_suggestions %}
+<section>
+  <h2>Passende Logos aus der systemweiten Bibliothek</h2>
+  <p>Diese verifizierten Originaldateien wurden bereits für denselben normalisierten Gegnernamen hinterlegt. Die Auswahl wird als eigene, vereinsgebundene Kopie übernommen.</p>
+  <div class="logo-list">
+    {% for logo in shared_suggestions %}
+    <form method="post" action="/games/{{game.id}}/opponent-logo" class="logo-card">
+      <input type="hidden" name="csrf_token" value="{{csrf}}">
+      <input type="hidden" name="action" value="select_shared">
+      <input type="hidden" name="shared_logo_id" value="{{logo.id}}">
+      <img class="logo-thumb" width="88" height="88" src="/shared-opponent-logos/{{logo.id}}/preview?game_id={{game.id}}" alt="Logo {{logo.display_name}}">
+      <strong>{{logo.display_name}}</strong>
+      <small>Katalogversion {{logo.catalog_version}} · {{logo.checksum[:12]}}…</small>
+      <button>Systemweites Logo ausdrücklich übernehmen</button>
+    </form>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
 <section>
   <h2>Vorhandenes Gegnerlogo auswählen</h2>
   {% if library %}
@@ -62,6 +81,25 @@
     <button>Auswahl ausdrücklich zuordnen</button>
   </form>
   {% else %}<p>Noch keine Gegnerlogos in der Bibliothek.</p>{% endif %}
+</section>
+<section>
+  <h2>Systemweite Gegnerlogo-Bibliothek</h2>
+  {% if shared_library %}
+  <form method="post" action="/games/{{game.id}}/opponent-logo">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <input type="hidden" name="action" value="select_shared">
+    <label>Verifiziertes Original
+      <select name="shared_logo_id" required>
+        <option value="">Bitte auswählen</option>
+        {% for logo in shared_library %}
+        <option value="{{logo.id}}">{{logo.display_name}} · Katalog v{{logo.catalog_version}} · {{logo.checksum[:12]}}…</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button>Systemweites Logo übernehmen und zuordnen</button>
+  </form>
+  <p><small>Die Quelldatei wird geprüft und als eigene Logodatei für diesen Verein importiert. Angaben zum ursprünglichen Verein oder Benutzer werden nicht angezeigt.</small></p>
+  {% else %}<p>Noch keine systemweit wiederverwendbaren Gegnerlogos vorhanden.</p>{% endif %}
 </section>
 <p><a class="button" href="/games">Zurück zu den Spielen</a></p>
 {% endblock %}

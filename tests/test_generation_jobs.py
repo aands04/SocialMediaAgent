@@ -199,6 +199,51 @@ def test_progress_text_generator_records_exact_provider_prompt(db):
     assert dispatch.status == "completed"
 
 
+def test_grouped_dashboard_click_enqueues_one_coordinator_job(db):
+    page, first, first_game, user = graph(db)
+    first.rules = {
+        **(first.rules or {}),
+        "announcement_enabled": True,
+        "club_matchday_feed_mode": "announcements_and_results",
+    }
+    second = Team(
+        internal_name="jobs-two",
+        display_name="SV Jobs II",
+        short_name="SVJ II",
+        slug="jobs-two",
+        club=first.club,
+        fussball_url="https://www.fussball.de/jobs-two",
+        instagram_page_id=page.id,
+        media_subdir="jobs-two",
+        rules={
+            "announcement_enabled": True,
+            "club_matchday_feed_mode": "announcements_and_results",
+        },
+    )
+    db.add(second)
+    db.flush()
+    second_game = Game(
+        team_id=second.id,
+        provider="mock",
+        external_id="generation-job-two",
+        home_team=second.display_name,
+        away_team="FC Test II",
+        kickoff=first_game.kickoff + timedelta(hours=2),
+        source_url="fixture://jobs-two",
+    )
+    db.add(second_game)
+    db.commit()
+
+    job, post = generation.enqueue_bundle_create(
+        db, second_game, second, user, "announcement"
+    )
+
+    assert post is None
+    assert job.parameters["single_shared_text_prompt"] is True
+    assert job.parameters["bundle_game_ids"] == [first_game.id, second_game.id]
+    assert db.query(GenerationJob).count() == 1
+
+
 def test_progress_renderer_records_exact_image_provider_prompt(db, tmp_path):
     _, team, game, user = graph(db)
     job = generation.enqueue_create(db, game, team, user, "announcement")[0]

@@ -123,6 +123,19 @@ aus Job, Versuch, Prompt-Art, Medium und Aufrufindex verhindert doppelte
 Dispatch-Einträge bei einer Wiederaufnahme. Club-Snapshots und Club-Exporte
 enthalten weiterhin nur nicht geheime Metadaten.
 
+Gemeinsame Spieltage besitzen keinen zweiten, parallelen Beitragstyp. Ein
+persistenter `GenerationJob` koordiniert mehrere eingefrorene `Game`-IDs,
+erzeugt die vorhandenen spielbezogenen `Post`- und Story-Objekte und übergibt
+einen einmalig erzeugten gemeinsamen Text an alle Mitglieder. Erst danach
+wandelt der bestehende Karussell-Koordinator den primären Feed-Auftrag in ein
+Karussell um; die übrigen Feed-Aufträge werden nachvollziehbar als gebündelt
+abgebrochen. Manuelle Gruppen liegen versioniert in `Game.overrides`.
+
+Der globale `SharedOpponentLogo`-Katalog ist bewusst kein Tenant-Asset und
+enthält eine eigene verifizierte Binärkopie. Die Auswahl importiert diese Datei
+in ein neues, tenantgebundenes `LogoAsset`; dadurch bleiben alle Game-FKs,
+Snapshots, Downloads und Storage-Prüfungen an der bisherigen Mandantengrenze.
+
 Der Vereinsbereich stellt diese strukturierten Parameter über einen
 fünfteiligen Branding-Assistenten bereit. `ClubBrandingConfiguration` bleibt
 versionierte Quelle; eindeutig übertragbare Altwerte werden normalisiert,

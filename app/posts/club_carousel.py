@@ -1,7 +1,7 @@
 """Coordinate same-club matchday feeds without merging per-game stories."""
 
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -10,7 +10,7 @@ from PIL import Image
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.logos.service import normalize_club_name
+from app.games.bundles import generation_bundle_games
 from app.models import (
     AuditLog,
     Game,
@@ -94,60 +94,8 @@ def _combined_text(club: str, post_type: str, games: list[Game], teams: dict[str
 def _candidate_games(
     db: Session, post: Post, game: Game, team: Team
 ) -> tuple[list[Game], dict[str, Team]]:
-    club_key = normalize_club_name(team.club)
-    teams = {
-        item.id: item
-        for item in db.scalars(
-            select(Team).where(
-                Team.instagram_page_id == team.instagram_page_id,
-                Team.active.is_(True),
-                Team.archived_at.is_(None),
-            )
-        )
-        if normalize_club_name(item.club) == club_key
-        and _mode_groups(
-            str((item.rules or {}).get("club_matchday_feed_mode", "separate")),
-            post.post_type,
-        )
-        and bool(
-            (item.rules or {}).get(
-                "result_enabled" if post.post_type == "result" else "announcement_enabled"
-            )
-        )
-    }
-    if len(teams) < 2:
-        return [], teams
-    local_date = _utc(game.kickoff).astimezone(BERLIN).date()
-    start = datetime.combine(local_date, time.min, BERLIN).astimezone(timezone.utc)
-    end = datetime.combine(local_date, time.max, BERLIN).astimezone(timezone.utc)
-    games = list(
-        db.scalars(
-            select(Game).where(
-                Game.team_id.in_(teams),
-                Game.kickoff >= start,
-                Game.kickoff <= end,
-                Game.status.not_in(["cancelled", "postponed"]),
-            )
-        )
-    )
-    games = [
-        item
-        for item in games
-        if not (item.overrides or {}).get("automation_blocked")
-        and not (item.overrides or {}).get("import_suppressed")
-    ]
-    if len({item.team_id for item in games}) < 2:
-        return [], teams
-    preferred_team_id = str((team.rules or {}).get("club_matchday_primary_team_id") or "")
-    games.sort(
-        key=lambda item: (
-            0 if item.team_id == preferred_team_id else 1,
-            _utc(item.kickoff),
-            teams[item.team_id].display_name,
-            item.id,
-        )
-    )
-    return games, teams
+    games, teams, key = generation_bundle_games(db, game, team, post.post_type)
+    return (games, teams) if key and len(games) >= 2 else ([], teams)
 
 
 def _mark_waiting(db: Session, post: Post, waiting_for: list[str]) -> None:
@@ -177,11 +125,12 @@ def coordinate_club_matchday_feed(
     team = db.get(Team, post.team_id)
     if not game or not team:
         return ClubCarouselState()
-    mode = str((team.rules or {}).get("club_matchday_feed_mode", "separate"))
-    if not _mode_groups(mode, post.post_type):
-        return ClubCarouselState()
     games, teams = _candidate_games(db, post, game, team)
     if not games:
+        return ClubCarouselState()
+    mode = str((team.rules or {}).get("club_matchday_feed_mode", "separate"))
+    manual_bundle = bool((game.overrides or {}).get("generation_bundle_id"))
+    if not manual_bundle and not _mode_groups(mode, post.post_type):
         return ClubCarouselState()
 
     if post.post_type == "result":
@@ -262,7 +211,17 @@ def coordinate_club_matchday_feed(
             open_job.error = (
                 "Gemeinsamer Vereins-Karussellfeed wurde erstellt; erneute Freigabe erforderlich"
             )
-    primary.text = _combined_text(team.club, post.post_type, games, teams)
+    shared_texts = {
+        item.text
+        for item in ordered_posts
+        if (item.design_snapshot or {}).get("matchday_bundle")
+        and item.text
+    }
+    primary.text = (
+        shared_texts.pop()
+        if len(shared_texts) == 1
+        else _combined_text(team.club, post.post_type, games, teams)
+    )
     primary.text_version += 1
     primary_feed.kind = "carousel"
     primary_feed.media_path = ordered_posts[0].feed_path
@@ -310,13 +269,18 @@ def coordinate_club_matchday_feed(
         snapshot["club_matchday_carousel"] = {
             "key": bundle_key,
             "mode": mode,
+            "source": "manual" if manual_bundle else "club_rule",
             "post_type": post.post_type,
             "primary_post_id": primary.id,
             "member_post_ids": member_ids,
             "game_ids": game_ids,
             "role": "primary" if member.id == primary.id else "member",
             "stories_remain_separate": True,
-            "text_model": "deterministic-club-matchday-v1",
+            "text_model": (
+                "single-shared-ai-prompt-v1"
+                if (member.design_snapshot or {}).get("matchday_bundle")
+                else "deterministic-club-matchday-v1"
+            ),
         }
         member.design_snapshot = snapshot
         if member.id == primary.id:

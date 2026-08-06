@@ -6,6 +6,7 @@ from PIL import Image
 
 from app.approvals.service import approve
 from app.config import Settings
+from app.games.bundles import connect_games, generation_bundle_games, separate_games
 from app.models import (
     Game,
     InstagramPage,
@@ -19,10 +20,11 @@ from app.models import (
     User,
 )
 from app.posts.club_carousel import coordinate_club_matchday_feed
-from app.posts.service import create_post, feed_time
+from app.posts.service import create_matchday_bundle_posts, create_post, feed_time
+from app.prompts.service import ResolvedPrompt
 from app.publishing.service import DryRunPublisher, PublishError
 from app.publishing.worker import process_job
-from app.textgen.service import FixtureTextGenerator
+from app.textgen.service import FixtureTextGenerator, GeneratedText
 
 
 class LocalRenderer:
@@ -280,6 +282,121 @@ def test_same_club_same_day_builds_one_feed_carousel_and_separate_stories(db, tm
     ).all()
     assert len(stories) == 2
     assert all(job.status != JobStatus.CANCELLED for job in stories)
+
+
+def test_games_can_be_consciously_connected_and_separated(db):
+    page = _page(db)
+    first = _team(db, page, number=1, mode="separate")
+    second = _team(db, page, number=2, mode="separate")
+    first_game = _game(db, first, hour=13, number=1)
+    second_game = _game(db, second, hour=15, number=2)
+    teams = {first.id: first, second.id: second}
+
+    bundle_id = connect_games(db, [first_game, second_game], teams)
+    bundled, _, key = generation_bundle_games(
+        db, first_game, first, "announcement"
+    )
+
+    assert key == f"manual:{bundle_id}"
+    assert [item.id for item in bundled] == [first_game.id, second_game.id]
+
+    separate_games(bundled)
+    db.flush()
+    separated, _, key = generation_bundle_games(
+        db, first_game, first, "announcement"
+    )
+    assert [item.id for item in separated] == [first_game.id]
+    assert key is None
+    assert first_game.overrides["generation_bundle_separated"] is True
+    assert second_game.overrides["generation_bundle_separated"] is True
+
+
+def test_shared_matchday_generation_uses_one_text_prompt_and_per_game_media(
+    db, tmp_path, monkeypatch
+):
+    page = _page(db)
+    first = _team(db, page, number=1, mode="announcements")
+    second = _team(db, page, number=2, mode="announcements")
+    first_game = _game(db, first, hour=13, number=1)
+    second_game = _game(db, second, hour=15, number=2)
+    games = [first_game, second_game]
+    teams = {first.id: first, second.id: second}
+    calls: list[dict] = []
+
+    class SharedTextGenerator:
+        is_ai = True
+
+        def generate(self, data):
+            calls.append(data)
+            return GeneratedText(
+                "Gemeinsam: SV Ehlen 1 und SV Ehlen 2 spielen am Sonntag.",
+                "test-model",
+                prompt_version="shared-v1",
+            )
+
+    prompt = ResolvedPrompt(
+        name="announcement",
+        version=1,
+        prompt_kind="text",
+        post_type="announcement",
+        media_kind="none",
+        model="test-model",
+        quality="standard",
+        body="Grundprompt",
+        rendered="Grundprompt",
+        builtin=True,
+    )
+    monkeypatch.setattr("app.posts.service.resolve_prompt", lambda *_args, **_kwargs: prompt)
+
+    posts = create_matchday_bundle_posts(
+        db,
+        games,
+        teams,
+        SharedTextGenerator(),
+        LocalRenderer(tmp_path / "shared-generation"),
+        "announcement",
+        {item.id: {"team": None, "opponent": None} for item in games},
+        "automatic:test",
+    )
+    state = coordinate_club_matchday_feed(db, posts[-1], requested_by=None)
+    db.commit()
+
+    assert len(calls) == 1
+    assert calls[0]["matchday_games"] == [
+        {
+            "position": 1,
+            "home_team": first_game.home_team,
+            "away_team": first_game.away_team,
+            "date": "09.08.2026",
+            "time": "15:00",
+            "competition": "Kreisliga",
+            "venue": "Habichtswaldstadion",
+            "score": None,
+        },
+        {
+            "position": 2,
+            "home_team": second_game.home_team,
+            "away_team": second_game.away_team,
+            "date": "09.08.2026",
+            "time": "17:00",
+            "competition": "Kreisliga",
+            "venue": "Habichtswaldstadion",
+            "score": None,
+        },
+    ]
+    assert len(posts) == 2
+    assert {item.text for item in posts} == {
+        "Gemeinsam: SV Ehlen 1 und SV Ehlen 2 spielen am Sonntag."
+    }
+    assert all((item.design_snapshot or {})["matchday_bundle"] for item in posts)
+    assert state.complete is True
+    carousel = db.query(PublicationJob).filter_by(
+        post_id=state.primary_post_id, kind="carousel"
+    ).one()
+    media = db.query(PublicationMediaItem).filter_by(
+        publication_job_id=carousel.id
+    ).all()
+    assert len(media) == 2
 
 
 def test_preferred_team_image_is_first_even_when_it_plays_later(db, tmp_path):

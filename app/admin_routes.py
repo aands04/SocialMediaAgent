@@ -31,12 +31,16 @@ from app.branding.service import (
 )
 from app.config import get_settings
 from app.db import get_db
+from app.games.bundles import connect_games, dashboard_game_groups, separate_games
 from app.games.identity import team_name_variants
 from app.limits.service import LimitExceeded, assert_resource_capacity
 from app.logos.service import (
     LogoValidationError,
+    import_shared_opponent_logo,
     normalize_club_name,
     opponent_name,
+    publish_shared_opponent_logo,
+    shared_logo_path,
     store_logo,
 )
 from app.media.storage import LocalStorageProvider, StorageError, media_asset_path
@@ -73,6 +77,7 @@ from app.models import (
     PublicationJob,
     PublicationMediaItem,
     Role,
+    SharedOpponentLogo,
     StoryRule,
     Team,
     User,
@@ -3246,7 +3251,33 @@ def logo_preview(
     return FileResponse(
         path,
         media_type=logo.mime_type,
-        filename=logo.original_filename,
+        filename=f"gegnerlogo-{logo.id[:8]}{Path(logo.original_path).suffix.lower()}",
+        content_disposition_type="inline",
+    )
+
+
+@router.get("/shared-opponent-logos/{logo_id}/preview")
+def shared_opponent_logo_preview(
+    logo_id: str,
+    game_id: str,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    game = db.get(Game, game_id)
+    if not game:
+        raise HTTPException(404)
+    require(current, db, "view", game.team_id)
+    logo = db.get(SharedOpponentLogo, logo_id)
+    if not logo or not logo.active or logo.archived_at:
+        raise HTTPException(404)
+    try:
+        path = shared_logo_path(logo, settings.upload_root)
+    except LogoValidationError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return FileResponse(
+        path,
+        media_type=logo.mime_type,
+        filename=f"gegnerlogo-{logo.id[:8]}{Path(logo.original_path).suffix.lower()}",
         content_disposition_type="inline",
     )
 
@@ -3285,6 +3316,26 @@ def manage_opponent_logo(
         )
         .order_by(LogoAsset.display_name, LogoAsset.version.desc())
     ).all()
+    shared_suggestions = db.scalars(
+        select(SharedOpponentLogo)
+        .where(
+            SharedOpponentLogo.normalized_name == normalized,
+            SharedOpponentLogo.active.is_(True),
+            SharedOpponentLogo.archived_at.is_(None),
+        )
+        .order_by(SharedOpponentLogo.catalog_version.desc())
+    ).all()
+    shared_library = db.scalars(
+        select(SharedOpponentLogo)
+        .where(
+            SharedOpponentLogo.active.is_(True),
+            SharedOpponentLogo.archived_at.is_(None),
+        )
+        .order_by(
+            SharedOpponentLogo.display_name,
+            SharedOpponentLogo.catalog_version.desc(),
+        )
+    ).all()
     uploader_ids = {logo.uploaded_by for logo in library}
     uploaders = (
         {
@@ -3304,6 +3355,8 @@ def manage_opponent_logo(
         current_logo=current_logo,
         suggestions=suggestions,
         library=library,
+        shared_suggestions=shared_suggestions,
+        shared_library=shared_library,
         uploaders=uploaders,
         title="Gegnerlogo verwalten",
     )
@@ -3316,6 +3369,7 @@ async def update_opponent_logo(
     csrf_token_value: str = Form(alias="csrf_token"),
     action: str = Form(),
     logo_id: str = Form(default=""),
+    shared_logo_id: str = Form(default=""),
     file: UploadFile | None = File(default=None),
     current=Depends(current_user),
     db: Session = Depends(get_db),
@@ -3333,6 +3387,7 @@ async def update_opponent_logo(
         if not file or not file.filename:
             raise HTTPException(422, "Bitte eine PNG- oder WebP-Datei auswählen")
         try:
+            upload_data = await file.read()
             selected, created = store_logo(
                 db,
                 upload_root=settings.upload_root,
@@ -3341,8 +3396,14 @@ async def update_opponent_logo(
                 display_name=opponent_name(game, team),
                 original_filename=file.filename,
                 content_type=file.content_type,
-                data=await file.read(),
+                data=upload_data,
                 uploaded_by=current.id,
+            )
+            publish_shared_opponent_logo(
+                db,
+                upload_root=settings.upload_root,
+                source=selected,
+                data=upload_data,
             )
         except LogoValidationError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -3355,9 +3416,25 @@ async def update_opponent_logo(
             or selected.archived_at
         ):
             raise HTTPException(422, "Das gewählte Gegnerlogo ist nicht aktiv verfügbar")
+    elif action == "select_shared":
+        shared = db.get(SharedOpponentLogo, shared_logo_id)
+        if not shared:
+            raise HTTPException(422, "Das gewählte systemweite Gegnerlogo fehlt")
+        try:
+            selected, created = import_shared_opponent_logo(
+                db,
+                upload_root=settings.upload_root,
+                shared=shared,
+                display_name=opponent_name(game, team),
+                uploaded_by=current.id,
+            )
+        except LogoValidationError as exc:
+            raise HTTPException(422, str(exc)) from exc
     elif action != "remove":
         raise HTTPException(422, "Unbekannte Logoaktion")
-    if selected and selected.normalized_name != normalize_club_name(opponent_name(game, team)):
+    if action == "select_shared" and selected:
+        source = "shared_catalog_confirmed"
+    elif selected and selected.normalized_name != normalize_club_name(opponent_name(game, team)):
         # Abweichende Schreibweisen sind erlaubt, aber nur nach dieser bewussten Auswahl.
         source = "manual_confirmed_non_exact"
     elif selected:
@@ -3381,7 +3458,9 @@ async def update_opponent_logo(
         "opponent_logo.removed"
         if not selected
         else (
-            "opponent_logo.uploaded"
+            "opponent_logo.shared_catalog_assigned"
+            if action == "select_shared"
+            else "opponent_logo.uploaded"
             if created
             else (
                 "opponent_logo.suggestion_confirmed"
@@ -3445,6 +3524,7 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
         for game in items
         if game.team_id in team_map
     }
+    game_groups = dashboard_game_groups(db, items, team_map)
     return render(
         request,
         "games.html",
@@ -3453,9 +3533,74 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
         items=items,
         logo_map=logo_map,
         opponents=opponents,
+        game_groups=game_groups,
         suppressed_items=suppressed_items,
         title="Spiele und Testdaten",
     )
+
+
+@router.post("/games/bundles/connect")
+def connect_game_bundle(
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    game_ids: list[str] = Form(default=[]),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    selected_ids = list(dict.fromkeys(game_ids))
+    games = [db.get(Game, item_id) for item_id in selected_ids]
+    if len(selected_ids) < 2 or any(item is None for item in games):
+        raise HTTPException(422, "Bitte mindestens zwei vorhandene Spiele auswählen")
+    teams = {item.team_id: db.get(Team, item.team_id) for item in games}
+    for item in games:
+        require(current, db, "edit_game", item.team_id)
+        if not teams.get(item.team_id):
+            raise HTTPException(404, "Mannschaft nicht gefunden")
+    try:
+        bundle_id = connect_games(db, games, teams)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    audit(
+        db,
+        current,
+        "games.generation_bundle_connected",
+        "game_bundle",
+        bundle_id,
+        games[0].team_id,
+        {"game_ids": selected_ids},
+    )
+    db.commit()
+    return redirect("/games", "Spiele wurden bewusst zu einem Auftrag verbunden")
+
+
+@router.post("/games/bundles/separate")
+def separate_game_bundle(
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    game_ids: list[str] = Form(default=[]),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    selected_ids = list(dict.fromkeys(game_ids))
+    games = [db.get(Game, item_id) for item_id in selected_ids]
+    if len(selected_ids) < 2 or any(item is None for item in games):
+        raise HTTPException(422, "Die verbundene Spielgruppe ist nicht mehr vollständig")
+    for item in games:
+        require(current, db, "edit_game", item.team_id)
+    separate_games(games)
+    audit(
+        db,
+        current,
+        "games.generation_bundle_separated",
+        "game_bundle",
+        None,
+        games[0].team_id,
+        {"game_ids": selected_ids},
+    )
+    db.commit()
+    return redirect("/games", "Spiele wurden bewusst getrennt")
 
 
 @router.post("/games/mock")
@@ -3785,7 +3930,7 @@ def generate_game_post(
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    from app.jobs.generation import enqueue_create
+    from app.jobs.generation import enqueue_bundle_create
 
     check_csrf(request, csrf_token_value)
     game = db.get(Game, game_id)
@@ -3793,8 +3938,12 @@ def generate_game_post(
         raise HTTPException(404)
     require(current, db, "generate", game.team_id)
     team = db.get(Team, game.team_id)
+    if not team:
+        raise HTTPException(404, "Mannschaft nicht gefunden")
     try:
-        job, post = enqueue_create(db, game, team, current, post_type)
+        job, post = enqueue_bundle_create(db, game, team, current, post_type)
+    except PermissionError as e:
+        raise HTTPException(403, str(e)) from e
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     if post:
