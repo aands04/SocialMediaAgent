@@ -1,6 +1,6 @@
 import secrets
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -38,7 +38,7 @@ from app.models import (
     AuditLog,
     Club,
     Game,
-    GenerationJob,
+    JobStatus,
     PlanProfile,
     Post,
     PublicationJob,
@@ -572,6 +572,25 @@ def dashboard(
         return RedirectResponse("/platform", 303)
     if not current.club_id:
         raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
+    now = datetime.now(timezone.utc)
+    planned_until = now + timedelta(days=7)
+    terminal_publication_statuses = [
+        JobStatus.PUBLISHED,
+        JobStatus.CANCELLED,
+        JobStatus.SKIPPED,
+    ]
+    planned_publications = list(
+        db.scalars(
+            select(PublicationJob)
+            .where(
+                PublicationJob.club_id == current.club_id,
+                PublicationJob.scheduled_at >= now,
+                PublicationJob.scheduled_at <= planned_until,
+                PublicationJob.status.notin_(terminal_publication_statuses),
+            )
+            .order_by(PublicationJob.scheduled_at, PublicationJob.created_at)
+        )
+    )
     counts = {
         "teams": db.scalar(
             select(func.count()).select_from(Team).where(Team.club_id == current.club_id)
@@ -579,29 +598,64 @@ def dashboard(
         "games": db.scalar(
             select(func.count()).select_from(Game).where(Game.club_id == current.club_id)
         ),
-        "posts": db.scalar(
-            select(func.count()).select_from(Post).where(Post.club_id == current.club_id)
+        "planned_posts": db.scalar(
+            select(func.count(func.distinct(PublicationJob.post_id)))
+            .select_from(PublicationJob)
+            .where(
+                PublicationJob.club_id == current.club_id,
+                PublicationJob.scheduled_at >= now,
+                PublicationJob.status.notin_(terminal_publication_statuses),
+            )
         ),
-        "jobs": db.scalar(
+        "publications": db.scalar(
             select(func.count())
             .select_from(PublicationJob)
-            .where(PublicationJob.club_id == current.club_id)
-        ),
-        "generation_jobs": db.scalar(
-            select(func.count())
-            .select_from(GenerationJob)
-            .where(GenerationJob.club_id == current.club_id)
+            .where(
+                PublicationJob.club_id == current.club_id,
+                PublicationJob.status == JobStatus.PUBLISHED,
+            )
         ),
     }
-    posts = db.scalars(
-        select(Post)
-        .where(Post.club_id == current.club_id)
-        .order_by(Post.updated_at.desc())
-        .limit(10)
-    ).all()
+    planned_post_ids = {publication.post_id for publication in planned_publications}
+    planned_team_ids = {publication.team_id for publication in planned_publications}
+    planned_posts = (
+        {
+            post.id: post
+            for post in db.scalars(
+                select(Post).where(
+                    Post.club_id == current.club_id,
+                    Post.id.in_(planned_post_ids),
+                )
+            )
+        }
+        if planned_post_ids
+        else {}
+    )
+    planned_teams = (
+        {
+            team.id: team
+            for team in db.scalars(
+                select(Team).where(
+                    Team.club_id == current.club_id,
+                    Team.id.in_(planned_team_ids),
+                )
+            )
+        }
+        if planned_team_ids
+        else {}
+    )
     club = db.get(Club, current.club_id)
     if club is None:
         raise HTTPException(403, "Verein ist nicht vorhanden")
+    active_team_count = db.scalar(
+        select(func.count())
+        .select_from(Team)
+        .where(
+            Team.club_id == current.club_id,
+            Team.active.is_(True),
+            Team.archived_at.is_(None),
+        )
+    )
     limits = effective_limits(db, current.club_id)
     text_usage = usage_summary(db, current.club_id, "text")
     image_usage = usage_summary(db, current.club_id, "image")
@@ -620,12 +674,16 @@ def dashboard(
         "storage": {
             "used": storage_used,
             "limit": limits["storage_bytes"].value,
+            "used_gb": f"{storage_used / (1024**3):.2f}".replace(".", ","),
+            "limit_gb": f"{limits['storage_bytes'].value / (1024**3):.2f}".replace(
+                ".", ","
+            ),
             "percent": round(storage_used * 100 / max(1, limits["storage_bytes"].value)),
         },
         "text": text_usage,
         "image": image_usage,
         "teams": {
-            "used": int(counts["teams"] or 0),
+            "used": int(active_team_count or 0),
             "limit": limits["teams"].value,
         },
     }
@@ -636,8 +694,45 @@ def dashboard(
             "user": current,
             "club": club,
             "counts": counts,
-            "posts": posts,
+            "planned_publications": planned_publications,
+            "planned_posts": planned_posts,
+            "planned_teams": planned_teams,
             "usage_cards": usage_cards,
+            "publication_status_labels": {
+                JobStatus.DRAFT: "Entwurf",
+                JobStatus.UNAPPROVED: "Nicht freigegeben",
+                JobStatus.APPROVED: "Freigegeben",
+                JobStatus.SCHEDULED: "Geplant",
+                JobStatus.WAITING: "Wartet",
+                JobStatus.PUBLISHING: "Wird veröffentlicht",
+                JobStatus.PUBLISHED: "Veröffentlicht",
+                JobStatus.RETRY: "Wiederholung geplant",
+                JobStatus.FAILED: "Fehlgeschlagen",
+                JobStatus.CANCELLED: "Abgebrochen",
+                JobStatus.SKIPPED: "Übersprungen",
+                JobStatus.UNCERTAIN: "Manuell prüfen",
+            },
+            "approval_status_labels": {
+                "approved": "Freigegeben",
+                "unapproved": "Nicht freigegeben",
+                "reapproval_required": "Erneute Freigabe erforderlich",
+                "rejected": "Abgelehnt",
+            },
+            "format_labels": {"feed": "Feed", "story": "Story", "carousel": "Karussell"},
+            "post_type_labels": {
+                "announcement": "Spielankündigung",
+                "reminder": "Spielerinnerung",
+                "result": "Ergebnismeldung",
+                "manual": "Manueller Beitrag",
+            },
+            "club_status_labels": {
+                "setup_pending": "Einrichtung offen",
+                "trial": "Testphase",
+                "active": "Aktiv",
+                "suspended": "Gesperrt",
+                "cancelled": "Gekündigt",
+                "archived": "Archiviert",
+            },
             "csrf": csrf(request),
         },
     )
