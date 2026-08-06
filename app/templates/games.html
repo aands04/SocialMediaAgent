@@ -13,87 +13,98 @@
   <label>Platzart<select name="pitch"><option value="">Unbekannt</option><option value="Rasenplatz">Rasenplatz</option><option value="Kunstrasenplatz">Kunstrasenplatz</option></select></label>
   <button>Mock-Spiel anlegen</button>
 </form>
-<p>Für KI-Auswärtsgrafiken müssen Wettbewerb, Ort und Platzart vor der Erzeugung vollständig sein. Die Ausgabe lautet automatisch <strong>RP Ort</strong> oder <strong>KR Ort</strong>; Heimspiele verwenden die im Vereinsbranding konfigurierte Kurzbezeichnung beziehungsweise Standard-Heimspielstätte.</p>
-<table>
-  <tr><th>Spiel</th><th>Anpfiff</th><th>Quelle</th><th>Status</th><th>Gegnerlogo</th><th>Spieldetails</th><th>Beitrag erzeugen</th></tr>
-  {% for x in items %}
-  <tr>
-    <td>{{x.home_team}} – {{x.away_team}}</td>
-    <td>{{x.kickoff|berlin}}</td>
-    <td>{{x.provider}} / {{x.source_url}}</td>
-    <td>
-      {{x.status}}
-      {% if x.overrides.get('provider_status')=='provisional' %}
-        <small>FUSSBALL.DE: vorläufig{% if x.overrides.get('provisional_allowed_by_team_rule') %} · laut Mannschaftsregel zugelassen{% endif %}</small>
-      {% endif %}
-    </td>
-    <td>
-      {% set logo=logo_map.get(x.id) %}
-      <strong>{{opponents.get(x.id,'Gegner')}}</strong>
-      {% if logo %}
-        <img class="logo-thumb" width="88" height="88" src="/logos/{{logo.id}}/preview" alt="Gegnerlogo {{logo.display_name}}">
-        <small>verifiziert · v{{logo.version}} · {{logo.checksum[:12]}}…</small>
-        <a class="button" href="/games/{{x.id}}/opponent-logo">Gegnerlogo ändern</a>
-      {% else %}
-        <small class="warning">Kein verifiziertes Logo – neutraler Text-Fallback</small>
-        <a class="button" href="/games/{{x.id}}/opponent-logo">Gegnerlogo hochladen / auswählen</a>
-      {% endif %}
-    </td>
-    <td>
-      <details>
-        <summary>{{x.competition or 'Wettbewerb fehlt'}} · {{x.venue or 'Ort fehlt'}} · {{x.pitch or 'Platzart fehlt'}}</summary>
-        {% if x.overrides.get('venue_address') %}<small>Anschrift: {{x.overrides.get('venue_address')}}</small>{% endif %}
-        <form method="post" action="/games/{{x.id}}/details">
-          <input type="hidden" name="csrf_token" value="{{csrf}}">
-          <label>Wettbewerb<input name="competition" value="{{x.competition or ''}}" required></label>
-          <label>Ort ohne vollständige Anschrift<input name="venue" value="{{x.venue or ''}}" required></label>
-          <label>Platzart<select name="pitch" required><option value="">Bitte wählen</option><option value="Rasenplatz" {% if x.pitch=='Rasenplatz' %}selected{% endif %}>Rasenplatz</option><option value="Kunstrasenplatz" {% if x.pitch=='Kunstrasenplatz' %}selected{% endif %}>Kunstrasenplatz</option></select></label>
-          <button>Spieldetails speichern</button>
-        </form>
-      </details>
-    </td>
-    <td>
-      <form method="post" action="/games/{{x.id}}/generate">
-        <input type="hidden" name="csrf_token" value="{{csrf}}">
-        <button name="post_type" value="announcement">Ankündigung</button>
-        <button name="post_type" value="reminder">Erinnerung</button>
-        <button name="post_type" value="result">Ergebnis</button>
-      </form>
-      {% if x.status=='provisional' %}
-      <form method="post" action="/games/{{x.id}}/confirm-provisional">
-        <input type="hidden" name="csrf_token" value="{{csrf}}">
-        <input name="confirmation" placeholder="VORLÄUFIGES SPIEL BESTÄTIGEN" required>
-        <button class="warning">Manuell bestätigen</button>
-      </form>
-      {% endif %}
-      <form method="post" action="/games/{{x.id}}/delete" onsubmit="return confirm('{% if x.provider == 'mock' %}Dieses lokale Mock-Spiel wirklich löschen?{% else %}Dieses Spiel ausblenden und auch bei späteren FUSSBALL.DE-Importen unterdrücken?{% endif %}');">
-        <input type="hidden" name="csrf_token" value="{{csrf}}">
-        <button class="danger">Spiel löschen</button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
-</table>
-{% if suppressed_items %}
+<p>Für KI-Auswärtsgrafiken müssen Wettbewerb, Ort und Platzart vor der Erzeugung vollständig sein. Heimspiele verwenden die im Vereinsbranding konfigurierte Standard-Heimspielstätte.</p>
+
 <section>
-  <h2>Gelöschte Spiele</h2>
-  <p>Spiele mit vorhandenen Beiträgen bleiben aus Nachvollziehbarkeitsgründen gespeichert. Gelöschte Provider-Spiele werden bei einem erneuten FUSSBALL.DE-Import nicht wieder eingeblendet.</p>
+  <h2>Spiele bewusst verbinden</h2>
+  <p>Wähle mindestens zwei Spiele verschiedener Mannschaften am selben Spieltag. Verbundene Spiele erhalten einen gemeinsamen Generierungsauftrag und einen gemeinsamen Karussell-Begleittext; Bilder und Storys bleiben spielbezogen.</p>
+  <form id="connect-games-form" method="post" action="/games/bundles/connect">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <button>Ausgewählte Spiele bewusst verbinden</button>
+  </form>
+</section>
+
+{% for group in game_groups %}
+<section class="game-bundle{% if group.grouped %} game-bundle--connected{% endif %}">
+  {% if group.grouped %}
+  <div class="game-bundle__heading">
+    <div>
+      <h2>Gemeinsamer Spieltag · {{group.games[0].kickoff|berlin}}</h2>
+      <p><span class="badge">{{'bewusst verbunden' if group.manual else 'durch Vereinsregel gebündelt'}}</span> · Ein gemeinsamer Text, je Spiel ein eigenes Feed-Bild und eigene Storys.</p>
+    </div>
+    <form method="post" action="/games/bundles/separate" onsubmit="return confirm('Diese Spiele wirklich in getrennte Beiträge aufteilen?');">
+      <input type="hidden" name="csrf_token" value="{{csrf}}">
+      {% for x in group.games %}<input type="hidden" name="game_ids" value="{{x.id}}">{% endfor %}
+      <button class="danger">Spiele bewusst trennen</button>
+    </form>
+  </div>
+  {% endif %}
   <table>
-    <tr><th>Spiel</th><th>Anpfiff</th><th>Quelle</th><th>Aktion</th></tr>
-    {% for x in suppressed_items %}
+    <tr><th>Auswahl</th><th>Spiel</th><th>Anpfiff</th><th>Status</th><th>Gegnerlogo</th><th>Spieldetails</th><th>Einzelaktionen</th></tr>
+    {% for x in group.games %}
     <tr>
-      <td>{{x.home_team}} – {{x.away_team}}</td>
+      <td><input type="checkbox" name="game_ids" value="{{x.id}}" form="connect-games-form" aria-label="{{x.home_team}} gegen {{x.away_team}} auswählen"></td>
+      <td><strong>{{group.teams[x.team_id].display_name}}</strong><br>{{x.home_team}} – {{x.away_team}}<br><small>{{x.provider}} / {{x.source_url}}</small></td>
       <td>{{x.kickoff|berlin}}</td>
-      <td>{{x.provider}} / {{x.external_id}}</td>
+      <td>{{x.status}}{% if x.overrides.get('provider_status')=='provisional' %}<small>FUSSBALL.DE: vorläufig</small>{% endif %}</td>
       <td>
-        <form method="post" action="/games/{{x.id}}/restore">
+        {% set logo=logo_map.get(x.id) %}<strong>{{opponents.get(x.id,'Gegner')}}</strong>
+        {% if logo %}
+          <img class="logo-thumb" width="88" height="88" src="/logos/{{logo.id}}/preview?game_id={{x.id}}" alt="Gegnerlogo {{logo.display_name}}">
+          <small>verifiziert · v{{logo.version}} · {{logo.checksum[:12]}}…</small>
+          <a class="button" href="/games/{{x.id}}/opponent-logo">Gegnerlogo ändern</a>
+        {% else %}
+          <small class="warning">Kein verifiziertes Logo – neutraler Text-Fallback</small>
+          <a class="button" href="/games/{{x.id}}/opponent-logo">Gegnerlogo hochladen / auswählen</a>
+        {% endif %}
+      </td>
+      <td>
+        <details><summary>{{x.competition or 'Wettbewerb fehlt'}} · {{x.venue or 'Ort fehlt'}} · {{x.pitch or 'Platzart fehlt'}}</summary>
+          {% if x.overrides.get('venue_address') %}<small>Anschrift: {{x.overrides.get('venue_address')}}</small>{% endif %}
+          <form method="post" action="/games/{{x.id}}/details">
+            <input type="hidden" name="csrf_token" value="{{csrf}}">
+            <label>Wettbewerb<input name="competition" value="{{x.competition or ''}}" required></label>
+            <label>Ort ohne vollständige Anschrift<input name="venue" value="{{x.venue or ''}}" required></label>
+            <label>Platzart<select name="pitch" required><option value="">Bitte wählen</option><option value="Rasenplatz" {% if x.pitch=='Rasenplatz' %}selected{% endif %}>Rasenplatz</option><option value="Kunstrasenplatz" {% if x.pitch=='Kunstrasenplatz' %}selected{% endif %}>Kunstrasenplatz</option></select></label>
+            <button>Spieldetails speichern</button>
+          </form>
+        </details>
+      </td>
+      <td>
+        {% if not group.grouped %}
+        <form method="post" action="/games/{{x.id}}/generate">
           <input type="hidden" name="csrf_token" value="{{csrf}}">
-          <button>Spiel wiederherstellen</button>
+          <button name="post_type" value="announcement">Ankündigung</button>
+          <button name="post_type" value="reminder">Erinnerung</button>
+          <button name="post_type" value="result">Ergebnis</button>
         </form>
+        {% else %}
+        <form method="post" action="/games/{{x.id}}/generate">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <button name="post_type" value="reminder">Eigene Erinnerung</button>
+          {% if not group.result_grouped %}<button name="post_type" value="result">Eigenes Ergebnis</button>{% endif %}
+        </form>
+        {% endif %}
+        {% if x.status=='provisional' %}<form method="post" action="/games/{{x.id}}/confirm-provisional"><input type="hidden" name="csrf_token" value="{{csrf}}"><input name="confirmation" placeholder="VORLÄUFIGES SPIEL BESTÄTIGEN" required><button class="warning">Manuell bestätigen</button></form>{% endif %}
+        <form method="post" action="/games/{{x.id}}/delete" onsubmit="return confirm('Dieses Spiel wirklich löschen beziehungsweise ausblenden?');"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Spiel löschen</button></form>
       </td>
     </tr>
     {% endfor %}
   </table>
+  {% if group.grouped %}
+  <div class="game-bundle__actions">
+    <strong>Ein gemeinsamer Generierungsauftrag:</strong>
+    <form method="post" action="/games/{{group.games[0].id}}/generate">
+      <input type="hidden" name="csrf_token" value="{{csrf}}">
+      <button name="post_type" value="announcement">Gemeinsame Ankündigung erzeugen</button>
+      {% if group.result_grouped %}<button name="post_type" value="result">Gemeinsames Ergebnis erzeugen</button>{% endif %}
+    </form>
+  </div>
+  {% endif %}
 </section>
+{% endfor %}
+
+{% if suppressed_items %}
+<section><h2>Gelöschte Spiele</h2><table><tr><th>Spiel</th><th>Anpfiff</th><th>Quelle</th><th>Aktion</th></tr>{% for x in suppressed_items %}<tr><td>{{x.home_team}} – {{x.away_team}}</td><td>{{x.kickoff|berlin}}</td><td>{{x.provider}} / {{x.external_id}}</td><td><form method="post" action="/games/{{x.id}}/restore"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Spiel wiederherstellen</button></form></td></tr>{% endfor %}</table></section>
 {% endif %}
 {% endblock %}

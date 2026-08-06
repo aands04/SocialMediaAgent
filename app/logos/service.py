@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.games.identity import normalize_team_name, opponent_for_game
-from app.models import LogoAsset
+from app.models import LogoAsset, SharedOpponentLogo
 
 MAX_LOGO_SIZE = 5 * 1024 * 1024
 MIN_DIMENSION = 32
@@ -164,6 +164,106 @@ def store_logo(
             return duplicate, False
         raise
     return asset, True
+
+
+def publish_shared_opponent_logo(
+    db: Session,
+    *,
+    upload_root: Path,
+    source: LogoAsset,
+    data: bytes,
+) -> tuple[SharedOpponentLogo, bool]:
+    """Copy a verified tenant upload into the privacy-safe global catalog."""
+    if source.logo_type != "opponent":
+        raise LogoValidationError("Nur Gegnerlogos dürfen systemweit freigegeben werden")
+    existing = db.scalar(
+        select(SharedOpponentLogo).where(
+            SharedOpponentLogo.normalized_name == source.normalized_name,
+            SharedOpponentLogo.checksum == source.checksum,
+        )
+    )
+    if existing:
+        return existing, False
+    suffix = Path(source.original_filename).suffix.lower()
+    mime_type, width, height = _inspect_image(data, suffix, source.mime_type)
+    latest = db.scalar(
+        select(func.max(SharedOpponentLogo.catalog_version)).where(
+            SharedOpponentLogo.normalized_name == source.normalized_name
+        )
+    )
+    relative = Path("logos") / "shared-opponents" / f"{uuid4().hex}{suffix}"
+    root = Path(upload_root).resolve()
+    target = root / relative
+    _safe_write(target, data, root)
+    item = SharedOpponentLogo(
+        display_name=source.display_name,
+        normalized_name=source.normalized_name,
+        original_path=relative.as_posix(),
+        original_filename=source.original_filename,
+        mime_type=mime_type,
+        size=len(data),
+        width=width,
+        height=height,
+        checksum=source.checksum,
+        catalog_version=int(latest or 0) + 1,
+        active=True,
+        source_club_id=source.club_id,
+        uploaded_by=source.uploaded_by,
+    )
+    try:
+        with db.begin_nested():
+            db.add(item)
+            db.flush()
+    except IntegrityError:
+        target.unlink(missing_ok=True)
+        existing = db.scalar(
+            select(SharedOpponentLogo).where(
+                SharedOpponentLogo.normalized_name == source.normalized_name,
+                SharedOpponentLogo.checksum == source.checksum,
+            )
+        )
+        if existing:
+            return existing, False
+        raise
+    return item, True
+
+
+def shared_logo_path(item: SharedOpponentLogo, upload_root: Path) -> Path:
+    root = Path(upload_root).resolve()
+    relative = Path(item.original_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise LogoValidationError("Systemweiter Logo-Pfad ist ungültig")
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root) or path.is_symlink() or not path.is_file():
+        raise LogoValidationError("Systemweite Logo-Datei ist nicht sicher verfügbar")
+    payload = path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != item.checksum:
+        raise LogoValidationError("Systemweite Logo-Datei wurde nachträglich verändert")
+    return path
+
+
+def import_shared_opponent_logo(
+    db: Session,
+    *,
+    upload_root: Path,
+    shared: SharedOpponentLogo,
+    display_name: str,
+    uploaded_by: str,
+) -> tuple[LogoAsset, bool]:
+    if not shared.active or shared.archived_at:
+        raise LogoValidationError("Das systemweite Gegnerlogo ist nicht mehr aktiv")
+    path = shared_logo_path(shared, upload_root)
+    return store_logo(
+        db,
+        upload_root=upload_root,
+        logo_type="opponent",
+        team_id=None,
+        display_name=display_name,
+        original_filename=shared.original_filename,
+        content_type=shared.mime_type,
+        data=path.read_bytes(),
+        uploaded_by=uploaded_by,
+    )
 
 
 def snapshot(asset: LogoAsset | None) -> dict | None:

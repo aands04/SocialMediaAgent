@@ -40,6 +40,7 @@ from app.models import (
     PublicationJob,
     PublicationMediaItem,
     Role,
+    SharedOpponentLogo,
     StorageObject,
     StoryRule,
     Team,
@@ -1304,7 +1305,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260806-branding-assistant" in teams_page
+    assert "/static/style.css?v=20260806-matchday-bundles" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text
@@ -1333,8 +1334,19 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
         logo_id = logo.id
     suggestion = client.get(f"/games/{second_id}/opponent-logo")
     assert suggestion.text.count("Vorschlag ausdrücklich bestätigen") == 2
+    assert "Passende Logos aus der systemweiten Bibliothek" in suggestion.text
     with factory() as db:
         assert db.get(Game, second_id).opponent_logo_id is None
+        shared_logo = db.query(SharedOpponentLogo).order_by(
+            SharedOpponentLogo.catalog_version.desc()
+        ).first()
+        shared_logo_id = shared_logo.id
+        original_filename = shared_logo.original_filename
+    shared_preview = client.get(
+        f"/shared-opponent-logos/{shared_logo_id}/preview?game_id={second_id}"
+    )
+    assert shared_preview.status_code == 200
+    assert original_filename not in shared_preview.headers["content-disposition"]
     assigned = client.post(
         f"/games/{second_id}/opponent-logo",
         data={"csrf_token": token, "action": "select", "logo_id": logo_id},
@@ -1380,6 +1392,82 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     )
     assert blocked.status_code == 409
     assert "Grafiken neu erzeugen" in blocked.json()["detail"]
+
+
+def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="bundle-dashboard",
+            display_name="Bündel-Seite",
+            username="bundle_dashboard",
+            club="Bündelverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        teams = []
+        games = []
+        for number, hour in ((1, 11), (2, 13)):
+            team = Team(
+                internal_name=f"bundle-{number}",
+                display_name=f"Bündelverein {number}",
+                short_name=f"BV {number}",
+                slug=f"bundle-{number}",
+                club="Bündelverein",
+                fussball_url=f"https://example.invalid/bundle-{number}",
+                instagram_page_id=page.id,
+                media_subdir=f"bundle-{number}",
+                rules={
+                    "announcement_enabled": True,
+                    "result_enabled": True,
+                    "club_matchday_feed_mode": "announcements_and_results",
+                },
+            )
+            db.add(team)
+            db.flush()
+            game = Game(
+                team_id=team.id,
+                provider="mock",
+                external_id=f"bundle-dashboard-{number}",
+                home_team=team.display_name,
+                away_team=f"Gegner {number}",
+                kickoff=datetime(2026, 8, 16, hour, tzinfo=timezone.utc),
+                competition="Kreisliga",
+                venue="Sportplatz",
+                pitch="Rasenplatz",
+                source_url=f"fixture://bundle-dashboard-{number}",
+            )
+            db.add(game)
+            teams.append(team)
+            games.append(game)
+        db.commit()
+        game_ids = [item.id for item in games]
+
+    page = client.get("/games")
+    assert page.status_code == 200
+    assert page.text.count("Gemeinsame Ankündigung erzeugen") == 1
+    assert "durch Vereinsregel gebündelt" in page.text
+
+    token = session_csrf(client)
+    separated = client.post(
+        "/games/bundles/separate",
+        data={"csrf_token": token, "game_ids": game_ids},
+        follow_redirects=False,
+    )
+    assert separated.status_code == 303
+    separated_page = client.get("/games").text
+    assert "Gemeinsame Ankündigung erzeugen" not in separated_page
+
+    connected = client.post(
+        "/games/bundles/connect",
+        data={"csrf_token": token, "game_ids": game_ids},
+        follow_redirects=False,
+    )
+    assert connected.status_code == 303
+    connected_page = client.get("/games").text
+    assert connected_page.count("Gemeinsame Ankündigung erzeugen") == 1
+    assert "bewusst verbunden" in connected_page
 
 
 def test_dashboard_admin_flow(browser):

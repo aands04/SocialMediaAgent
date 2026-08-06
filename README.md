@@ -201,6 +201,13 @@ Ein `.hint-pre-publish` markiert Treffer als `provisional`. Standardmäßig blei
 
 Ergebnisse aus normalen ASCII-Ziffern werden direkt gelesen. Dynamisch zugeordnete Ziffern werden nur über den streng validierten offiziellen FUSSBALL.DE-Font deterministisch aufgelöst; OCR und visuelles Raten sind ausgeschlossen. Ein Ergebnis wird erst nach zwei verschiedenen, zeitlich stabilen Snapshots automatisch bestätigt. Automatische Abrufe und Beitragserzeugung besitzen getrennte globale und mannschaftsbezogene Opt-ins. Beiträge bleiben standardmäßig manuell freizugeben; eine automatische Freigabe kann je Mannschaft und Beitragstyp ausdrücklich aktiviert werden und nutzt weiterhin sämtliche bestehenden Freigabeprüfungen. Betrieb und Diagnose beschreibt [`docs/AUTOMATIC_FUSSBALL.md`](docs/AUTOMATIC_FUSSBALL.md), die mannschaftsbezogene Zeit- und Freigabeplanung [`docs/FUSSBALL_SCHEDULING.md`](docs/FUSSBALL_SCHEDULING.md).
 
+Gemeinsame Spieltage können im Dashboard als ein persistenter
+Generierungsauftrag verarbeitet werden: ein KI-Textaufruf mit den Fakten aller
+Spiele, je Spiel eigene Feed-/Story-Grafiken und anschließend ein gemeinsames
+Feed-Karussell. Bewusstes Verbinden und Trennen sowie der datensparsame,
+systemweite Gegnerlogo-Katalog sind in
+[`docs/MATCHDAY_BUNDLES.md`](docs/MATCHDAY_BUNDLES.md) beschrieben.
+
 Die Provider-Diagnose bleibt read-only. Nach der Vorschau kann ausschließlich ein Administrator mit CSRF-Schutz und der Bestätigung `SPIELE ÜBERNEHMEN` Spiele idempotent importieren. Der Import erzeugt keine Beiträge. Öffentliche AJAX-Aufrufe sind technisch auf HTTPS, `fussball.de`/`www.fussball.de`, die drei bekannten `ajax.team.*`-Pfade, Größenlimit, Timeout und begrenztes Backoff beschränkt. Ob `ajax.team.prev.games` lesbare Ergebnisse liefert, wurde in dieser Änderung nicht live geprüft; verschleierte Werte bleiben deshalb leer.
 
 ## Mandantenfähige SaaS-Plattform

@@ -29,7 +29,7 @@ from app.models import (
 )
 from app.prompts.service import resolve_prompt
 from app.rendering.service import Renderer, builtin_template
-from app.textgen.service import TextGenerator
+from app.textgen.service import GeneratedText, TextGenerator
 
 
 class RerenderConflict(ValueError):
@@ -417,6 +417,10 @@ def create_post(
     renderer: Renderer,
     post_type="announcement",
     logo_snapshot: dict | None = None,
+    *,
+    generated_text: GeneratedText | None = None,
+    text_prompt_override=None,
+    matchday_bundle: dict | None = None,
 ) -> Post:
     if game.status == "provisional" or game.overrides.get("automation_blocked"):
         raise ValueError("Vorläufige Spiele sind für die Beitragserstellung gesperrt")
@@ -447,7 +451,10 @@ def create_post(
             team.rules.get("image_prompt_feed", "default-image-feed"),
         )
         feed_prompt = resolve_prompt(db, feed_prompt_name, "image", post_type, "feed", facts)
-    if getattr(generator, "is_ai", False):
+    if text_prompt_override is not None:
+        text_prompt = text_prompt_override
+        facts = {**facts, "text_prompt": text_prompt}
+    elif getattr(generator, "is_ai", False):
         text_prompt_name = team.rules.get(
             f"text_prompt_{post_type}", team.rules.get("text_prompt", f"default-text-{post_type}")
         )
@@ -484,18 +491,20 @@ def create_post(
                 or {"family": facts["secondary_font_family"], "fallback": True},
             },
             "colors": team.colors,
+            "matchday_bundle": matchday_bundle,
         },
     )
     db.add(post)
     db.flush()
-    generated_text = generator.generate(facts)
-    post.text = generated_text.text
+    text_result = generated_text or generator.generate(facts)
+    post.text = text_result.text
     post.design_snapshot = {
         **post.design_snapshot,
         "text_generation": {
-            "model": generated_text.model,
-            "prompt_version": generated_text.prompt_version,
-            "tokens": generated_text.tokens,
+            "model": text_result.model,
+            "prompt_version": text_result.prompt_version,
+            "tokens": text_result.tokens,
+            "shared_matchday_prompt": bool(matchday_bundle),
         },
     }
     feed_at, feed_is_absolute = feed_time(team, game, post_type)
@@ -647,6 +656,125 @@ def create_post(
     post.status = PostStatus.INCOMPLETE if warnings else PostStatus.PENDING
     db.commit()
     return post
+
+
+def create_matchday_bundle_posts(
+    db: Session,
+    games: list[Game],
+    teams: dict[str, Team],
+    generator: TextGenerator,
+    renderer: Renderer,
+    post_type: str,
+    logo_snapshots: dict[str, dict],
+    bundle_key: str,
+) -> list[Post]:
+    """Create all game-specific media with one shared publication text.
+
+    Images and stories remain tied to their individual game.  The text model is
+    called exactly once with an explicit, complete match list and that result
+    is frozen into every member post before the carousel coordinator runs.
+    """
+    if len(games) < 2:
+        raise ValueError("Ein gemeinsamer Spieltagsauftrag benötigt mindestens zwei Spiele")
+    primary = games[0]
+    primary_team = teams[primary.team_id]
+    base_facts = _facts(db, primary, primary_team, None, post_type, logo_snapshots[primary.id])
+    local_games = []
+    for index, game in enumerate(games, start=1):
+        kickoff = _aware_utc(game.kickoff).astimezone(BERLIN)
+        score = (
+            f"{game.home_score}:{game.away_score}"
+            if post_type == "result" and game.result_confirmed
+            else None
+        )
+        local_games.append(
+            {
+                "position": index,
+                "home_team": game.home_team,
+                "away_team": game.away_team,
+                "date": kickoff.strftime("%d.%m.%Y"),
+                "time": kickoff.strftime("%H:%M"),
+                "competition": game.competition or "",
+                "venue": game.venue or "",
+                "score": score,
+            }
+        )
+    lines = []
+    for item in local_games:
+        line = (
+            f"{item['position']}. {item['home_team']} gegen {item['away_team']}; "
+            f"{item['date']}, {item['time']} Uhr"
+        )
+        if item["competition"]:
+            line += f"; Wettbewerb: {item['competition']}"
+        if item["venue"]:
+            line += f"; Spielort: {item['venue']}"
+        if item["score"]:
+            line += f"; bestätigtes Ergebnis: {item['score']}"
+        lines.append(line)
+    match_list = "\n".join(lines)
+    shared_prompt = None
+    if getattr(generator, "is_ai", False):
+        prompt_name = primary_team.rules.get(
+            f"text_prompt_{post_type}",
+            primary_team.rules.get("text_prompt", f"default-text-{post_type}"),
+        )
+        shared_prompt = resolve_prompt(
+            db, prompt_name, "text", post_type, "none", base_facts
+        )
+        shared_prompt = replace(
+            shared_prompt,
+            rendered=(
+                shared_prompt.rendered
+                + "\n\nVERBINDLICHER GEMEINSAMER KARUSSELL-AUFTRAG:\n"
+                + "Erstelle genau einen zusammenhängenden Begleittext, der sich "
+                + "gleichwertig auf alle folgenden Spiele bezieht. Lasse kein Spiel weg "
+                + "und vermische keine Spielorte, Uhrzeiten oder Ergebnisse.\n"
+                + match_list
+            ),
+        )
+        shared_text = generator.generate(
+            {
+                **base_facts,
+                "text_prompt": shared_prompt,
+                "matchday_games": local_games,
+            }
+        )
+    else:
+        heading = "Ergebnisse des gemeinsamen Spieltags" if post_type == "result" else "Gemeinsamer Spieltag"
+        hashtags = []
+        for game in games:
+            for tag in teams[game.team_id].hashtags or []:
+                if tag not in hashtags:
+                    hashtags.append(tag)
+        shared_text = GeneratedText(
+            heading + "\n\n" + match_list + ("\n\n" + " ".join(hashtags) if hashtags else ""),
+            "fixture",
+            prompt_version="shared-matchday-fixture-v1",
+        )
+    bundle_snapshot = {
+        "key": bundle_key,
+        "game_ids": [item.id for item in games],
+        "single_text_prompt": True,
+        "stories_remain_separate": True,
+    }
+    posts = []
+    for game in games:
+        posts.append(
+            create_post(
+                db,
+                game,
+                teams[game.team_id],
+                generator,
+                renderer,
+                post_type,
+                logo_snapshots[game.id],
+                generated_text=shared_text,
+                text_prompt_override=shared_prompt,
+                matchday_bundle=bundle_snapshot,
+            )
+        )
+    return posts
 
 
 def rerender_post(

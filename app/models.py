@@ -493,6 +493,41 @@ class LogoAsset(Base, Timestamped):
     uploaded_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
 
 
+class SharedOpponentLogo(Base, Timestamped):
+    """Platform-wide, verified opponent-logo catalog.
+
+    The binary is a dedicated canonical copy.  Tenant upload paths and user
+    details are never required to browse or select this catalog.
+    """
+
+    __tablename__ = "shared_opponent_logos"
+    __table_args__ = (
+        UniqueConstraint(
+            "normalized_name", "checksum", name="uq_shared_opponent_logo_name_checksum"
+        ),
+        Index("ix_shared_opponent_logo_name_active", "normalized_name", "active"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    display_name: Mapped[str] = mapped_column(String(200))
+    normalized_name: Mapped[str] = mapped_column(String(200), index=True)
+    original_path: Mapped[str] = mapped_column(String(800))
+    original_filename: Mapped[str] = mapped_column(String(255))
+    mime_type: Mapped[str] = mapped_column(String(80))
+    size: Mapped[int] = mapped_column(Integer)
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    catalog_version: Mapped[int] = mapped_column(Integer, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_club_id: Mapped[str | None] = mapped_column(
+        ForeignKey("clubs.id", ondelete="SET NULL"), index=True
+    )
+    uploaded_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+
 class MediaAsset(Base, Timestamped):
     __tablename__ = "media_assets"
     __table_args__ = (
