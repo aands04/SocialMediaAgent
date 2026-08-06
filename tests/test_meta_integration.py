@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.meta.api import REQUIRED_SCOPES, MetaApiClient, MetaApiError, OAuthToken
+from app.meta.connection_health import run_automatic_connection_check_cycle
 from app.meta.media import (
     MediaGrantError,
     create_grant,
@@ -33,6 +34,7 @@ from app.meta.publishing import (
 from app.meta.scheduler import run_automatic_publishing_cycle
 from app.meta.security import TokenCipher, sanitize_platform_data, secret_hash
 from app.models import (
+    AuditLog,
     Game,
     InstagramConnection,
     InstagramOAuthState,
@@ -285,6 +287,85 @@ def test_connection_check_rejects_incomplete_stored_oauth_grant(db, tmp_path):
 
     assert checked.status == "invalid"
     assert "Berechtigungen" in checked.last_error
+
+
+def test_automatic_connection_check_runs_twice_daily_and_is_audited(db, tmp_path):
+    settings = production_settings(tmp_path)
+    settings.meta_connection_check_interval_seconds = 12 * 60 * 60
+    _, page, connection, _, _ = make_context(db, settings)
+    now = datetime.now(timezone.utc)
+    connection.last_check_at = now - timedelta(hours=13)
+    page.last_check_at = now - timedelta(hours=13)
+    db.commit()
+    api = OAuthApi()
+
+    first = run_automatic_connection_check_cycle(db, settings, api=api, now=now)
+    second = run_automatic_connection_check_cycle(
+        db,
+        settings,
+        api=api,
+        now=now + timedelta(hours=11, minutes=59),
+    )
+    third = run_automatic_connection_check_cycle(
+        db,
+        settings,
+        api=api,
+        now=now + timedelta(hours=12, minutes=1),
+    )
+
+    db.refresh(connection)
+    db.refresh(page)
+    assert first.claimed == first.checked == first.succeeded == 1
+    assert first.failed == 0
+    assert second.claimed == second.checked == 0
+    assert third.claimed == third.checked == third.succeeded == 1
+    assert api.profile_calls == 2
+    assert connection.status == "connected"
+    assert page.connection_status == "connected"
+    audit_items = list(
+        db.scalars(
+            select(AuditLog).where(
+                AuditLog.action == "meta.connection_checked_automatic"
+            )
+        )
+    )
+    assert len(audit_items) == 2
+    assert all(item.user_id is None for item in audit_items)
+
+
+def test_automatic_connection_check_failure_stays_blocking_and_is_recorded(db, tmp_path):
+    class FailingProfileApi:
+        def profile(self, _access_token):
+            raise MetaApiError("Profilprüfung vorübergehend fehlgeschlagen")
+
+    settings = production_settings(tmp_path)
+    _, page, connection, _, _ = make_context(db, settings)
+    now = datetime.now(timezone.utc)
+    connection.last_check_at = now - timedelta(hours=13)
+    page.last_check_at = now - timedelta(hours=13)
+    db.commit()
+
+    result = run_automatic_connection_check_cycle(
+        db,
+        settings,
+        api=FailingProfileApi(),
+        now=now,
+    )
+
+    db.refresh(connection)
+    db.refresh(page)
+    assert result.checked == result.failed == 1
+    assert result.succeeded == 0
+    assert connection.status == "error"
+    assert page.connection_status == "error"
+    assert "Profilprüfung" in connection.last_error
+    audit_item = db.scalar(
+        select(AuditLog).where(
+            AuditLog.action == "meta.connection_check_failed_automatic"
+        )
+    )
+    assert audit_item is not None
+    assert audit_item.user_id is None
 
 
 def test_oauth_rejects_wrong_instagram_page(db, tmp_path):

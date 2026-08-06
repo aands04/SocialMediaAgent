@@ -48,6 +48,16 @@ case "$flags" in
   *) fail "Automatik-Gates sind nur gemeinsam true oder gemeinsam false zulässig ($flags)" ;;
 esac
 
+connection_check_interval="${META_CONNECTION_CHECK_INTERVAL_SECONDS:-43200}"
+connection_max_age="${META_CONNECTION_MAX_AGE_SECONDS:-86400}"
+if [ "$connection_check_interval" -gt 0 ] 2>/dev/null &&
+  [ "$connection_check_interval" -le 43200 ] 2>/dev/null &&
+  [ "$connection_check_interval" -lt "$connection_max_age" ] 2>/dev/null; then
+  ok "Automatische Instagram-Verbindungsprüfung mindestens zweimal täglich"
+else
+  fail "Instagram-Verbindungsprüfung muss positiv, höchstens 43200 Sekunden und jünger als META_CONNECTION_MAX_AGE_SECONDS sein"
+fi
+
 fussball_flags="${FUSSBALL_AUTOMATIC_SYNC_ENABLED:-false}:${AUTOMATIC_POST_GENERATION_ENABLED:-false}"
 case "$fussball_flags" in
   false:false) ok "FUSSBALL.DE-Automatik vollständig pausiert" ;;

@@ -46,6 +46,7 @@ from app.models import (
     Team,
     User,
 )
+from app.posts.club_carousel import coordinate_club_matchday_feed
 from app.tenancy.state import system_scope, tenant_scope
 from app.web import berlin_datetime
 
@@ -127,6 +128,108 @@ def csrf(client):
 def session_csrf(client):
     response = client.get("/teams")
     return re.search(r'name="csrf_token" value="([^"]+)', response.text).group(1)
+
+
+def test_publication_time_can_be_changed_from_post_detail(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="reschedule-page",
+            display_name="Zeitplan-Seite",
+            username="reschedule_page",
+            club="Dashboard Testverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="reschedule-team",
+            display_name="Zeitplan Mannschaft",
+            short_name="ZM",
+            slug="reschedule-team",
+            club="Dashboard Testverein",
+            fussball_url="https://example.invalid/reschedule-team",
+            instagram_page_id=page.id,
+            media_subdir="reschedule-team/players",
+            timezone="Europe/Berlin",
+        )
+        db.add(team)
+        db.flush()
+        post = Post(
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="announcement",
+            status=PostStatus.APPROVED,
+            text="Freigegebener Zeitplan",
+            approved_version=1,
+        )
+        db.add(post)
+        db.flush()
+        job = PublicationJob(
+            post_id=post.id,
+            team_id=team.id,
+            instagram_page_id=page.id,
+            kind="feed",
+            media_path="/tmp/reschedule-feed.png",
+            scheduled_at=datetime.now(timezone.utc) + timedelta(days=1),
+            status=JobStatus.SCHEDULED,
+            approval_status="approved",
+            approved_post_version=post.version,
+            idempotency_key="dashboard-reschedule-feed",
+        )
+        db.add(job)
+        db.commit()
+        post_id = post.id
+        job_id = job.id
+        job_version = job.version
+
+    detail = client.get(f"/posts/{post_id}")
+    assert detail.status_code == 200
+    assert "Zeitpunkt ändern" in detail.text
+    assert "Europe/Berlin" in detail.text
+
+    local_time = (datetime.now(ZoneInfo("Europe/Berlin")) + timedelta(days=3)).replace(
+        second=0, microsecond=0
+    )
+    payload = {
+        "csrf_token": "ungueltig",
+        "scheduled_at": local_time.strftime("%Y-%m-%dT%H:%M"),
+        "job_version": str(job_version),
+    }
+    denied = client.post(
+        f"/posts/{post_id}/publications/{job_id}/schedule",
+        data=payload,
+        follow_redirects=False,
+    )
+    assert denied.status_code == 403
+
+    payload["csrf_token"] = session_csrf(client)
+    changed = client.post(
+        f"/posts/{post_id}/publications/{job_id}/schedule",
+        data=payload,
+        follow_redirects=False,
+    )
+    assert changed.status_code == 303
+    assert changed.headers["location"].startswith(f"/posts/{post_id}")
+
+    with factory() as db:
+        saved_post = db.get(Post, post_id)
+        saved_job = db.get(PublicationJob, job_id)
+        saved_time = saved_job.scheduled_at
+        if saved_time.tzinfo is None:
+            saved_time = saved_time.replace(tzinfo=timezone.utc)
+        assert saved_time == local_time.astimezone(timezone.utc)
+        assert saved_job.absolute_time is True
+        assert saved_job.stale_time is False
+        assert saved_job.status == JobStatus.UNAPPROVED
+        assert saved_job.approval_status == "reapproval_required"
+        assert saved_post.status == PostStatus.REAPPROVAL
+        assert db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "publication.schedule_changed",
+                AuditLog.entity_id == job_id,
+            )
+        )
 
 
 def test_branding_assistant_loads_and_saves_tenant_structured_values(browser):
@@ -623,6 +726,14 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
             status=PostStatus.PENDING,
             text="Feed benötigt noch Freigabe",
         )
+        overdue_post = Post(
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="manual",
+            manual_submission_id="publication-plan-overdue",
+            status=PostStatus.APPROVED,
+            text="Überfälliger manueller Beitrag",
+        )
         carousel_post = Post(
             team_id=team.id,
             instagram_page_id=page.id,
@@ -645,6 +756,7 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
                 old_post,
                 story_post,
                 attention_post,
+                overdue_post,
                 carousel_post,
                 cancelled_post,
             ]
@@ -655,6 +767,7 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
         old_time = current_time - timedelta(days=3)
         story_time = current_time + timedelta(days=2)
         attention_time = current_time + timedelta(days=4)
+        overdue_time = current_time - timedelta(minutes=30)
         carousel_time = current_time + timedelta(days=8)
         cancelled_time = current_time + timedelta(days=1)
         jobs = [
@@ -708,6 +821,17 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
                 idempotency_key="publication-plan-attention",
             ),
             PublicationJob(
+                post_id=overdue_post.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                kind="feed",
+                media_path="/tmp/overdue-feed.png",
+                scheduled_at=overdue_time,
+                approval_status="approved",
+                status=JobStatus.SCHEDULED,
+                idempotency_key="publication-plan-overdue",
+            ),
+            PublicationJob(
                 post_id=carousel_post.id,
                 team_id=team.id,
                 instagram_page_id=page.id,
@@ -732,7 +856,7 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
         ]
         db.add_all(jobs)
         db.flush()
-        carousel_job = jobs[4]
+        carousel_job = jobs[5]
         for position in range(1, 4):
             db.add(
                 PublicationMediaItem(
@@ -755,6 +879,9 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
     assert "Zentraler Veröffentlichungsplan" in default_page.text
     assert "In den letzten 2 Tagen veröffentlicht" in default_page.text
     assert "Geplant für die nächsten 7 Tage" in default_page.text
+    assert "Überfällige Veröffentlichungen" in default_page.text
+    assert "Überfälliger manueller Beitrag" in default_page.text
+    assert "Überfällig – noch nicht veröffentlicht" in default_page.text
     assert "Jüngster veröffentlichter Spielbeitrag" in default_page.text
     assert "Geplante Story im Standardzeitraum" in default_page.text
     assert "Feed benötigt noch Freigabe" in default_page.text
@@ -784,7 +911,7 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
 
     feed_page = client.get("/posts?days=14&format=feed")
     assert feed_page.status_code == 200
-    assert feed_page.text.count('data-publication-kind="feed"') == 2
+    assert feed_page.text.count('data-publication-kind="feed"') == 3
     assert feed_page.text.count('data-publication-kind="carousel"') == 1
     assert 'data-publication-kind="story"' not in feed_page.text
     assert '<option value="feed" selected>' in feed_page.text
@@ -1468,6 +1595,109 @@ def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(brow
     connected_page = client.get("/games").text
     assert connected_page.count("Gemeinsame Ankündigung erzeugen") == 1
     assert "bewusst verbunden" in connected_page
+
+
+def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_path):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="combined-post-dashboard",
+            display_name="Gemeinsame Seite",
+            username="combined_dashboard",
+            club="Dashboard Testverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        posts = []
+        for number, hour in ((1, 13), (2, 15)):
+            team = Team(
+                internal_name=f"combined-team-{number}",
+                display_name=f"Dashboard Mannschaft {number}",
+                short_name=f"DM {number}",
+                slug=f"combined-team-{number}",
+                club="Dashboard Testverein",
+                fussball_url=f"https://example.invalid/combined-{number}",
+                instagram_page_id=page.id,
+                media_subdir=f"combined-team-{number}",
+                rules={
+                    "announcement_enabled": True,
+                    "club_matchday_feed_mode": "announcements",
+                },
+            )
+            db.add(team)
+            db.flush()
+            game = Game(
+                team_id=team.id,
+                provider="mock",
+                external_id=f"combined-dashboard-{number}",
+                home_team=team.display_name,
+                away_team=f"Gegner {number}",
+                kickoff=datetime(2026, 8, 16, hour, tzinfo=timezone.utc),
+                competition="Kreisliga",
+                venue="Sportplatz",
+                pitch="Rasenplatz",
+                source_url=f"fixture://combined-dashboard-{number}",
+            )
+            db.add(game)
+            db.flush()
+            feed_path = tmp_path / f"combined-feed-{number}.png"
+            Image.new("RGB", (1080, 1350), "blue").save(feed_path)
+            post = Post(
+                game_id=game.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                post_type="announcement",
+                status=PostStatus.PENDING,
+                text=f"Gemeinsamer Spieltag {number}",
+                feed_path=str(feed_path),
+                design_snapshot={},
+                critical_warnings=[],
+            )
+            db.add(post)
+            db.flush()
+            db.add(
+                PublicationJob(
+                    post_id=post.id,
+                    game_id=game.id,
+                    team_id=team.id,
+                    instagram_page_id=page.id,
+                    kind="feed",
+                    media_path=str(feed_path),
+                    scheduled_at=game.kickoff - timedelta(days=2),
+                    idempotency_key=f"{post.id}:feed:v1",
+                )
+            )
+            for slot in (1, 2):
+                story_path = tmp_path / f"combined-story-{number}-{slot}.png"
+                Image.new("RGB", (1080, 1920), "navy").save(story_path)
+                db.add(
+                    PublicationJob(
+                        post_id=post.id,
+                        game_id=game.id,
+                        team_id=team.id,
+                        instagram_page_id=page.id,
+                        kind="story",
+                        media_path=str(story_path),
+                        scheduled_at=game.kickoff - timedelta(hours=slot),
+                        idempotency_key=f"{post.id}:story:{slot}:v1",
+                    )
+                )
+            posts.append(post)
+        db.commit()
+        state = coordinate_club_matchday_feed(db, posts[-1], requested_by=None)
+        db.commit()
+        primary_id = state.primary_post_id
+
+    response = client.get(f"/posts/{primary_id}")
+
+    assert response.status_code == 200
+    assert "Gemeinsamer Spieltagsbeitrag" in response.text
+    assert response.text.count("<figcaption>KARUSSELL") == 2
+    assert response.text.count("<figcaption>STORY") == 4
+    assert response.text.count("Zeitpunkt ändern") == 5
+    assert "Dashboard Mannschaft 1" in response.text
+    assert "Dashboard Mannschaft 2" in response.text
 
 
 def test_dashboard_admin_flow(browser):

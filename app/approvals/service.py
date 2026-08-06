@@ -17,6 +17,7 @@ from app.models import (
     Team,
     User,
 )
+from app.posts.club_carousel import matchday_bundle_jobs
 
 
 class ApprovalError(ValueError):
@@ -29,7 +30,14 @@ def _clear_resolved_reapproval_error(job: PublicationJob) -> None:
         job.error = None
 
 
-def approve(db: Session, post: Post, user: User, selected_jobs: list[str] | None = None) -> Post:
+def approve(
+    db: Session,
+    post: Post,
+    user: User,
+    selected_jobs: list[str] | None = None,
+    *,
+    commit: bool = True,
+) -> Post:
     if not allowed(db, user, "approve", post.team_id):
         raise ApprovalError("Keine Freigabeberechtigung")
     page = db.get(InstagramPage, post.instagram_page_id)
@@ -188,8 +196,41 @@ def approve(db: Session, post: Post, user: User, selected_jobs: list[str] | None
             },
         )
     )
-    db.commit()
+    if commit:
+        db.commit()
     return post
+
+
+def approve_matchday_bundle(
+    db: Session,
+    post: Post,
+    user: User,
+    selected_jobs: list[str] | None = None,
+) -> Post:
+    """Approve the aggregate carousel and all selected per-game stories atomically."""
+    primary, members, visible_jobs, _job_posts = matchday_bundle_jobs(db, post)
+    if len(members) == 1 or post.id != primary.id:
+        return approve(db, post, user, selected_jobs)
+
+    visible_ids = {job.id for job in visible_jobs}
+    selected_ids = set(selected_jobs) if selected_jobs is not None else visible_ids
+    if not selected_ids or not selected_ids.issubset(visible_ids):
+        raise ApprovalError("Ungültige Auswahl für den gemeinsamen Spieltagsbeitrag")
+
+    try:
+        for member in members:
+            member_job_ids = [
+                job.id
+                for job in visible_jobs
+                if job.post_id == member.id and job.id in selected_ids
+            ]
+            if member_job_ids:
+                approve(db, member, user, member_job_ids, commit=False)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return primary
 
 
 def edit_text(db: Session, post: Post, user: User, text: str, expected_version: int):

@@ -2,6 +2,14 @@
 {% block content %}
 <h1>Beitrag prüfen</h1>
 <p>Status: <span class="badge">{{item.status.value}}</span> · Beitragsversion {{item.version}}</p>
+{% if aggregate_bundle %}
+<div class="notice">
+  <strong>Gemeinsamer Spieltagsbeitrag:</strong>
+  {{bundle_posts|length}} Spiele, {{carousel_items.values()|map('length')|sum}} Feed-Bilder und
+  {{jobs|selectattr('kind','equalto','story')|list|length}} Storys werden hier gemeinsam angezeigt und freigegeben.
+  Die Storys bleiben intern ihrem jeweiligen Spiel und ihrer Mannschaft zugeordnet.
+</div>
+{% endif %}
 {% set is_manual=item.design_snapshot.get('source') == 'manual_upload' %}
 {% if item.critical_warnings %}<div class="alert"><strong>Kritische Hinweise:</strong> {{item.critical_warnings|join('; ')}}</div>{% endif %}
 {% if is_manual %}
@@ -73,13 +81,16 @@
   {% if x.kind == 'carousel' %}
     {% for media in carousel_items.get(x.id, []) %}
     <figure>
-      <figcaption>KARUSSELL {{media.position}}/{{carousel_items[x.id]|length}} · {{x.scheduled_at|berlin}}</figcaption>
+      {% set carousel_team=(carousel_teams.get(x.id,[])|list)[media.position-1] if carousel_teams.get(x.id) and media.position <= carousel_teams[x.id]|length else none %}
+      <figcaption>KARUSSELL {{media.position}}/{{carousel_items[x.id]|length}}{% if carousel_team %} · {{carousel_team.display_name}}{% endif %} · {{x.scheduled_at|berlin}}</figcaption>
       <img src="/posts/{{item.id}}/media/{{x.id}}/items/{{media.id}}" alt="Karussellbild {{media.position}}">
       {% if loop.first %}<div class="media-check">{{checks[x.id]}}</div>{% endif %}
     </figure>
     {% endfor %}
   {% else %}
-  <figure><figcaption>{{x.kind|upper}} · {{x.scheduled_at|berlin}}</figcaption><img src="/posts/{{item.id}}/media/{{x.id}}" alt="Vorschau {{x.kind}}"><div class="media-check">{{checks[x.id]}}</div></figure>
+  {% set source_post=job_posts.get(x.id,item) %}
+  {% set source_team=job_teams.get(x.id) %}
+  <figure><figcaption>{{x.kind|upper}}{% if source_team %} · {{source_team.display_name}}{% endif %} · {{x.scheduled_at|berlin}}</figcaption><img src="/posts/{{source_post.id}}/media/{{x.id}}" alt="Vorschau {{x.kind}}{% if source_team %} {{source_team.display_name}}{% endif %}"><div class="media-check">{{checks[x.id]}}</div>{% if source_post.id != item.id %}<p><a href="/posts/{{source_post.id}}">Teilbeitrag einzeln bearbeiten</a></p>{% endif %}</figure>
   {% endif %}
   {% endfor %}
 </div>
@@ -94,10 +105,10 @@
     </label>
     <p><strong>Genau auswählen, was neu erstellt werden soll:</strong></p>
     <label><input type="checkbox" name="revise_text" value="true"> Begleittext durch KI überarbeiten</label>
-    {% for x in jobs if x.kind=='feed' and x.status.value!='published' %}
+    {% for x in jobs if x.kind=='feed' and x.status.value!='published' and job_posts.get(x.id,item).id==item.id %}
       <label><input type="checkbox" name="revise_feed" value="true"> Feed-Grafik {{x.scheduled_at|berlin}} durch KI neu erzeugen</label>
     {% endfor %}
-    {% for x in jobs if x.kind=='story' and x.status.value!='published' %}
+    {% for x in jobs if x.kind=='story' and x.status.value!='published' and job_posts.get(x.id,item).id==item.id %}
       <label><input type="checkbox" name="story_job_ids" value="{{x.id}}"> Story {{x.scheduled_at|berlin}} durch KI neu erzeugen</label>
     {% endfor %}
     <label>Spielerbild für die neue Bildversion
@@ -123,8 +134,8 @@
 <form method="post" action="/posts/{{item.id}}/rerender">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
   <fieldset><legend>Grafiken neu erzeugen</legend><p>Wähle genau die neu zu erzeugenden Grafiken aus:</p>
-    {% for x in jobs if x.kind=='feed' and x.status.value!='published' %}<label><input type="checkbox" name="rerender_feed" value="true"> Feed {{x.scheduled_at|berlin}}</label>{% endfor %}
-    {% for x in jobs if x.kind=='story' and x.status.value!='published' %}<label><input type="checkbox" name="story_job_ids" value="{{x.id}}"> Story {{x.scheduled_at|berlin}}</label>{% endfor %}
+    {% for x in jobs if x.kind=='feed' and x.status.value!='published' and job_posts.get(x.id,item).id==item.id %}<label><input type="checkbox" name="rerender_feed" value="true"> Feed {{x.scheduled_at|berlin}}</label>{% endfor %}
+    {% for x in jobs if x.kind=='story' and x.status.value!='published' and job_posts.get(x.id,item).id==item.id %}<label><input type="checkbox" name="story_job_ids" value="{{x.id}}"> Story {{x.scheduled_at|berlin}}</label>{% endfor %}
     <label>Spielerbild für die Neugenerierung
       <select name="media_asset_id">
         {% if current_media_asset %}<option value="{{current_media_asset.id}}" selected>Bisheriges Bild beibehalten: {{current_media_asset.filename}}</option>{% endif %}
@@ -141,7 +152,7 @@
   <fieldset>
     <legend>Grafiken mit aktualisierten Logos neu zusammensetzen</legend>
     <p>Die vorhandenen KI-Grundgrafiken werden wiederverwendet. Es erfolgt kein neuer OpenAI-Bildaufruf.</p>
-    {% for x in jobs if x.kind=='story' and x.status.value!='published' %}
+    {% for x in jobs if x.kind=='story' and x.status.value!='published' and job_posts.get(x.id,item).id==item.id %}
       {% set source=logo_recompose.stories.get(x.id) %}
       <label>
         <input type="checkbox" name="story_job_ids" value="{{x.id}}" {% if source and source.available %}checked{% else %}disabled{% endif %}>
@@ -169,25 +180,50 @@
   <label>Begleittext<textarea name="text" rows="8" required>{{item.text}}</textarea></label><button>Text versioniert speichern</button>
 </form>{% else %}<section><h2>Begleittext</h2><p style="white-space:pre-wrap">{{item.text}}</p></section>{% endif %}
 <h2>Veröffentlichungsaufträge</h2>
-{% if can_approve %}<form method="post" action="/posts/{{item.id}}/approve">
+{% if can_approve %}<form id="approve-publication-jobs" method="post" action="/posts/{{item.id}}/approve">
   <input type="hidden" name="csrf_token" value="{{csrf}}">
-{% endif %}
-  <table><tr><th>Freigeben</th><th>Typ</th><th>Zeitpunkt</th><th>Status</th><th>Medienprüfung</th></tr>
-    {% for x in jobs %}<tr class="{% if late_jobs.get(x.id) %}late{% endif %}"><td>{% if can_approve %}<input type="checkbox" name="job_ids" value="{{x.id}}" checked>{% else %}—{% endif %}</td><td>{{x.kind}}</td><td>{{x.scheduled_at|berlin}}{% if late_jobs.get(x.id) %} <strong>verstrichen</strong>{% endif %}</td><td>{{x.status.value}}</td><td>{{checks[x.id]}}</td></tr>{% endfor %}
-  </table>
+</form>{% endif %}
+<table><tr><th>Freigeben</th><th>Typ</th>{% if aggregate_bundle %}<th>Mannschaft</th>{% endif %}<th>Zeitpunkt</th><th>Status</th><th>Medienprüfung</th></tr>
+  {% for x in jobs %}<tr class="{% if late_jobs.get(x.id) %}late{% endif %}">
+    <td>{% if can_approve %}<input form="approve-publication-jobs" type="checkbox" name="job_ids" value="{{x.id}}" checked>{% else %}—{% endif %}</td>
+    <td>{{x.kind}}</td>
+    {% if aggregate_bundle %}<td>{{job_teams[x.id].display_name}}</td>{% endif %}
+    <td>
+      <strong>{{x.scheduled_at|berlin}}</strong>{% if late_jobs.get(x.id) %} <strong>verstrichen</strong>{% endif %}
+      {% if can_reschedule_jobs.get(x.id) %}
+      <details>
+        <summary>Zeitpunkt ändern</summary>
+        <form method="post" action="/posts/{{item.id}}/publications/{{x.id}}/schedule">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <input type="hidden" name="job_version" value="{{x.version}}">
+          <label>Neuer Zeitpunkt ({{schedule_timezones[x.id]}})
+            <input type="datetime-local" name="scheduled_at" value="{{schedule_values[x.id]}}" required>
+          </label>
+          <button>Zeitpunkt speichern</button>
+          <small>Eine vorhandene Freigabe wird aus Sicherheitsgründen entzogen.</small>
+        </form>
+      </details>
+      {% endif %}
+    </td>
+    <td>{{x.status.value}}</td><td>{{checks[x.id]}}</td>
+  </tr>{% endfor %}
+</table>
 {% if can_approve %}
-  <button class="approve">Ausgewählte Aufträge ausdrücklich freigeben</button>
-</form>
-<form method="post" action="/posts/{{item.id}}/reject">
+  <button form="approve-publication-jobs" class="approve">Ausgewählte Aufträge ausdrücklich freigeben</button>
+{% if not aggregate_bundle %}<form method="post" action="/posts/{{item.id}}/reject">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><label>Ablehnungsgrund (optional)<input name="reason"></label><button class="danger">Ablehnen</button>
-</form>
+</form>{% endif %}
 {% if item.status.value not in ['published','partially_published'] %}
+{% if aggregate_bundle %}
+<div class="notice">Ein gemeinsamer Spieltagsbeitrag kann nicht teilweise gelöscht werden. Die einzelnen Spiele und ihre Medien bleiben aus Sicherheitsgründen getrennt gespeichert.</div>
+{% else %}
 <form method="post" action="/posts/{{item.id}}/delete" onsubmit="return confirm('Diesen unveröffentlichten Beitrag und seine Aufträge wirklich dauerhaft löschen?');">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
   <input type="hidden" name="confirmation" value="BEITRAG LÖSCHEN">
   <button class="danger">Beitrag löschen</button>
   <small>Nur vollständig unveröffentlichte Beiträge können gelöscht werden. Vor dem Löschen folgt eine Sicherheitsabfrage.</small>
 </form>
+{% endif %}
 {% else %}
 <div class="warning">Dieser Beitrag wurde bereits ganz oder teilweise veröffentlicht und kann deshalb nicht gelöscht werden.</div>
 {% endif %}
