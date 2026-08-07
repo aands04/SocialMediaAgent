@@ -7,7 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -32,6 +32,7 @@ from app.branding.service import (
 )
 from app.config import get_settings
 from app.db import get_db
+from app.file_delivery import detached_file_response
 from app.games.bundles import connect_games, dashboard_game_groups, separate_games
 from app.games.identity import team_name_variants
 from app.limits.service import LimitExceeded, assert_resource_capacity
@@ -1504,7 +1505,7 @@ def preview_media(
         path = media_asset_path(asset, settings.media_root, settings.upload_root)
     except StorageError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return FileResponse(path, media_type=asset.mime_type)
+    return detached_file_response(db, path, media_type=asset.mime_type)
 
 
 @router.post("/media/{asset_id}/toggle")
@@ -1567,7 +1568,7 @@ def preview_font(
         or path.suffix.lower() not in {".woff2", ".ttf"}
     ):
         raise HTTPException(404)
-    return FileResponse(path, media_type=font.mime_type)
+    return detached_file_response(db, path, media_type=font.mime_type)
 
 
 @router.post("/fonts")
@@ -3901,7 +3902,7 @@ def post_media_version(
     root = settings.generated_root.resolve()
     if root not in path.parents or path.is_symlink() or not path.is_file():
         raise HTTPException(404, "Medienversion fehlt")
-    return FileResponse(path, media_type=version.mime_type)
+    return detached_file_response(db, path, media_type=version.mime_type)
 
 
 @router.post("/posts/{post_id}/media-slots/{slot_id}/select")
@@ -4815,7 +4816,8 @@ def logo_preview(
         or not path.is_file()
     ):
         raise HTTPException(404)
-    return FileResponse(
+    return detached_file_response(
+        db,
         path,
         media_type=logo.mime_type,
         filename=f"gegnerlogo-{logo.id[:8]}{Path(logo.original_path).suffix.lower()}",
@@ -4841,7 +4843,8 @@ def shared_opponent_logo_preview(
         path = shared_logo_path(logo, settings.upload_root)
     except LogoValidationError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return FileResponse(
+    return detached_file_response(
+        db,
         path,
         media_type=logo.mime_type,
         filename=f"gegnerlogo-{logo.id[:8]}{Path(logo.original_path).suffix.lower()}",
@@ -5702,8 +5705,6 @@ def run_diagnostic(
 def download_snapshot(
     snapshot_id: str, current=Depends(current_user), db: Session = Depends(get_db)
 ):
-    from fastapi.responses import FileResponse
-
     from app.models import ProviderSnapshot
 
     require_admin(current)
@@ -5714,8 +5715,11 @@ def download_snapshot(
     path = (root / snapshot.relative_path).resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(404, "Snapshot-Datei fehlt oder ist unvollständig")
-    return FileResponse(
-        path, media_type="text/html", filename=f"fussball-{snapshot.checksum[:12]}.html"
+    return detached_file_response(
+        db,
+        path,
+        media_type="text/html",
+        filename=f"fussball-{snapshot.checksum[:12]}.html",
     )
 
 
@@ -5763,8 +5767,6 @@ def snapshot_to_fixture(
 def post_media(
     post_id: str, job_id: str, current=Depends(current_user), db: Session = Depends(get_db)
 ):
-    from fastapi.responses import FileResponse
-
     item = db.get(Post, post_id)
     job = db.get(PublicationJob, job_id)
     if not item or not job or job.post_id != item.id:
@@ -5774,7 +5776,7 @@ def post_media(
     root = settings.generated_root.resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(404, "Grafik fehlt")
-    return FileResponse(path, media_type="image/png")
+    return detached_file_response(db, path, media_type="image/png")
 
 
 @router.get("/posts/{post_id}/media/{job_id}/items/{item_id}")
@@ -5801,7 +5803,7 @@ def post_carousel_media(
     root = settings.generated_root.resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(404, "Karussellbild fehlt")
-    return FileResponse(path, media_type="image/png")
+    return detached_file_response(db, path, media_type="image/png")
 
 
 @router.get("/diagnostics/{snapshot_id}/import", response_class=HTMLResponse)
