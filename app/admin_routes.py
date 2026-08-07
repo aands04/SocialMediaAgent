@@ -1,6 +1,7 @@
 import hashlib
 import mimetypes
 import secrets
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -57,10 +58,13 @@ from app.models import (
     AuditLog,
     Club,
     ClubBrandingConfiguration,
+    ContentRuleSet,
     DesignTemplate,
     FontAsset,
     FussballSyncState,
     Game,
+    GeneratedMediaSlot,
+    GeneratedMediaVersion,
     GenerationJob,
     GenerationJobStatus,
     InstagramConnection,
@@ -71,11 +75,13 @@ from app.models import (
     MetaPublishingAttempt,
     Post,
     PostStatus,
+    PostTextVersion,
     PromptStatus,
     PromptTemplate,
     PromptTestRun,
     PublicationJob,
     PublicationMediaItem,
+    PublicationRuleSlot,
     Role,
     SharedOpponentLogo,
     StoryRule,
@@ -98,6 +104,16 @@ from app.posts.manual import (
     parse_manual_user_tag_specs,
     validate_manual_image,
 )
+from app.posts.media_versions import (
+    MediaVersionError,
+    post_media_catalog,
+    select_latest_media_automatically,
+    select_latest_text_automatically,
+    select_media_version,
+    select_publication_media_variant,
+    select_text_version,
+)
+from app.posts.rules import sync_team_rule_sets
 from app.posts.service import logo_recompose_availability
 from app.publishing.schedule import (
     EDITABLE_JOB_STATUSES,
@@ -120,6 +136,16 @@ templates.env.filters["berlin"] = berlin_datetime
 settings = get_settings()
 templates.env.globals["environment"] = settings.environment
 templates.env.globals["meta_test_enabled"] = settings.meta_test_enabled
+
+WEEKDAY_LABELS = (
+    "Montag",
+    "Dienstag",
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag",
+    "Samstag",
+    "Sonntag",
+)
 
 
 def render(request, name, current, **context):
@@ -1878,6 +1904,167 @@ def create_prompt(
     )
 
 
+def _active_team_rule_sets(db: Session, team: Team) -> list[ContentRuleSet]:
+    return list(
+        db.scalars(
+            select(ContentRuleSet)
+            .where(
+                ContentRuleSet.club_id == team.club_id,
+                ContentRuleSet.team_id == team.id,
+                ContentRuleSet.scope_type == "team",
+                ContentRuleSet.active.is_(True),
+                ContentRuleSet.archived_at.is_(None),
+            )
+            .order_by(ContentRuleSet.post_type, ContentRuleSet.rule_version.desc())
+        )
+    )
+
+
+def _serialize_team_publication_slots(db: Session, team: Team) -> list[dict]:
+    configured = (team.rules or {}).get("publication_rule_slots")
+    explicitly_configured = bool(
+        (team.rules or {}).get("publication_rule_slots_configured")
+    )
+    if isinstance(configured, list) and (configured or explicitly_configured):
+        return deepcopy([row for row in configured if isinstance(row, dict)])
+    rule_sets = _active_team_rule_sets(db, team)
+    by_type: dict[str, ContentRuleSet] = {}
+    for rule_set in rule_sets:
+        by_type.setdefault(rule_set.post_type, rule_set)
+    if not by_type:
+        return []
+    result: list[dict] = []
+    for slot in db.scalars(
+        select(PublicationRuleSlot)
+        .where(
+            PublicationRuleSlot.club_id == team.club_id,
+            PublicationRuleSlot.rule_set_id.in_([row.id for row in by_type.values()]),
+            PublicationRuleSlot.active.is_(True),
+        )
+        .order_by(PublicationRuleSlot.sort_order, PublicationRuleSlot.id)
+    ):
+        rule_set = next(row for row in by_type.values() if row.id == slot.rule_set_id)
+        result.append(
+            {
+                "slot_key": slot.slot_key,
+                "post_type": rule_set.post_type,
+                "label": slot.label,
+                "media_kind": slot.media_kind,
+                "variant_number": slot.variant_number,
+                "timing_model": slot.timing_model,
+                "reference": slot.reference,
+                "direction": slot.direction,
+                "offset_minutes": slot.offset_minutes,
+                "match_weekday": slot.match_weekday,
+                "target_weekday": slot.target_weekday,
+                "local_time": slot.local_time,
+                "timezone": slot.timezone,
+                "sort_order": slot.sort_order,
+                "instagram_page_id": slot.instagram_page_id,
+                "template": slot.template,
+                "reuse_media": slot.reuse_media,
+            }
+        )
+    return result
+
+
+def _legacy_story_publication_rows(story: StoryRule, team: Team) -> list[dict]:
+    """Translate the retained StoryRule endpoint into canonical publication slots."""
+    entries = (
+        sorted((story.weekday_times or {}).items())
+        if story.timing_mode == "weekday_fixed"
+        else [(None, None)]
+    )
+    rows: list[dict] = []
+    for match_day, local_time in entries:
+        suffix = match_day if match_day is not None else "default"
+        rows.append(
+            {
+                "slot_key": f"legacy-story:{story.id}:{suffix}",
+                "post_type": story.post_type,
+                "label": story.name,
+                "media_kind": "story",
+                "variant_number": max(1, int(story.media_slot or 1)),
+                "timing_model": story.timing_mode,
+                "reference": story.reference,
+                "direction": story.direction,
+                "offset_minutes": story.offset_minutes,
+                "match_weekday": int(match_day) if match_day is not None else None,
+                "target_weekday": (
+                    int((story.weekday_targets or {}).get(match_day, match_day))
+                    if match_day is not None
+                    else None
+                ),
+                "local_time": local_time,
+                "timezone": team.timezone,
+                "sort_order": story.sort_order,
+                "instagram_page_id": story.instagram_page_id,
+                "template": story.template,
+                "reuse_media": story.reuse_media,
+            }
+        )
+    return rows
+
+
+def _replace_legacy_story_publication_rows(
+    db: Session, team: Team, story: StoryRule
+) -> None:
+    rules = dict(team.rules or {})
+    configured = rules.get("publication_rule_slots")
+    configured_is_authoritative = bool(configured) or bool(
+        rules.get("publication_rule_slots_configured")
+    )
+    rows = (
+        list(configured)
+        if isinstance(configured, list) and configured_is_authoritative
+        else _serialize_team_publication_slots(db, team)
+    )
+    prefix = f"legacy-story:{story.id}:"
+    rows = [
+        row
+        for row in rows
+        if not isinstance(row, dict) or not str(row.get("slot_key") or "").startswith(prefix)
+    ]
+    if story.active:
+        rows.extend(_legacy_story_publication_rows(story, team))
+    rules["publication_rule_slots"] = rows
+    rules["publication_rule_slots_configured"] = True
+    team.rules = rules
+
+
+def _rule_cards(slots: list[dict]) -> list[dict]:
+    cards = []
+    for weekday in range(7):
+        rows = sorted(
+            (row for row in slots if row.get("match_weekday") == weekday),
+            key=lambda row: (int(row.get("sort_order") or 0), str(row.get("slot_key") or "")),
+        )
+        if rows:
+            cards.append({"weekday": weekday, "label": WEEKDAY_LABELS[weekday], "slots": rows})
+    general = sorted(
+        (row for row in slots if row.get("match_weekday") is None),
+        key=lambda row: (int(row.get("sort_order") or 0), str(row.get("slot_key") or "")),
+    )
+    return cards + ([{"weekday": None, "label": "Alle Spieltage", "slots": general}] if general else [])
+
+
+def _rule_slot_summary(row: dict) -> str:
+    model = row.get("timing_model")
+    if model == "weekday_fixed":
+        target = row.get("target_weekday")
+        day = WEEKDAY_LABELS[target] if isinstance(target, int) and 0 <= target <= 6 else "Zieltag"
+        return f"{day}, {row.get('local_time') or '--:--'} Uhr"
+    if model == "result_detected":
+        offset = int(row.get("offset_minutes") or 0)
+        return "Direkt nach bestätigtem Ergebnis" if not offset else f"{offset} Minuten nach Ergebnis"
+    if model == "manual":
+        return "Manuelle Planung"
+    offset = int(row.get("offset_minutes") or 0)
+    direction = "nach" if row.get("direction") == "after" else "vor"
+    reference = "Ergebnis" if row.get("reference") == "result_detected" else "Anpfiff"
+    return f"{offset} Minuten {direction} {reference}"
+
+
 @router.get("/rules", response_class=HTMLResponse)
 def rules(
     request: Request,
@@ -1900,7 +2087,16 @@ def rules(
         if selected
         else []
     )
-    pages = db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
+    pages = (
+        db.scalars(
+            select(InstagramPage).where(
+                InstagramPage.club_id == selected.club_id,
+                InstagramPage.archived_at.is_(None),
+            )
+        ).all()
+        if selected
+        else []
+    )
     story_output_defaults = {"announcement": 1, "reminder": 1, "result": 1}
     for story in stories:
         story_output_defaults[story.post_type] = max(
@@ -1920,6 +2116,9 @@ def rules(
             ),
             key=lambda candidate: (candidate.display_name.casefold(), candidate.id),
         )
+    structured_slots = _serialize_team_publication_slots(db, selected) if selected else []
+    for row in structured_slots:
+        row["summary"] = _rule_slot_summary(row)
     return render(
         request,
         "rules.html",
@@ -1930,8 +2129,106 @@ def rules(
         pages=pages,
         story_output_defaults=story_output_defaults,
         carousel_teams=carousel_teams,
+        publication_rule_cards=_rule_cards(structured_slots),
+        publication_rule_slots=structured_slots,
+        weekday_labels=WEEKDAY_LABELS,
         title="Veröffentlichungsregeln",
     )
+
+
+@router.post("/rules/{team_id}/copy-from")
+def copy_team_rules(
+    team_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    source_team_id: str = Form(),
+    target_version: int = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    target = db.scalar(select(Team).where(Team.id == team_id).with_for_update())
+    source = db.get(Team, source_team_id)
+    if not target or not source or target.archived_at is not None or source.archived_at is not None:
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    if target.club_id != source.club_id:
+        raise HTTPException(422, "Regeln duerfen nur innerhalb desselben Vereins kopiert werden")
+    if current.club_id and target.club_id != current.club_id:
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    if target.id == source.id:
+        raise HTTPException(422, "Quell- und Zielmannschaft muessen verschieden sein")
+    if target.version != target_version:
+        raise HTTPException(409, "Die Zielmannschaft wurde zwischenzeitlich geaendert")
+
+    target.rules = deepcopy(source.rules or {})
+    target.version += 1
+    source_rows = list(
+        db.scalars(
+            select(StoryRule).where(
+                StoryRule.club_id == source.club_id,
+                StoryRule.team_id == source.id,
+                StoryRule.active.is_(True),
+            )
+        )
+    )
+    target_rows = {
+        row.name: row
+        for row in db.scalars(
+            select(StoryRule).where(
+                StoryRule.club_id == target.club_id,
+                StoryRule.team_id == target.id,
+            )
+        )
+    }
+    for row in target_rows.values():
+        row.active = False
+    copied_fields = (
+        "post_type",
+        "reference",
+        "direction",
+        "offset_minutes",
+        "fixed_time",
+        "timing_mode",
+        "weekday_times",
+        "weekday_targets",
+        "media_slot",
+        "next_day",
+        "template",
+        "prompt_template",
+        "text_variant",
+        "priority",
+        "sort_order",
+        "reuse_media",
+    )
+    for source_row in source_rows:
+        target_row = target_rows.get(source_row.name)
+        if target_row is None:
+            target_row = StoryRule(
+                club_id=target.club_id,
+                team_id=target.id,
+                name=source_row.name,
+            )
+            db.add(target_row)
+        for field in copied_fields:
+            value = getattr(source_row, field)
+            setattr(target_row, field, deepcopy(value))
+        # Keep the target team's Instagram page instead of leaking a page
+        # assignment from another team configuration.
+        target_row.instagram_page_id = None
+        target_row.active = True
+    sync_team_rule_sets(db, target)
+    audit(
+        db,
+        current,
+        "rules.copied",
+        "team",
+        target.id,
+        target.id,
+        {"source_team_id": source.id, "story_rules": len(source_rows)},
+    )
+    db.commit()
+    return redirect(f"/rules?team_id={target.id}", "Regeln wurden kopiert")
 
 
 @router.post("/rules/{team_id}/defaults")
@@ -2012,6 +2309,18 @@ def save_rules(
     reminder_story_output_count: int = Form(default=1),
     result_feed_output_count: int = Form(default=1),
     result_story_output_count: int = Form(default=1),
+    announcement_feed_generation_count: int | None = Form(default=None),
+    announcement_feed_publish_count: int | None = Form(default=None),
+    announcement_story_generation_count: int | None = Form(default=None),
+    announcement_story_publish_count: int | None = Form(default=None),
+    reminder_feed_generation_count: int | None = Form(default=None),
+    reminder_feed_publish_count: int | None = Form(default=None),
+    reminder_story_generation_count: int | None = Form(default=None),
+    reminder_story_publish_count: int | None = Form(default=None),
+    result_feed_generation_count: int | None = Form(default=None),
+    result_feed_publish_count: int | None = Form(default=None),
+    result_story_generation_count: int | None = Form(default=None),
+    result_story_publish_count: int | None = Form(default=None),
     image_prompt_feed: str = Form(default="default-image-feed"),
     image_prompt_story: str = Form(default="default-image-story"),
     text_prompt: str = Form(default="default-text-announcement"),
@@ -2027,6 +2336,7 @@ def save_rules(
     team = db.get(Team, team_id)
     if not team:
         raise HTTPException(404)
+    existing_publication_slots = _serialize_team_publication_slots(db, team)
     if late_approval not in {"publish_now", "manual", "skip", "next_story"}:
         raise HTTPException(422)
     if announcement_timing_mode not in {"relative", "weekday_fixed"}:
@@ -2093,6 +2403,66 @@ def save_rules(
     }
     if any(not 0 <= value <= 10 for value in output_counts.values()):
         raise HTTPException(422, "Ausgabeanzahlen müssen zwischen 0 und 10 liegen")
+    structured_counts: dict[str, int] = {}
+    count_rows = (
+        (
+            "announcement",
+            announcement_feed_output_count,
+            announcement_story_output_count,
+            announcement_feed_generation_count,
+            announcement_feed_publish_count,
+            announcement_story_generation_count,
+            announcement_story_publish_count,
+        ),
+        (
+            "reminder",
+            reminder_feed_output_count,
+            reminder_story_output_count,
+            reminder_feed_generation_count,
+            reminder_feed_publish_count,
+            reminder_story_generation_count,
+            reminder_story_publish_count,
+        ),
+        (
+            "result",
+            result_feed_output_count,
+            result_story_output_count,
+            result_feed_generation_count,
+            result_feed_publish_count,
+            result_story_generation_count,
+            result_story_publish_count,
+        ),
+    )
+    for (
+        post_type_key,
+        legacy_feed,
+        legacy_story,
+        feed_generated,
+        feed_published,
+        story_generated,
+        story_published,
+    ) in count_rows:
+        feed_generated = legacy_feed if feed_generated is None else feed_generated
+        feed_published = legacy_feed if feed_published is None else feed_published
+        story_generated = legacy_story if story_generated is None else story_generated
+        story_published = legacy_story if story_published is None else story_published
+        values = (feed_generated, feed_published, story_generated, story_published)
+        if any(not 0 <= value <= 10 for value in values):
+            raise HTTPException(422, "Erstellungs- und Auswahlzahlen muessen zwischen 0 und 10 liegen")
+        if feed_published > feed_generated or story_published > story_generated:
+            raise HTTPException(
+                422,
+                "Die Standardauswahl darf die erzeugte Anzahl nicht ueberschreiten",
+            )
+        structured_counts.update(
+            {
+                f"{post_type_key}_feed_generation_count": feed_generated,
+                f"{post_type_key}_feed_publish_count": feed_published,
+                f"{post_type_key}_story_generation_count": story_generated,
+                f"{post_type_key}_story_publish_count": story_published,
+            }
+        )
+
     for enabled, post_type, feed_count, story_count in (
         (
             announcement_enabled,
@@ -2123,8 +2493,8 @@ def save_rules(
         "announcements_and_results",
     }
     grouped_results = club_matchday_feed_mode == "announcements_and_results"
-    if (grouped_announcements and announcement_feed_output_count != 1) or (
-        grouped_results and result_feed_output_count != 1
+    if (grouped_announcements and structured_counts["announcement_feed_publish_count"] != 1) or (
+        grouped_results and structured_counts["result_feed_publish_count"] != 1
     ):
         raise HTTPException(
             422,
@@ -2148,9 +2518,9 @@ def save_rules(
         for post_type in ("announcement", "reminder", "result")
     }
     for post_type, configured in {
-        "announcement": announcement_story_output_count,
-        "reminder": reminder_story_output_count,
-        "result": result_story_output_count,
+        "announcement": structured_counts["announcement_story_generation_count"],
+        "reminder": structured_counts["reminder_story_generation_count"],
+        "result": structured_counts["result_story_generation_count"],
     }.items():
         if active_story_slots[post_type] > configured:
             raise HTTPException(
@@ -2270,19 +2640,6 @@ def save_rules(
             raise HTTPException(422, "Ungueltige feste Uhrzeit") from exc
         if parsed.strftime("%H:%M") != value:
             raise HTTPException(422, "Ungueltige feste Uhrzeit")
-    if announcement_timing_mode == "weekday_fixed" and len(announcement_weekday_times) != 7:
-        raise HTTPException(
-            422, "Fuer feste Ankuendigungszeiten sind alle sieben Wochentage erforderlich"
-        )
-    if reminder_timing_mode == "weekday_fixed" and len(reminder_weekday_times) != 7:
-        raise HTTPException(
-            422,
-            "Für feste Erinnerungszeiten sind alle sieben Wochentage erforderlich",
-        )
-    if result_timing_mode == "weekday_fixed" and len(result_weekday_times) != 7:
-        raise HTTPException(
-            422, "Fuer feste Ergebniszeiten sind alle sieben Wochentage erforderlich"
-        )
     team.rules = {
         **team.rules,
         "announcement_enabled": announcement_enabled,
@@ -2317,6 +2674,7 @@ def save_rules(
         "club_matchday_primary_team_id": club_matchday_primary_team_id or None,
         "reminder_feed_before_minutes": reminder_feed_before_minutes,
         **output_counts,
+        **structured_counts,
         # Prompt selection is platform-owned. Keep any existing protected
         # assignment, otherwise use the server-side platform defaults. Values
         # submitted by a club form are deliberately ignored.
@@ -2331,6 +2689,7 @@ def save_rules(
         ),
         "text_prompt_result": (team.rules or {}).get("text_prompt_result", "default-text-result"),
         "style_direction": style_direction.strip(),
+        "publication_rule_slots": existing_publication_slots,
     }
     team.version += 1
     # This is deliberately a club/page setting even though rules are stored on
@@ -2347,6 +2706,7 @@ def save_rules(
         }
         sibling.version += 1
         grouped_team_ids.append(sibling.id)
+    sync_team_rule_sets(db, team)
     sync_state = db.get(FussballSyncState, team.id)
     if automatic_sync_enabled:
         if sync_state is None:
@@ -2375,6 +2735,279 @@ def save_rules(
     )
     db.commit()
     return redirect(f"/rules?team_id={team.id}")
+
+
+def _team_for_rule_write(db: Session, current: User, team_id: str, expected_version: int) -> Team:
+    team = db.scalar(select(Team).where(Team.id == team_id).with_for_update())
+    if not team or team.archived_at is not None or not require_visible(db, current, team.id):
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    if current.club_id and team.club_id != current.club_id:
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    if team.version != expected_version:
+        raise HTTPException(409, "Die Regeln wurden zwischenzeitlich geändert")
+    return team
+
+
+def _parse_optional_weekday(value: str, *, field: str) -> int | None:
+    if value == "":
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise HTTPException(422, f"Ungültiger {field}") from exc
+    if not 0 <= parsed <= 6:
+        raise HTTPException(422, f"Ungültiger {field}")
+    return parsed
+
+
+@router.post("/rules/{team_id}/publication-slots")
+def save_publication_rule_slot(
+    team_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    expected_team_version: int = Form(),
+    slot_key: str = Form(default=""),
+    label: str = Form(default=""),
+    post_type: str = Form(),
+    media_kind: str = Form(),
+    variant_number: int = Form(default=1),
+    timing_model: str = Form(),
+    match_weekday: str = Form(default=""),
+    target_weekday: str = Form(default=""),
+    local_time: str = Form(default=""),
+    reference: str = Form(default="kickoff"),
+    direction: str = Form(default="before"),
+    offset_minutes: int = Form(default=0),
+    instagram_page_id: str = Form(default=""),
+    template: str = Form(default=""),
+    reuse_media: bool = Form(default=False),
+    sort_order: int = Form(default=0),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    team = _team_for_rule_write(db, current, team_id, expected_team_version)
+    if post_type not in {"announcement", "reminder", "result"}:
+        raise HTTPException(422, "Ungültiger Beitragstyp")
+    if media_kind not in {"feed", "story"}:
+        raise HTTPException(422, "Ungültiger Medientyp")
+    if timing_model not in {"relative", "weekday_fixed", "result_detected", "manual"}:
+        raise HTTPException(422, "Ungültiges Zeitmodell")
+    if direction not in {"before", "after"}:
+        raise HTTPException(422, "Ungültige Zeitrichtung")
+    if reference not in {"kickoff", "planned_end", "result_detected", "approval"}:
+        raise HTTPException(422, "Ungültiger Bezugspunkt")
+    if not 0 <= offset_minutes <= 43200:
+        raise HTTPException(422, "Der Zeitabstand muss zwischen 0 und 43200 Minuten liegen")
+    match_day = _parse_optional_weekday(match_weekday, field="Spielwochentag")
+    target_day = _parse_optional_weekday(target_weekday, field="Zielwochentag")
+    if timing_model == "weekday_fixed":
+        if match_day is None or target_day is None or not local_time:
+            raise HTTPException(422, "Kalenderbasierte Regeln benötigen Spieltag, Zieltag und Uhrzeit")
+        try:
+            parsed_time = datetime.strptime(local_time, "%H:%M")
+        except ValueError as exc:
+            raise HTTPException(422, "Ungültige Uhrzeit") from exc
+        if parsed_time.strftime("%H:%M") != local_time:
+            raise HTTPException(422, "Ungültige Uhrzeit")
+    else:
+        target_day = None
+        local_time = ""
+    generated = int(
+        (team.rules or {}).get(
+            f"{post_type}_{media_kind}_generation_count",
+            (team.rules or {}).get(f"{post_type}_{media_kind}_output_count", 1),
+        )
+    )
+    if not 1 <= variant_number <= max(0, generated):
+        raise HTTPException(
+            422,
+            f"{media_kind.title()}-Variante muss zwischen 1 und {max(0, generated)} liegen",
+        )
+    if instagram_page_id:
+        page = db.scalar(
+            select(InstagramPage).where(
+                InstagramPage.id == instagram_page_id,
+                InstagramPage.club_id == team.club_id,
+                InstagramPage.archived_at.is_(None),
+            )
+        )
+        if not page:
+            raise HTTPException(422, "Instagram-Seite gehört nicht zu diesem Verein")
+    rows = _serialize_team_publication_slots(db, team)
+    existing_index = next(
+        (index for index, row in enumerate(rows) if row.get("slot_key") == slot_key), None
+    )
+    if slot_key and existing_index is None:
+        raise HTTPException(404, "Veröffentlichungsregel nicht gefunden")
+    duplicate_media_slots = [
+        row
+        for row in rows
+        if row.get("slot_key") != slot_key
+        and row.get("post_type") == post_type
+        and row.get("media_kind") == media_kind
+        and int(row.get("variant_number") or 1) == variant_number
+        and row.get("match_weekday") == match_day
+    ]
+    if duplicate_media_slots and (
+        not reuse_media or any(not row.get("reuse_media") for row in duplicate_media_slots)
+    ):
+        raise HTTPException(
+            422,
+            "Diese Variante ist für diesen Spielwochentag bereits eingeplant. "
+            "Aktivieren Sie bei allen betroffenen Regeln ausdrücklich die Wiederverwendung "
+            "derselben Datei.",
+        )
+    stable_key = slot_key or f"slot-{secrets.token_hex(12)}"
+    payload = {
+        "slot_key": stable_key,
+        "post_type": post_type,
+        "label": (label.strip() or f"{media_kind.title()}-Veröffentlichung")[:160],
+        "media_kind": media_kind,
+        "variant_number": variant_number,
+        "timing_model": timing_model,
+        "reference": "result_detected" if timing_model == "result_detected" else reference,
+        "direction": direction,
+        "offset_minutes": offset_minutes,
+        "match_weekday": match_day,
+        "target_weekday": target_day,
+        "local_time": local_time or None,
+        "timezone": team.timezone,
+        "sort_order": sort_order,
+        "instagram_page_id": instagram_page_id or None,
+        "template": template.strip()[:100] or None,
+        "reuse_media": reuse_media,
+    }
+    action = "publication_rule_slot.updated" if existing_index is not None else "publication_rule_slot.created"
+    if existing_index is None:
+        rows.append(payload)
+    else:
+        rows[existing_index] = payload
+    team.rules = {
+        **(team.rules or {}),
+        "publication_rule_slots": rows,
+        "publication_rule_slots_configured": True,
+    }
+    team.version += 1
+    sync_team_rule_sets(db, team)
+    audit(
+        db,
+        current,
+        action,
+        "publication_rule_slot",
+        stable_key,
+        team.id,
+        {
+            "post_type": post_type,
+            "media_kind": media_kind,
+            "match_weekday": match_day,
+            "timing_model": timing_model,
+        },
+    )
+    db.commit()
+    return redirect(f"/rules?team_id={team.id}#publication-rules", "Veröffentlichungsregel gespeichert")
+
+
+@router.post("/rules/{team_id}/publication-slots/{slot_key}/delete")
+def delete_publication_rule_slot(
+    team_id: str,
+    slot_key: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    expected_team_version: int = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    team = _team_for_rule_write(db, current, team_id, expected_team_version)
+    rows = _serialize_team_publication_slots(db, team)
+    kept = [row for row in rows if row.get("slot_key") != slot_key]
+    if len(kept) == len(rows):
+        raise HTTPException(404, "Veröffentlichungsregel nicht gefunden")
+    team.rules = {
+        **(team.rules or {}),
+        "publication_rule_slots": kept,
+        "publication_rule_slots_configured": True,
+    }
+    team.version += 1
+    sync_team_rule_sets(db, team)
+    audit(
+        db,
+        current,
+        "publication_rule_slot.deleted",
+        "publication_rule_slot",
+        slot_key,
+        team.id,
+        {"deletion_mode": "new_rule_version"},
+    )
+    db.commit()
+    return redirect(f"/rules?team_id={team.id}#publication-rules", "Veröffentlichungsregel gelöscht")
+
+
+@router.post("/rules/{team_id}/publication-weekdays/copy")
+def copy_publication_weekday(
+    team_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    expected_team_version: int = Form(),
+    source_weekday: int = Form(),
+    target_weekday: int = Form(),
+    replace_existing: bool = Form(default=False),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    team = _team_for_rule_write(db, current, team_id, expected_team_version)
+    if source_weekday == target_weekday or not all(
+        0 <= value <= 6 for value in (source_weekday, target_weekday)
+    ):
+        raise HTTPException(422, "Quell- und Zielwochentag müssen verschieden und gültig sein")
+    rows = _serialize_team_publication_slots(db, team)
+    source = [row for row in rows if row.get("match_weekday") == source_weekday]
+    if not source:
+        raise HTTPException(422, "Für den Quellwochentag existiert keine Regel")
+    target = [row for row in rows if row.get("match_weekday") == target_weekday]
+    if target and not replace_existing:
+        raise HTTPException(409, "Für den Zielwochentag existieren bereits Regeln")
+    if replace_existing:
+        rows = [row for row in rows if row.get("match_weekday") != target_weekday]
+    shift = target_weekday - source_weekday
+    copied = []
+    for original in source:
+        row = deepcopy(original)
+        row["slot_key"] = f"slot-{secrets.token_hex(12)}"
+        row["match_weekday"] = target_weekday
+        if isinstance(row.get("target_weekday"), int):
+            row["target_weekday"] = (row["target_weekday"] + shift) % 7
+        row["label"] = f"{row.get('label') or 'Veröffentlichung'} – {WEEKDAY_LABELS[target_weekday]}"
+        copied.append(row)
+    rows.extend(copied)
+    team.rules = {
+        **(team.rules or {}),
+        "publication_rule_slots": rows,
+        "publication_rule_slots_configured": True,
+    }
+    team.version += 1
+    sync_team_rule_sets(db, team)
+    audit(
+        db,
+        current,
+        "publication_weekday_rules.copied",
+        "team",
+        team.id,
+        team.id,
+        {
+            "source_weekday": source_weekday,
+            "target_weekday": target_weekday,
+            "replaced": replace_existing,
+            "slot_count": len(copied),
+        },
+    )
+    db.commit()
+    return redirect(f"/rules?team_id={team.id}#publication-rules", "Wochentagsregel kopiert")
 
 
 @router.post("/rules/{team_id}/stories")
@@ -2435,8 +3068,11 @@ def create_story_rule(
         raise HTTPException(422, "Ungültiger Beitragstyp")
     configured_story_count = int(
         (team.rules or {}).get(
-            f"{post_type}_story_output_count",
-            max(1, media_slot),
+            f"{post_type}_story_generation_count",
+            (team.rules or {}).get(
+                f"{post_type}_story_output_count",
+                max(1, media_slot),
+            ),
         )
     )
     if not 1 <= media_slot <= configured_story_count:
@@ -2464,8 +3100,6 @@ def create_story_rule(
             datetime.strptime(value, "%H:%M")
         except ValueError as exc:
             raise HTTPException(422, "Ungueltige Story-Uhrzeit") from exc
-    if timing_mode == "weekday_fixed" and len(weekday_times) != 7:
-        raise HTTPException(422, "Fuer feste Story-Zeiten sind alle sieben Wochentage erforderlich")
     weekday_targets = {
         str(index): value
         for index, value in enumerate(
@@ -2513,6 +3147,8 @@ def create_story_rule(
     item.reuse_media = reuse_media
     item.sort_order = sort_order
     db.flush()
+    _replace_legacy_story_publication_rows(db, team, item)
+    sync_team_rule_sets(db, team)
     audit(
         db,
         current,
@@ -2548,6 +3184,10 @@ def delete_story_rule(
         raise HTTPException(404, "Story-Zeitpunkt nicht gefunden")
 
     item.active = False
+    team = db.get(Team, team_id)
+    if team is not None:
+        _replace_legacy_story_publication_rows(db, team, item)
+        sync_team_rule_sets(db, team)
     audit(
         db,
         current,
@@ -2845,7 +3485,21 @@ def post_detail(
         bundle_posts = [item]
         jobs = own_jobs
         job_posts = {job.id: item for job in jobs}
-    pages = db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
+    pages = db.scalars(
+        select(InstagramPage).where(
+            InstagramPage.club_id == item.club_id,
+            InstagramPage.archived_at.is_(None),
+        )
+    ).all()
+    detail_team = db.scalar(
+        select(Team).where(Team.id == item.team_id, Team.club_id == item.club_id)
+    )
+    detail_game = (
+        db.scalar(select(Game).where(Game.id == item.game_id, Game.club_id == item.club_id))
+        if item.game_id
+        else None
+    )
+    detail_page = next((page for page in pages if page.id == item.instagram_page_id), None)
     current_media_asset = db.get(MediaAsset, item.media_asset_id) if item.media_asset_id else None
     alternative_media_assets = db.scalars(
         select(MediaAsset)
@@ -2858,6 +3512,26 @@ def post_detail(
         )
         .order_by(MediaAsset.filename)
     ).all()
+    current_media_assets_by_post: dict[str, MediaAsset | None] = {}
+    alternative_media_assets_by_post: dict[str, list[MediaAsset]] = {}
+    for member in bundle_posts:
+        current_media_assets_by_post[member.id] = (
+            db.get(MediaAsset, member.media_asset_id) if member.media_asset_id else None
+        )
+        alternative_media_assets_by_post[member.id] = list(
+            db.scalars(
+                select(MediaAsset)
+                .where(
+                    MediaAsset.club_id == member.club_id,
+                    MediaAsset.team_id == member.team_id,
+                    MediaAsset.active.is_(True),
+                    MediaAsset.available.is_(True),
+                    MediaAsset.reserved_game_id.is_(None),
+                    MediaAsset.uses == 0,
+                )
+                .order_by(MediaAsset.filename)
+            )
+        )
     from app.rendering.service import Renderer
 
     checks = {}
@@ -2965,6 +3639,158 @@ def post_detail(
         and not carousel_job.locked_at
         and carousel_job.id not in platform_attempt_job_ids
     )
+    media_catalog = []
+    text_versions = {}
+    for member in bundle_posts:
+        member_team = db.get(Team, member.team_id)
+        for entry in post_media_catalog(db, member):
+            media_catalog.append(
+                {
+                    **entry,
+                    "post": member,
+                    "team": member_team,
+                }
+            )
+        text_versions[member.id] = list(
+            db.scalars(
+                select(PostTextVersion)
+                .where(
+                    PostTextVersion.club_id == member.club_id,
+                    PostTextVersion.post_id == member.id,
+                )
+                .order_by(PostTextVersion.version_number.desc())
+            )
+        )
+    if aggregate_bundle:
+        # Legacy carousel synchronization can expose the same feed path once
+        # through the aggregate carousel and once through its original member
+        # post.  Keep the source post's slot so a targeted regeneration uses
+        # the correct game, team and player image.
+        deduplicated: dict[tuple[str, str], dict] = {}
+        for entry in media_catalog:
+            slot = entry["slot"]
+            if slot.media_kind != "feed":
+                deduplicated[(slot.id, slot.id)] = entry
+                continue
+            selected = (
+                db.get(GeneratedMediaVersion, slot.selected_version_id)
+                if slot.selected_version_id
+                else None
+            )
+            path = selected.media_path if selected else f"slot:{slot.id}"
+            key = ("feed", path)
+            previous = deduplicated.get(key)
+            source_matches = entry["post"].feed_path == path
+            previous_matches = bool(previous and previous["post"].feed_path == path)
+            if previous is None or (source_matches and not previous_matches):
+                deduplicated[key] = entry
+        media_catalog = list(deduplicated.values())
+    catalog_by_slot_id = {entry["slot"].id: entry for entry in media_catalog}
+    catalog_groups: dict[tuple[str, str, int], list[dict]] = {}
+    for entry in media_catalog:
+        slot = entry["slot"]
+        catalog_groups.setdefault(
+            (slot.post_id, slot.media_kind, slot.output_position), []
+        ).append(entry)
+    for entries in catalog_groups.values():
+        entries.sort(key=lambda entry: entry["slot"].variant_number)
+    publication_variant_choices: dict[str, list[dict]] = {}
+    for job in jobs:
+        rows = []
+        if job.kind == "carousel":
+            for media in carousel_items.get(job.id, []):
+                current_version = db.get(GeneratedMediaVersion, media.media_version_id)
+                current_entry = (
+                    catalog_by_slot_id.get(current_version.slot_id) if current_version else None
+                )
+                if current_entry:
+                    current_slot = current_entry["slot"]
+                    choices = catalog_groups.get(
+                        (current_slot.post_id, "feed", current_slot.output_position), []
+                    )
+                else:
+                    member = (
+                        bundle_posts[media.position - 1]
+                        if media.position <= len(bundle_posts)
+                        else None
+                    )
+                    choices = (
+                        catalog_groups.get((member.id, "feed", 1), []) if member else []
+                    )
+                    current_slot = None
+                rows.append(
+                    {
+                        "media_item": media,
+                        "label": f"Karussellposition {media.position}",
+                        "current_slot_id": current_slot.id if current_slot else None,
+                        "choices": choices,
+                    }
+                )
+        else:
+            current_version = db.get(GeneratedMediaVersion, job.media_version_id)
+            current_entry = (
+                catalog_by_slot_id.get(current_version.slot_id) if current_version else None
+            )
+            if current_entry:
+                current_slot = current_entry["slot"]
+                choices = catalog_groups.get(
+                    (current_slot.post_id, current_slot.media_kind, current_slot.output_position),
+                    [],
+                )
+                rows.append(
+                    {
+                        "media_item": None,
+                        "label": "Story-Ausgabe" if job.kind == "story" else "Feed-Ausgabe",
+                        "current_slot_id": current_slot.id,
+                        "choices": choices,
+                    }
+                )
+        publication_variant_choices[job.id] = rows
+    status_labels = {
+        "draft": "Entwurf",
+        "detected": "Erkannt",
+        "pending_approval": "Nicht freigegeben",
+        "manual_review_required": "Manuelle Prüfung erforderlich",
+        "approved": "Freigegeben",
+        "scheduled": "Geplant",
+        "partially_published": "Teilweise veröffentlicht",
+        "published": "Veröffentlicht",
+        "reapproval_required": "Erneute Freigabe erforderlich",
+        "rejected": "Abgelehnt",
+        "unapproved": "Nicht freigegeben",
+        "waiting": "Wartet",
+        "publishing": "Wird veröffentlicht",
+        "failed": "Fehlgeschlagen",
+        "cancelled": "Abgebrochen",
+        "manual_schedule_required": "Manuelle Planung erforderlich",
+    }
+    job_version_labels = {}
+    for job in jobs:
+        media_version = db.get(GeneratedMediaVersion, job.media_version_id)
+        text_version = db.get(PostTextVersion, job.text_version_id)
+        job_version_labels[job.id] = {
+            "media": media_version.version_number if media_version else None,
+            "text": text_version.version_number if text_version else None,
+        }
+    unpublished_jobs = [job for job in jobs if job.status != JobStatus.PUBLISHED]
+    next_publication = min(
+        (job.scheduled_at for job in unpublished_jobs if job.scheduled_at),
+        default=None,
+    )
+    published_count = sum(job.status == JobStatus.PUBLISHED for job in jobs)
+    open_count = len(jobs) - published_count
+    if jobs and published_count == len(jobs):
+        publication_summary = "Vollständig veröffentlicht"
+    elif published_count:
+        publication_summary = "Teilweise veröffentlicht"
+    elif any(job.approval_status == "manual_schedule_required" for job in jobs):
+        publication_summary = "Manuelle Planung erforderlich"
+    elif any(job.status == JobStatus.SCHEDULED for job in jobs):
+        publication_summary = "Veröffentlichung geplant"
+    elif any(job.status == JobStatus.UNAPPROVED for job in jobs):
+        publication_summary = "Freigabe ausstehend"
+    else:
+        publication_summary = status_labels.get(item.status.value, item.status.value)
     return render(
         request,
         "post_detail.html",
@@ -2977,6 +3803,9 @@ def post_detail(
         late_jobs=late_jobs,
         logo_recompose=logo_recompose_availability(item, own_jobs),
         bundle_posts=bundle_posts,
+        bundle_member_teams={
+            member.id: db.get(Team, member.team_id) for member in bundle_posts
+        },
         aggregate_bundle=aggregate_bundle,
         bundle_error=bundle_error,
         job_posts=job_posts,
@@ -2995,6 +3824,8 @@ def post_detail(
         },
         current_media_asset=current_media_asset,
         alternative_media_assets=alternative_media_assets,
+        current_media_assets_by_post=current_media_assets_by_post,
+        alternative_media_assets_by_post=alternative_media_assets_by_post,
         can_edit=can_edit_all,
         can_generate=not bundle_error
         and all(
@@ -3002,6 +3833,18 @@ def post_detail(
         ),
         can_approve=not bundle_error and can_delete_all,
         can_delete=can_delete_all,
+        media_catalog=media_catalog,
+        text_versions=text_versions,
+        status_labels=status_labels,
+        job_version_labels=job_version_labels,
+        publication_variant_choices=publication_variant_choices,
+        detail_team=detail_team,
+        detail_game=detail_game,
+        detail_page=detail_page,
+        next_publication=next_publication,
+        publication_summary=publication_summary,
+        open_publication_count=open_count,
+        published_publication_count=published_count,
         now=now,
         title="Beitrag prüfen",
     )
@@ -3031,6 +3874,252 @@ def post_text(
     return redirect(f"/posts/{item.id}")
 
 
+@router.get("/posts/{post_id}/versions/{version_id}")
+def post_media_version(
+    post_id: str,
+    version_id: str,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    post = db.get(Post, post_id)
+    if not post:
+        raise HTTPException(404)
+    require(current, db, "view", post.team_id)
+    version = db.scalar(
+        select(GeneratedMediaVersion)
+        .join(GeneratedMediaSlot, GeneratedMediaSlot.id == GeneratedMediaVersion.slot_id)
+        .where(
+            GeneratedMediaVersion.id == version_id,
+            GeneratedMediaVersion.club_id == post.club_id,
+            GeneratedMediaSlot.club_id == post.club_id,
+            GeneratedMediaSlot.post_id == post.id,
+        )
+    )
+    if not version:
+        raise HTTPException(404)
+    path = Path(version.media_path).resolve()
+    root = settings.generated_root.resolve()
+    if root not in path.parents or path.is_symlink() or not path.is_file():
+        raise HTTPException(404, "Medienversion fehlt")
+    return FileResponse(path, media_type=version.mime_type)
+
+
+@router.post("/posts/{post_id}/media-slots/{slot_id}/select")
+def choose_post_media_version(
+    post_id: str,
+    slot_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    version_id: str = Form(),
+    post_version: int = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    post = db.scalar(select(Post).where(Post.id == post_id).with_for_update())
+    if not post:
+        raise HTTPException(404)
+    require(current, db, "edit_post", post.team_id)
+    if post.version != post_version:
+        raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    try:
+        selected = select_media_version(db, post, slot_id, version_id)
+    except MediaVersionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    audit(
+        db,
+        current,
+        "post.media_version_selected",
+        "generated_media_version",
+        selected.id,
+        post.team_id,
+        {"post_id": post.id, "slot_id": slot_id, "version": selected.version_number},
+    )
+    db.commit()
+    return redirect(f"/posts/{post.id}", "Medienversion ausgewählt; erneute Freigabe erforderlich")
+
+
+@router.post("/posts/{post_id}/media-slots/{slot_id}/auto-latest")
+def choose_post_media_auto_latest(
+    post_id: str,
+    slot_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    post_version: int = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    post = db.scalar(select(Post).where(Post.id == post_id).with_for_update())
+    if not post:
+        raise HTTPException(404)
+    require(current, db, "edit_post", post.team_id)
+    if post.version != post_version:
+        raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    try:
+        selected = select_latest_media_automatically(db, post, slot_id)
+    except MediaVersionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    audit(
+        db,
+        current,
+        "post.media_selection_auto_latest",
+        "generated_media_slot",
+        slot_id,
+        post.team_id,
+        {"post_id": post.id, "selected_version": selected.version_number},
+    )
+    db.commit()
+    return redirect(
+        f"/posts/{post.id}",
+        "Automatische Auswahl der neuesten Medienversion aktiviert",
+    )
+
+
+@router.post("/posts/{post_id}/publications/{job_id}/variant")
+def choose_publication_media_variant(
+    post_id: str,
+    job_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    slot_id: str = Form(),
+    publication_media_item_id: str = Form(default=""),
+    post_version: int = Form(),
+    job_version: int = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    post = db.scalar(select(Post).where(Post.id == post_id).with_for_update())
+    if not post:
+        raise HTTPException(404)
+    job = db.scalar(
+        select(PublicationJob).where(
+            PublicationJob.id == job_id,
+            PublicationJob.club_id == post.club_id,
+        ).with_for_update()
+    )
+    if not job or job.post_id != post.id:
+        raise HTTPException(404)
+    require(current, db, "edit_post", post.team_id)
+    if post.version != post_version or job.version != job_version:
+        raise HTTPException(409, "Beitrag oder Veröffentlichung wurde zwischenzeitlich geändert")
+    bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
+    allowed_post_ids = set(bundle.get("member_post_ids") or [post.id])
+    slot = db.scalar(
+        select(GeneratedMediaSlot).where(
+            GeneratedMediaSlot.id == slot_id,
+            GeneratedMediaSlot.club_id == post.club_id,
+            GeneratedMediaSlot.post_id.in_(allowed_post_ids),
+        )
+    )
+    if not slot:
+        raise HTTPException(422, "Ungültige Medienvariante")
+    require(current, db, "edit_post", slot.team_id)
+    try:
+        selected = select_publication_media_variant(
+            db,
+            post,
+            publication_job_id=job.id,
+            slot_id=slot.id,
+            publication_media_item_id=publication_media_item_id or None,
+            allowed_post_ids=allowed_post_ids,
+        )
+    except MediaVersionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    job.version += 1
+    audit(
+        db,
+        current,
+        "publication.media_variant_selected",
+        "publication_job",
+        job.id,
+        post.team_id,
+        {
+            "post_id": post.id,
+            "slot_id": slot.id,
+            "variant_number": slot.variant_number,
+            "media_version_id": selected.id,
+            "publication_media_item_id": publication_media_item_id or None,
+        },
+    )
+    db.commit()
+    return redirect(
+        f"/posts/{post.id}",
+        "Vorhandene Medienvariante ausgewählt; erneute Freigabe erforderlich",
+    )
+
+
+@router.post("/posts/{post_id}/text-versions/{version_id}/select")
+def choose_post_text_version(
+    post_id: str,
+    version_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    post_version: int = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    post = db.scalar(select(Post).where(Post.id == post_id).with_for_update())
+    if not post:
+        raise HTTPException(404)
+    require(current, db, "edit_post", post.team_id)
+    if post.version != post_version:
+        raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    try:
+        selected = select_text_version(db, post, version_id)
+    except MediaVersionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    audit(
+        db,
+        current,
+        "post.text_version_selected",
+        "post_text_version",
+        selected.id,
+        post.team_id,
+        {"post_id": post.id, "version": selected.version_number},
+    )
+    db.commit()
+    return redirect(f"/posts/{post.id}", "Textversion ausgewählt; erneute Freigabe erforderlich")
+
+
+@router.post("/posts/{post_id}/text-versions/auto-latest")
+def choose_post_text_auto_latest(
+    post_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    post_version: int = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    post = db.scalar(select(Post).where(Post.id == post_id).with_for_update())
+    if not post:
+        raise HTTPException(404)
+    require(current, db, "edit_post", post.team_id)
+    if post.version != post_version:
+        raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    try:
+        selected = select_latest_text_automatically(db, post)
+    except MediaVersionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    audit(
+        db,
+        current,
+        "post.text_selection_auto_latest",
+        "post",
+        post.id,
+        post.team_id,
+        {"selected_version": selected.version_number},
+    )
+    db.commit()
+    return redirect(
+        f"/posts/{post.id}",
+        "Automatische Auswahl der neuesten Textversion aktiviert",
+    )
+
+
 @router.post("/posts/{post_id}/rerender")
 def rerender_post_media(
     post_id: str,
@@ -3038,6 +4127,7 @@ def rerender_post_media(
     csrf_token_value: str = Form(alias="csrf_token"),
     version: int = Form(),
     rerender_feed: bool = Form(default=False),
+    media_slot_ids: list[str] = Form(default=[]),
     story_job_ids: list[str] = Form(default=[]),
     media_asset_id: str = Form(default=""),
     current=Depends(current_user),
@@ -3057,7 +4147,33 @@ def rerender_post_media(
         )
     if item.version != version:
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
-    if not rerender_feed and not story_job_ids:
+    bundle = (item.design_snapshot or {}).get("club_matchday_carousel") or {}
+    member_ids = list(bundle.get("member_post_ids") or [item.id])
+    target_posts = {
+        post.id: post
+        for post in db.scalars(
+            select(Post).where(Post.club_id == item.club_id, Post.id.in_(member_ids))
+        )
+    }
+    if len(target_posts) != len(set(member_ids)):
+        raise HTTPException(409, "Der gemeinsame Beitrag ist unvollständig")
+    for target_post in target_posts.values():
+        require(current, db, "generate", target_post.team_id)
+    selected_slots: list[GeneratedMediaSlot] = []
+    if media_slot_ids:
+        selected_slots = list(
+            db.scalars(
+                select(GeneratedMediaSlot).where(
+                    GeneratedMediaSlot.club_id == item.club_id,
+                    GeneratedMediaSlot.post_id.in_(target_posts),
+                    GeneratedMediaSlot.id.in_(media_slot_ids),
+                )
+            )
+        )
+        if len(selected_slots) != len(set(media_slot_ids)):
+            raise HTTPException(422, "Ungültige Medienauswahl")
+        rerender_feed = any(slot.media_kind == "feed" for slot in selected_slots)
+    if not rerender_feed and not story_job_ids and not selected_slots:
         raise HTTPException(422, "Bitte mindestens Feed oder eine Story auswählen")
     allowed_story_ids = set(
         db.scalars(
@@ -3080,16 +4196,77 @@ def rerender_post_media(
             or selected_asset.uses != 0
         ):
             raise HTTPException(409, "Das ausgewählte Spielerbild ist nicht mehr frei")
-    job = enqueue_rerender(
-        db,
-        item,
-        current,
-        version,
-        story_job_ids,
-        selected_media_asset_id,
-        rerender_feed=rerender_feed,
+    queued = []
+    for target_post in target_posts.values():
+        target_slots = [slot for slot in selected_slots if slot.post_id == target_post.id]
+        has_feed_variants = bool(
+            ((target_post.design_snapshot or {}).get("media") or {}).get("feed_variants")
+        )
+        target_feed_positions = sorted(
+            {
+                slot.variant_number if has_feed_variants else slot.output_position
+                for slot in target_slots
+                if slot.media_kind == "feed"
+            }
+        )
+        story_slot_ids = [slot.id for slot in target_slots if slot.media_kind == "story"]
+        target_story_variants = sorted(
+            {
+                slot.variant_number
+                for slot in target_slots
+                if slot.media_kind == "story"
+            }
+        )
+        story_version_ids = list(
+            db.scalars(
+                select(GeneratedMediaVersion.id).where(
+                    GeneratedMediaVersion.club_id == item.club_id,
+                    GeneratedMediaVersion.slot_id.in_(story_slot_ids),
+                )
+            )
+        )
+        target_story_jobs = list(
+            db.scalars(
+                select(PublicationJob.id).where(
+                    PublicationJob.club_id == item.club_id,
+                    PublicationJob.post_id == target_post.id,
+                    PublicationJob.kind == "story",
+                    PublicationJob.media_version_id.in_(story_version_ids),
+                )
+            )
+        )
+        if not media_slot_ids and target_post.id == item.id:
+            target_story_jobs = story_job_ids
+            target_story_variants = []
+            target_feed_positions = []
+        target_rerender_feed = bool(target_feed_positions) or (
+            not media_slot_ids and target_post.id == item.id and rerender_feed
+        )
+        if (
+            not target_rerender_feed
+            and not target_story_jobs
+            and not target_story_variants
+        ):
+            continue
+        queued.append(
+            enqueue_rerender(
+                db,
+                target_post,
+                current,
+                target_post.version,
+                target_story_jobs,
+                selected_media_asset_id if target_post.id == item.id else target_post.media_asset_id,
+                rerender_feed=target_rerender_feed,
+                feed_positions=target_feed_positions or None,
+                story_variant_numbers=target_story_variants or None,
+            )
+        )
+    if not queued:
+        raise HTTPException(422, "Bitte mindestens eine Medienausgabe auswählen")
+    return redirect(
+        f"/generation-jobs/{queued[0].id}",
+        f"{len(queued)} Neurender-Auftrag/Aufträge wurden eingereiht",
     )
-    return redirect(f"/generation-jobs/{job.id}", "Neurendern wurde eingereiht")
 
 
 @router.post("/posts/{post_id}/ai-revision")
@@ -3102,8 +4279,10 @@ def revise_post_with_ai(
     revise_text: bool = Form(default=False),
     revise_feed: bool = Form(default=False),
     revise_graphics: bool = Form(default=False),
+    media_slot_ids: list[str] = Form(default=[]),
     story_job_ids: list[str] = Form(default=[]),
     media_asset_id: str = Form(default=""),
+    media_asset_choices: list[str] = Form(default=[]),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -3123,10 +4302,46 @@ def revise_post_with_ai(
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
     if not 10 <= len(instruction.strip()) <= 2000:
         raise HTTPException(422, "Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein")
+    bundle = (item.design_snapshot or {}).get("club_matchday_carousel") or {}
+    member_ids = list(bundle.get("member_post_ids") or [item.id])
+    target_posts = {
+        post.id: post
+        for post in db.scalars(
+            select(Post).where(Post.club_id == item.club_id, Post.id.in_(member_ids))
+        )
+    }
+    if len(target_posts) != len(set(member_ids)):
+        raise HTTPException(409, "Der gemeinsame Beitrag ist unvollständig")
+    for target_post in target_posts.values():
+        require(current, db, "generate", target_post.team_id)
+    selected_assets_by_post: dict[str, str] = {}
+    for raw_choice in media_asset_choices:
+        choice_post_id, separator, choice_asset_id = raw_choice.partition(":")
+        if not separator or choice_post_id not in target_posts or not choice_asset_id:
+            raise HTTPException(422, "Ungültige Spielerbild-Zuordnung")
+        if choice_post_id in selected_assets_by_post:
+            raise HTTPException(
+                422, "Spielerbild wurde für eine Mannschaft mehrfach angegeben"
+            )
+        selected_assets_by_post[choice_post_id] = choice_asset_id
+    selected_slots: list[GeneratedMediaSlot] = []
+    if media_slot_ids:
+        selected_slots = list(
+            db.scalars(
+                select(GeneratedMediaSlot).where(
+                    GeneratedMediaSlot.club_id == item.club_id,
+                    GeneratedMediaSlot.post_id.in_(target_posts),
+                    GeneratedMediaSlot.id.in_(media_slot_ids),
+                )
+            )
+        )
+        if len(selected_slots) != len(set(media_slot_ids)):
+            raise HTTPException(422, "Ungültige Medienauswahl")
+        revise_feed = any(slot.media_kind == "feed" for slot in selected_slots)
     # Keep accepting ``revise_graphics`` for already open legacy forms. New
     # forms select the feed and each story explicitly.
     revise_feed = revise_feed or revise_graphics
-    has_graphics = revise_feed or bool(story_job_ids)
+    has_graphics = revise_feed or bool(story_job_ids) or bool(selected_slots)
     if not revise_text and not has_graphics:
         raise HTTPException(422, "Bitte Begleittext, Feed oder mindestens eine Story auswählen")
     allowed_story_ids = set(
@@ -3141,35 +4356,113 @@ def revise_post_with_ai(
     if story_job_ids and not set(story_job_ids).issubset(allowed_story_ids):
         raise HTTPException(422, "Ungültige oder bereits veröffentlichte Story-Auswahl")
     selected_media_asset_id = media_asset_id or item.media_asset_id
-    if has_graphics and selected_media_asset_id != item.media_asset_id:
-        selected_asset = db.get(MediaAsset, selected_media_asset_id)
-        if not selected_asset or selected_asset.team_id != item.team_id:
-            raise HTTPException(422, "Ungültiges Spielerbild")
-        if (
-            not selected_asset.active
-            or not selected_asset.available
-            or selected_asset.reserved_game_id is not None
-            or selected_asset.uses != 0
-        ):
-            raise HTTPException(409, "Das ausgewählte Spielerbild ist nicht mehr frei")
+    queued = []
     try:
-        job = enqueue_ai_revision(
-            db,
-            item,
-            current,
-            version,
-            instruction,
-            revise_text=revise_text,
-            revise_graphics=has_graphics,
-            revise_feed=revise_feed,
-            story_job_ids=story_job_ids,
-            media_asset_id=selected_media_asset_id,
-        )
+        for target_post in target_posts.values():
+            target_slots = [slot for slot in selected_slots if slot.post_id == target_post.id]
+            has_feed_variants = bool(
+                ((target_post.design_snapshot or {}).get("media") or {}).get("feed_variants")
+            )
+            target_feed_positions = sorted(
+                {
+                    slot.variant_number if has_feed_variants else slot.output_position
+                    for slot in target_slots
+                    if slot.media_kind == "feed"
+                }
+            )
+            story_slot_ids = [slot.id for slot in target_slots if slot.media_kind == "story"]
+            target_story_variants = sorted(
+                {
+                    slot.variant_number
+                    for slot in target_slots
+                    if slot.media_kind == "story"
+                }
+            )
+            story_version_ids = list(
+                db.scalars(
+                    select(GeneratedMediaVersion.id).where(
+                        GeneratedMediaVersion.club_id == item.club_id,
+                        GeneratedMediaVersion.slot_id.in_(story_slot_ids),
+                    )
+                )
+            )
+            target_story_jobs = list(
+                db.scalars(
+                    select(PublicationJob.id).where(
+                        PublicationJob.club_id == item.club_id,
+                        PublicationJob.post_id == target_post.id,
+                        PublicationJob.kind == "story",
+                        PublicationJob.media_version_id.in_(story_version_ids),
+                    )
+                )
+            )
+            if not media_slot_ids and target_post.id == item.id:
+                target_story_jobs = story_job_ids
+                target_story_variants = []
+                target_feed_positions = []
+            target_revise_feed = bool(target_feed_positions) or (
+                not media_slot_ids and target_post.id == item.id and revise_feed
+            )
+            target_revise_text = revise_text and target_post.id == item.id
+            if (
+                not target_revise_text
+                and not target_revise_feed
+                and not target_story_jobs
+                and not target_story_variants
+            ):
+                continue
+            target_media_asset_id = selected_assets_by_post.get(
+                target_post.id,
+                selected_media_asset_id
+                if target_post.id == item.id
+                else target_post.media_asset_id,
+            )
+            if (
+                target_revise_feed or target_story_jobs or target_story_variants
+            ) and target_media_asset_id != target_post.media_asset_id:
+                selected_asset = db.get(MediaAsset, target_media_asset_id)
+                if (
+                    not selected_asset
+                    or selected_asset.club_id != target_post.club_id
+                    or selected_asset.team_id != target_post.team_id
+                ):
+                    raise HTTPException(422, "Ungültiges Spielerbild")
+                if (
+                    not selected_asset.active
+                    or not selected_asset.available
+                    or selected_asset.reserved_game_id is not None
+                    or selected_asset.uses != 0
+                ):
+                    raise HTTPException(
+                        409, "Das ausgewählte Spielerbild ist nicht mehr frei"
+                    )
+            queued.append(
+                enqueue_ai_revision(
+                    db,
+                    target_post,
+                    current,
+                    target_post.version,
+                    instruction,
+                    revise_text=target_revise_text,
+                    revise_graphics=bool(
+                        target_revise_feed
+                        or target_story_jobs
+                        or target_story_variants
+                    ),
+                    revise_feed=target_revise_feed,
+                    story_job_ids=target_story_jobs,
+                    media_asset_id=target_media_asset_id,
+                    feed_positions=target_feed_positions or None,
+                    story_variant_numbers=target_story_variants or None,
+                )
+            )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    if not queued:
+        raise HTTPException(422, "Bitte Begleittext oder mindestens eine Medienausgabe auswählen")
     return redirect(
-        f"/generation-jobs/{job.id}",
-        "KI-Änderungsauftrag wurde eingereiht",
+        f"/generation-jobs/{queued[0].id}",
+        f"{len(queued)} KI-Änderungsauftrag/Aufträge wurden eingereiht",
     )
 
 

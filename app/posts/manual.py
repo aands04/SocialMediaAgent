@@ -428,6 +428,9 @@ def create_manual_post(
                 height=image.height,
             )
         )
+    from app.posts.media_versions import synchronize_post_versions
+
+    synchronize_post_versions(db, post, created_by=user.id)
     db.add(
         AuditLog(
             user_id=user.id,

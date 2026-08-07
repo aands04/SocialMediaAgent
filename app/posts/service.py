@@ -5,7 +5,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from PIL import Image
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.branding.service import STANDARD_FONTS, branding_form_state
@@ -17,6 +17,8 @@ from app.models import (
     DesignTemplate,
     FontAsset,
     Game,
+    GeneratedMediaSlot,
+    GeneratedMediaVersion,
     InstagramPage,
     JobStatus,
     MediaAsset,
@@ -24,9 +26,11 @@ from app.models import (
     PostStatus,
     PublicationJob,
     PublicationMediaItem,
+    PublicationRuleSlot,
     StoryRule,
     Team,
 )
+from app.posts.rules import calculate_publication_time, resolve_publication_slots
 from app.prompts.service import resolve_prompt
 from app.rendering.service import Renderer, builtin_template
 from app.textgen.service import GeneratedText, TextGenerator
@@ -97,10 +101,26 @@ def reserve_image(db: Session, team_id: str, game_id: str) -> MediaAsset | None:
 BERLIN = ZoneInfo("Europe/Berlin")
 
 
+class ManualScheduleRequired(ValueError):
+    """Raised when a rule intentionally has no schedule for the match weekday."""
+
+
 def _aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _result_detected_at(game: Game) -> datetime | None:
+    raw = (game.overrides or {}).get("result_detected_at")
+    if raw:
+        try:
+            return _aware_utc(datetime.fromisoformat(str(raw)))
+        except ValueError:
+            return None
+    if game.result_confirmed and game.checked_at:
+        return _aware_utc(game.checked_at)
+    return None
 
 
 def _weekday_time(
@@ -166,7 +186,11 @@ def feed_time(team: Team, game: Game, post_type: str) -> tuple[datetime, bool]:
                 rules.get("result_weekday_targets"),
                 "after",
             )
-            return max(target or earliest, earliest), True
+            if target is None:
+                raise ManualScheduleRequired(
+                    "Für diesen Spiel-Wochentag ist keine Ergebnisveröffentlichung eingerichtet"
+                )
+            return max(target, earliest), True
         if mode == "relative":
             minutes = int(rules.get("result_offset_minutes", 120))
             direction = rules.get("result_offset_direction", "after")
@@ -183,6 +207,9 @@ def feed_time(team: Team, game: Game, post_type: str) -> tuple[datetime, bool]:
             )
             if target is not None:
                 return target, True
+            raise ManualScheduleRequired(
+                "Für diesen Spiel-Wochentag ist keine Erinnerungsveröffentlichung eingerichtet"
+            )
         return kickoff - timedelta(
             minutes=int(rules.get("reminder_feed_before_minutes", 360))
         ), False
@@ -197,6 +224,9 @@ def feed_time(team: Team, game: Game, post_type: str) -> tuple[datetime, bool]:
         )
         if target is not None:
             return target, True
+        raise ManualScheduleRequired(
+            "Für diesen Spiel-Wochentag ist keine Ankündigungsveröffentlichung eingerichtet"
+        )
     minutes = int(rules.get("announcement_offset_minutes", rules.get("feed_before_minutes", 1440)))
     direction = rules.get("announcement_offset_direction", "before")
     return kickoff + timedelta(minutes=minutes if direction == "after" else -minutes), False
@@ -223,6 +253,9 @@ def story_time(rule: StoryRule, game: Game, approved_at: datetime | None = None)
                 detected_at = _aware_utc(result_detected)
                 return max(configured, detected_at)
             return configured
+        raise ManualScheduleRequired(
+            "Für diesen Spiel-Wochentag ist kein Story-Zeitpunkt eingerichtet"
+        )
     base = refs.get(rule.reference) or game.checked_at
     delta = timedelta(minutes=rule.offset_minutes) * (1 if rule.direction == "after" else -1)
     result = base + delta
@@ -246,7 +279,18 @@ def _effective_story_rules(
     behaviour, even when the database default on older rows is ``1``.
     """
     settings = team.rules or {}
+    generation_key = f"{post_type}_story_generation_count"
+    publish_key = f"{post_type}_story_publish_count"
     count_key = f"{post_type}_story_output_count"
+    if generation_key in settings:
+        generated = max(0, min(10, int(settings.get(generation_key, 0))))
+        published = max(0, min(generated, int(settings.get(publish_key, generated))))
+        planned = [
+            (rule, max(1, int(getattr(rule, "media_slot", 1) or 1)))
+            for rule in rules
+            if max(1, int(getattr(rule, "media_slot", 1) or 1)) <= published
+        ]
+        return planned, generated
     if count_key not in settings:
         planned = [(rule, index) for index, rule in enumerate(rules, start=1)]
         default_count = len(planned) or (1 if post_type == "result" else 0)
@@ -507,16 +551,70 @@ def create_post(
             "shared_matchday_prompt": bool(matchday_bundle),
         },
     }
-    feed_at, feed_is_absolute = feed_time(team, game, post_type)
+    feed_requires_manual_schedule = False
+    try:
+        feed_at, feed_is_absolute = feed_time(team, game, post_type)
+    except ManualScheduleRequired:
+        feed_at, feed_is_absolute = _aware_utc(game.kickoff), False
+        feed_requires_manual_schedule = True
+    rule_resolution = resolve_publication_slots(
+        db,
+        club_id=team.club_id,
+        post_type=post_type,
+        match_weekday=_aware_utc(game.kickoff).astimezone(BERLIN).weekday(),
+        team_id=team.id,
+        game_id=game.id,
+    )
+    feed_rule_slots = [slot for slot in rule_resolution.slots if slot.media_kind == "feed"]
+    feed_rule_slot = feed_rule_slots[0] if feed_rule_slots else None
+    if rule_resolution.rule_set:
+        if feed_rule_slot:
+            resolved_at = calculate_publication_time(feed_rule_slot, game)
+            if resolved_at is None:
+                feed_requires_manual_schedule = True
+            else:
+                feed_at = resolved_at
+                feed_is_absolute = feed_rule_slot.timing_model == "weekday_fixed"
+        elif rule_resolution.manual_schedule_required:
+            feed_requires_manual_schedule = True
+    team_rules = team.rules or {}
+    structured_feed_variants = f"{post_type}_feed_generation_count" in team_rules
     feed_output_count = max(
-        0, min(10, int((team.rules or {}).get(f"{post_type}_feed_output_count", 1)))
+        0,
+        min(
+            10,
+            int(
+                rule_resolution.rule_set.feed_generation_count
+                if rule_resolution.rule_set
+                else team_rules.get(
+                    f"{post_type}_feed_generation_count",
+                    team_rules.get(f"{post_type}_feed_output_count", 1),
+                )
+            ),
+        ),
+    )
+    feed_publish_count = max(
+        0,
+        min(
+            feed_output_count,
+            int(
+                team_rules.get(
+                    f"{post_type}_feed_publish_count",
+                    feed_output_count,
+                )
+            ),
+        ),
     )
     feed_paths = []
     for output_index in range(1, feed_output_count + 1):
         relative = (
-            f"{post.id}/feed-v1.png"
-            if output_index == 1
-            else f"{post.id}/feed-{output_index}-v1.png"
+            f"{post.id}/feed-variant-{output_index}-v1.png"
+            if structured_feed_variants
+            else (
+                f"{post.id}/feed-v1.png"
+                if output_index == 1
+                else f"{post.id}/feed-{output_index}-v1.png"
+            )
         )
         feed_paths.append(
             str(
@@ -533,31 +631,122 @@ def create_post(
                 )
             )
         )
-    post.feed_path = feed_paths[0] if feed_paths else None
+    published_feed_paths = feed_paths[:feed_publish_count]
+    if rule_resolution.rule_set:
+        preferred_feed_variant = (
+            feed_rule_slot.variant_number
+            if feed_rule_slot
+            else next(iter(rule_resolution.rule_set.feed_publish_variants or [1]), 1)
+        )
+        post.feed_path = (
+            feed_paths[preferred_feed_variant - 1]
+            if 1 <= preferred_feed_variant <= len(feed_paths)
+            else (feed_paths[0] if feed_paths else None)
+        )
+    else:
+        post.feed_path = published_feed_paths[0] if published_feed_paths else None
     post.design_snapshot = {
         **post.design_snapshot,
         "media": {
             "feed": _render_metadata(renderer, post.feed_path) if post.feed_path else None,
             "feed_outputs": [_render_metadata(renderer, path) for path in feed_paths],
+            "feed_variants": [
+                {
+                    "path": path,
+                    "output_position": 1 if structured_feed_variants else index,
+                    "variant_number": index if structured_feed_variants else 1,
+                    "label": (
+                        f"Feed-Variante {index}"
+                        if structured_feed_variants
+                        else f"Feed-Bild {index}"
+                    ),
+                    "rendering": _render_metadata(renderer, path),
+                }
+                for index, path in enumerate(feed_paths, start=1)
+            ],
         },
     }
-    if feed_paths:
+    if rule_resolution.rule_set:
+        effective_feed_slots: list[PublicationRuleSlot | None] = list(feed_rule_slots)
+        if not effective_feed_slots and rule_resolution.manual_schedule_required and feed_paths:
+            effective_feed_slots = [None]
+        for sequence, publication_slot in enumerate(effective_feed_slots, start=1):
+            variant_number = publication_slot.variant_number if publication_slot else 1
+            if not 1 <= variant_number <= len(feed_paths):
+                warnings.append(
+                    f"Feed-Veröffentlichung verweist auf nicht erzeugte Variante {variant_number}"
+                )
+                continue
+            resolved_at = (
+                calculate_publication_time(
+                    publication_slot,
+                    game,
+                    result_detected_at=_result_detected_at(game),
+                )
+                if publication_slot
+                else None
+            )
+            manual_schedule = resolved_at is None
+            selected_path = feed_paths[variant_number - 1]
+            selected_page_id = (
+                publication_slot.instagram_page_id
+                if publication_slot and publication_slot.instagram_page_id
+                else page.id
+            )
+            feed_job = PublicationJob(
+                post_id=post.id,
+                game_id=game.id,
+                team_id=team.id,
+                instagram_page_id=selected_page_id,
+                kind="feed",
+                media_path=selected_path,
+                text_snapshot=post.text,
+                scheduled_at=resolved_at or _aware_utc(game.kickoff),
+                absolute_time=bool(
+                    publication_slot and publication_slot.timing_model == "weekday_fixed"
+                ),
+                approval_status=(
+                    "manual_schedule_required" if manual_schedule else "unapproved"
+                ),
+                status=JobStatus.DRAFT if manual_schedule else JobStatus.UNAPPROVED,
+                schedule_source=(
+                    "manual_required" if manual_schedule else rule_resolution.source
+                ),
+                publication_rule_slot_id=publication_slot.id if publication_slot else None,
+                idempotency_key=(
+                    f"{post.id}:feed:rule:{publication_slot.id}:v1"
+                    if publication_slot
+                    else f"{post.id}:feed:manual:{sequence}:v1"
+                ),
+            )
+            db.add(feed_job)
+    elif published_feed_paths:
         feed_job = PublicationJob(
             post_id=post.id,
             game_id=game.id,
             team_id=team.id,
             instagram_page_id=page.id,
-            kind="carousel" if len(feed_paths) > 1 else "feed",
-            media_path=feed_paths[0],
+            kind="carousel" if len(published_feed_paths) > 1 else "feed",
+            media_path=published_feed_paths[0],
             text_snapshot=post.text,
             scheduled_at=feed_at,
             absolute_time=feed_is_absolute,
-            idempotency_key=f"{post.id}:{'carousel' if len(feed_paths) > 1 else 'feed'}:v1",
+            approval_status=(
+                "manual_schedule_required" if feed_requires_manual_schedule else "unapproved"
+            ),
+            status=JobStatus.DRAFT if feed_requires_manual_schedule else JobStatus.UNAPPROVED,
+            schedule_source=(
+                "manual_required"
+                if feed_requires_manual_schedule
+                else rule_resolution.source
+            ),
+            publication_rule_slot_id=feed_rule_slot.id if feed_rule_slot else None,
+            idempotency_key=f"{post.id}:{'carousel' if len(published_feed_paths) > 1 else 'feed'}:v1",
         )
         db.add(feed_job)
         db.flush()
-        if len(feed_paths) > 1:
-            for position, path_value in enumerate(feed_paths, start=1):
+        if len(published_feed_paths) > 1:
+            for position, path_value in enumerate(published_feed_paths, start=1):
                 path = Path(path_value)
                 payload = path.read_bytes()
                 with Image.open(path) as image:
@@ -585,14 +774,33 @@ def create_post(
             .order_by(StoryRule.sort_order, StoryRule.created_at, StoryRule.id)
         ).all()
     )
-    planned_rules, story_output_count = _effective_story_rules(team, rules, post_type)
-    if post_type == "result" and not planned_rules and story_output_count > 0:
+    structured_story_slots = [
+        slot for slot in rule_resolution.slots if slot.media_kind == "story"
+    ]
+    if rule_resolution.rule_set:
+        story_output_count = max(
+            0, min(10, int(rule_resolution.rule_set.story_generation_count))
+        )
+        planned_rules = []
+    else:
+        planned_rules, story_output_count = _effective_story_rules(team, rules, post_type)
+    if (
+        not rule_resolution.rule_set
+        and post_type == "result"
+        and not planned_rules
+        and story_output_count > 0
+    ):
         planned_rules = [(_SyntheticResultStoryRule(instagram_page_id=page.id), 1)]
     seen = set()
     rendered_slots = {}
     story_snapshots = []
     for rule, media_slot in planned_rules:
-        at = story_time(rule, game)
+        story_requires_manual_schedule = False
+        try:
+            at = story_time(rule, game)
+        except ManualScheduleRequired:
+            at = _aware_utc(game.kickoff)
+            story_requires_manual_schedule = True
         collision = (at, media_slot)
         if collision in seen:
             warnings.append(f"Story-Regel {rule.name} kollidiert und wurde nicht doppelt geplant")
@@ -648,12 +856,207 @@ def create_post(
                 text_snapshot=post.text if rule.text_variant else None,
                 scheduled_at=at,
                 absolute_time=getattr(rule, "timing_mode", "relative") == "weekday_fixed",
+                approval_status=(
+                    "manual_schedule_required" if story_requires_manual_schedule else "unapproved"
+                ),
+                status=(JobStatus.DRAFT if story_requires_manual_schedule else JobStatus.UNAPPROVED),
+                schedule_source=(
+                    "manual_required" if story_requires_manual_schedule else "rule"
+                ),
+                publication_rule_slot_id=next(
+                    (
+                        slot.id
+                        for slot in rule_resolution.slots
+                        if slot.media_kind == "story"
+                        and slot.legacy_story_rule_id == getattr(rule, "id", None)
+                    ),
+                    None,
+                ),
                 idempotency_key=f"{post.id}:story:{rule.id}:v1",
             )
         )
-    post.design_snapshot = {**post.design_snapshot, "stories": story_snapshots}
+    # Generate every configured Story candidate even if it is not selected by
+    # a publication rule. This keeps generation and publication selection
+    # separate and lets reviewers choose a candidate later without another
+    # provider call.
+    for media_slot in range(1, story_output_count + 1):
+        if media_slot in rendered_slots:
+            continue
+        candidate_slot = next(
+            (
+                slot
+                for slot in structured_story_slots
+                if slot.variant_number == media_slot
+            ),
+            None,
+        )
+        source_rule = (
+            db.get(StoryRule, candidate_slot.legacy_story_rule_id)
+            if candidate_slot and candidate_slot.legacy_story_rule_id
+            else next(
+                (
+                    rule
+                    for rule in rules
+                    if max(1, int(getattr(rule, "media_slot", 1) or 1)) == media_slot
+                ),
+                rules[0] if rules else None,
+            )
+        )
+        template_name = (
+            candidate_slot.template
+            if candidate_slot and candidate_slot.template
+            else (source_rule.template if source_rule else "default-story")
+        )
+        story_design = _design(db, template_name, post_type, "story")
+        story_prompt_name = (
+            source_rule.prompt_template if source_rule and source_rule.prompt_template else None
+        )
+        if not story_prompt_name or story_prompt_name == "default-image-story":
+            story_prompt_name = team_rules.get(
+                f"image_prompt_story_{post_type}",
+                team_rules.get("image_prompt_story", "default-image-story"),
+            )
+        story_prompt = (
+            resolve_prompt(db, story_prompt_name, "image", post_type, "story", facts)
+            if getattr(renderer, "is_ai", False)
+            else None
+        )
+        render_context = {**facts, "template": story_design, "story_output_index": media_slot}
+        if story_prompt:
+            render_context["image_prompt"] = story_prompt
+        path = str(
+            renderer.render(
+                "story", f"{post.id}/story-slot-{media_slot}-v1.png", render_context
+            )
+        )
+        rendered_slots[media_slot] = (path, story_design, story_prompt)
+
+    if rule_resolution.rule_set:
+        effective_story_slots: list[PublicationRuleSlot | None] = list(
+            structured_story_slots
+        )
+        if (
+            not effective_story_slots
+            and rule_resolution.manual_schedule_required
+            and story_output_count
+        ):
+            manual_variants = [
+                int(value)
+                for value in (rule_resolution.rule_set.story_publish_variants or [1])
+                if 1 <= int(value) <= story_output_count
+            ]
+            effective_story_slots = [None for _value in (manual_variants or [1])]
+        else:
+            manual_variants = []
+        for sequence, publication_slot in enumerate(effective_story_slots, start=1):
+            variant_number = (
+                publication_slot.variant_number
+                if publication_slot
+                else (manual_variants[sequence - 1] if manual_variants else 1)
+            )
+            rendered = rendered_slots.get(variant_number)
+            if rendered is None:
+                warnings.append(
+                    f"Story-Veröffentlichung verweist auf nicht erzeugte Variante {variant_number}"
+                )
+                continue
+            path, story_design, story_prompt = rendered
+            result_detected_at = _result_detected_at(game)
+            at = (
+                calculate_publication_time(
+                    publication_slot,
+                    game,
+                    result_detected_at=result_detected_at,
+                )
+                if publication_slot
+                else None
+            )
+            manual_schedule = at is None
+            legacy_rule_id = (
+                publication_slot.legacy_story_rule_id if publication_slot else None
+            )
+            source_rule = db.get(StoryRule, legacy_rule_id) if legacy_rule_id else None
+            story_snapshots.append(
+                {
+                    "rule_id": legacy_rule_id,
+                    "publication_rule_slot_id": (
+                        publication_slot.id if publication_slot else None
+                    ),
+                    "media_slot": variant_number,
+                    "path": path,
+                    "template": story_design,
+                    "prompt": story_prompt.snapshot() if story_prompt else None,
+                    "media_version": 1,
+                    "rendering": (
+                        renderer.metadata_for(path)
+                        if hasattr(renderer, "metadata_for")
+                        else {}
+                    ),
+                }
+            )
+            db.add(
+                PublicationJob(
+                    post_id=post.id,
+                    game_id=game.id,
+                    team_id=team.id,
+                    instagram_page_id=(
+                        publication_slot.instagram_page_id
+                        if publication_slot and publication_slot.instagram_page_id
+                        else page.id
+                    ),
+                    story_rule_id=legacy_rule_id,
+                    kind="story",
+                    media_path=path,
+                    text_snapshot=(post.text if source_rule and source_rule.text_variant else None),
+                    scheduled_at=at or _aware_utc(game.kickoff),
+                    absolute_time=bool(
+                        publication_slot
+                        and publication_slot.timing_model == "weekday_fixed"
+                    ),
+                    approval_status=(
+                        "manual_schedule_required" if manual_schedule else "unapproved"
+                    ),
+                    status=(
+                        JobStatus.DRAFT if manual_schedule else JobStatus.UNAPPROVED
+                    ),
+                    schedule_source=(
+                        "manual_required" if manual_schedule else rule_resolution.source
+                    ),
+                    publication_rule_slot_id=(
+                        publication_slot.id if publication_slot else None
+                    ),
+                    idempotency_key=(
+                        f"{post.id}:story:rule:{publication_slot.id}:v1"
+                        if publication_slot
+                        else f"{post.id}:story:manual:{sequence}:v1"
+                    ),
+                )
+            )
+
+    story_variants = [
+        {
+            "path": value[0],
+            "output_position": 1,
+            "variant_number": media_slot,
+            "label": f"Story-Variante {media_slot}",
+            "template": value[1],
+            "prompt": value[2].snapshot() if value[2] else None,
+            "rendering": renderer.metadata_for(value[0])
+            if hasattr(renderer, "metadata_for")
+            else {},
+        }
+        for media_slot, value in sorted(rendered_slots.items())
+    ]
+    post.design_snapshot = {
+        **post.design_snapshot,
+        "stories": story_snapshots,
+        "story_variants": story_variants,
+    }
     post.critical_warnings = warnings
     post.status = PostStatus.INCOMPLETE if warnings else PostStatus.PENDING
+    from app.posts.media_versions import synchronize_post_versions
+
+    synchronize_post_versions(db, post)
     db.commit()
     return post
 
@@ -793,6 +1196,8 @@ def rerender_post(
     revision_instruction: str | None = None,
     *,
     rerender_feed: bool = True,
+    feed_positions: list[int] | None = None,
+    story_variant_numbers: list[int] | None = None,
 ) -> Post:
     game = db.get(Game, post.game_id)
     team = db.get(Team, post.team_id)
@@ -805,10 +1210,13 @@ def rerender_post(
         )
     )
     selected = set(story_job_ids or [])
+    selected_story_variants = {
+        int(number) for number in (story_variant_numbers or []) if int(number) > 0
+    }
     story_jobs = {job.id: job for job in jobs if job.kind == "story"}
     if not selected.issubset(story_jobs):
         raise RerenderConflict("Mindestens eine ausgewählte Story gehört nicht zu diesem Beitrag")
-    if not rerender_feed and not selected:
+    if not rerender_feed and not selected and not selected_story_variants:
         raise RerenderConflict("Bitte mindestens Feed oder eine Story auswählen")
     if rerender_feed and any(
         job.status == JobStatus.PUBLISHED for job in jobs if job.kind in {"feed", "carousel"}
@@ -846,6 +1254,38 @@ def rerender_post(
     facts = _facts(db, game, team, asset, post.post_type, logos)
     old_snapshot = _normalize_design_snapshot(post.design_snapshot)
     snapshots = _story_snapshot_map(old_snapshot.get("stories"))
+    story_candidates = {
+        max(1, int(candidate.get("variant_number", 1) or 1)): dict(candidate)
+        for candidate in (old_snapshot.get("story_variants") or [])
+        if isinstance(candidate, dict) and candidate.get("path")
+    }
+    for job_id in selected:
+        publication = story_jobs[job_id]
+        snapshot = snapshots.get(publication.story_rule_id, {})
+        slot = None
+        if publication.media_version_id:
+            version = db.get(GeneratedMediaVersion, publication.media_version_id)
+            slot = db.get(GeneratedMediaSlot, version.slot_id) if version else None
+        if slot and slot.post_id == post.id and slot.media_kind == "story":
+            variant_number = slot.variant_number
+        else:
+            variant_number = max(1, int(snapshot.get("media_slot", 1) or 1))
+        selected_story_variants.add(variant_number)
+        if variant_number not in story_candidates and publication.media_path:
+            # Recover a selectable source from legacy snapshots that were a
+            # string, mapping or mixed list.  The existing file and historical
+            # media version are retained instead of silently resetting them.
+            story_candidates[variant_number] = {
+                **snapshot,
+                "path": publication.media_path,
+                "output_position": 1,
+                "variant_number": variant_number,
+                "media_slot": variant_number,
+                "media_version": snapshot.get("media_version", publication.version or 1),
+                "rule_id": publication.story_rule_id,
+            }
+    if any(number not in story_candidates for number in selected_story_variants):
+        raise RerenderConflict("Mindestens eine ausgewählte Story-Variante ist nicht vorhanden")
     feed_design = old_snapshot.get("feed")
     feed_prompt = None
     feed_paths = []
@@ -863,16 +1303,54 @@ def rerender_post(
         )
         feed_prompt = _revision_prompt(feed_prompt, revision_instruction)
         previous_feed_outputs = (old_snapshot.get("media") or {}).get("feed_outputs") or []
+        previous_feed_variants = (
+            (old_snapshot.get("media") or {}).get("feed_variants") or []
+        )
+        structured_feed_variants = bool(
+            f"{post.post_type}_feed_generation_count" in (team.rules or {})
+            or (
+                previous_feed_variants
+                and all(
+                    int(candidate.get("output_position", 1) or 1) == 1
+                    for candidate in previous_feed_variants
+                    if isinstance(candidate, dict)
+                )
+                and any(
+                    int(candidate.get("variant_number", 1) or 1) > 1
+                    for candidate in previous_feed_variants
+                    if isinstance(candidate, dict)
+                )
+            )
+        )
         feed_output_count = max(1, len(previous_feed_outputs))
+        selected_feed_positions = set(feed_positions or range(1, feed_output_count + 1))
+        if not selected_feed_positions or any(
+            position < 1 or position > feed_output_count
+            for position in selected_feed_positions
+        ):
+            raise RerenderConflict("Ungültige Auswahl der Feed-Ausgaben")
         if any(job.kind == "carousel" for job in jobs) and feed_output_count == 1:
             raise RerenderConflict(
                 "Ein gebündelter Vereins-Karussellbeitrag kann nicht über die normale Feed-Neugenerierung geändert werden"
             )
         for output_index in range(1, feed_output_count + 1):
+            if output_index not in selected_feed_positions:
+                previous = previous_feed_outputs[output_index - 1]
+                previous_path = previous.get("path") if isinstance(previous, dict) else None
+                if not previous_path or not Path(previous_path).is_file():
+                    raise RerenderConflict(
+                        "Eine nicht ausgewählte Feed-Ausgabe ist nicht mehr verfügbar"
+                    )
+                feed_paths.append(previous_path)
+                continue
             relative = (
-                f"{post.id}/feed-v{post.feed_version}.png"
-                if output_index == 1
-                else f"{post.id}/feed-{output_index}-v{post.feed_version}.png"
+                f"{post.id}/feed-variant-{output_index}-v{post.feed_version}.png"
+                if structured_feed_variants
+                else (
+                    f"{post.id}/feed-v{post.feed_version}.png"
+                    if output_index == 1
+                    else f"{post.id}/feed-{output_index}-v{post.feed_version}.png"
+                )
             )
             feed_paths.append(
                 str(
@@ -896,12 +1374,22 @@ def rerender_post(
             job.version += 1
             job.idempotency_key = f"{post.id}:{job.kind}:v{post.feed_version}"
             if job.kind == "carousel":
+                published_count = int(
+                    db.scalar(
+                        select(func.count(PublicationMediaItem.id)).where(
+                            PublicationMediaItem.publication_job_id == job.id
+                        )
+                    )
+                    or 0
+                )
                 db.execute(
                     delete(PublicationMediaItem).where(
                         PublicationMediaItem.publication_job_id == job.id
                     )
                 )
-                for position, path_value in enumerate(feed_paths, start=1):
+                for position, path_value in enumerate(
+                    feed_paths[:published_count], start=1
+                ):
                     media_path = Path(path_value)
                     payload = media_path.read_bytes()
                     with Image.open(media_path) as image:
@@ -918,41 +1406,148 @@ def rerender_post(
                             height=height,
                         )
                     )
-        elif job.id in selected:
-            rule = db.get(StoryRule, job.story_rule_id) if job.story_rule_id else None
-            design = _design(
-                db, rule.template if rule else "default-story", post.post_type, "story"
+    active_story_rules = list(
+        db.scalars(
+            select(StoryRule)
+            .where(
+                StoryRule.club_id == post.club_id,
+                StoryRule.team_id == post.team_id,
+                StoryRule.post_type == post.post_type,
+                StoryRule.active.is_(True),
             )
-            media_version = int(snapshots.get(job.story_rule_id, {}).get("media_version", 1)) + 1
-            story_prompt_name = rule.prompt_template if rule else None
-            if not story_prompt_name or story_prompt_name == "default-image-story":
-                story_prompt_name = team.rules.get(
-                    f"image_prompt_story_{post.post_type}",
-                    team.rules.get("image_prompt_story", "default-image-story"),
+            .order_by(StoryRule.sort_order, StoryRule.created_at, StoryRule.id)
+        )
+    )
+    for variant_number in sorted(selected_story_variants):
+        candidate = story_candidates[variant_number]
+        matching_jobs = []
+        for publication in story_jobs.values():
+            current_slot = None
+            if publication.media_version_id:
+                current_version = db.get(
+                    GeneratedMediaVersion, publication.media_version_id
                 )
-            story_prompt = (
-                resolve_prompt(db, story_prompt_name, "image", post.post_type, "story", facts)
-                if getattr(renderer, "is_ai", False)
-                else None
-            )
-            story_prompt = _revision_prompt(story_prompt, revision_instruction)
-            job.media_path = str(
-                renderer.render(
-                    "story",
-                    f"{post.id}/story-{job.story_rule_id}-v{media_version}.png",
-                    {**facts, "template": design, "image_prompt": story_prompt},
+                current_slot = (
+                    db.get(GeneratedMediaSlot, current_version.slot_id)
+                    if current_version
+                    else None
                 )
+            snapshot = snapshots.get(publication.story_rule_id, {})
+            current_variant = (
+                current_slot.variant_number
+                if current_slot and current_slot.post_id == post.id
+                else max(1, int(snapshot.get("media_slot", 1) or 1))
             )
-            job.version += 1
-            job.idempotency_key = f"{post.id}:story:{job.story_rule_id}:v{media_version}"
-            snapshots[job.story_rule_id] = {
-                "rule_id": job.story_rule_id,
+            if current_variant == variant_number:
+                matching_jobs.append(publication)
+        source_job = next(
+            (publication for publication in matching_jobs if publication.story_rule_id),
+            None,
+        )
+        rule = (
+            db.get(StoryRule, source_job.story_rule_id)
+            if source_job and source_job.story_rule_id
+            else next(
+                (
+                    item
+                    for item in active_story_rules
+                    if int(item.media_slot or 1) == variant_number
+                ),
+                active_story_rules[0] if active_story_rules else None,
+            )
+        )
+        template_name = (
+            rule.template
+            if rule
+            else str(candidate.get("template") or "default-story")
+        )
+        design = _design(db, template_name, post.post_type, "story")
+        story_prompt_name = rule.prompt_template if rule else None
+        if not story_prompt_name or story_prompt_name == "default-image-story":
+            story_prompt_name = team.rules.get(
+                f"image_prompt_story_{post.post_type}",
+                team.rules.get("image_prompt_story", "default-image-story"),
+            )
+        story_prompt = (
+            resolve_prompt(db, story_prompt_name, "image", post.post_type, "story", facts)
+            if getattr(renderer, "is_ai", False)
+            else None
+        )
+        story_prompt = _revision_prompt(story_prompt, revision_instruction)
+        slot = db.scalar(
+            select(GeneratedMediaSlot)
+            .where(
+                GeneratedMediaSlot.club_id == post.club_id,
+                GeneratedMediaSlot.post_id == post.id,
+                GeneratedMediaSlot.media_kind == "story",
+                GeneratedMediaSlot.variant_number == variant_number,
+            )
+            .with_for_update()
+        )
+        latest_number = (
+            int(
+                db.scalar(
+                    select(func.max(GeneratedMediaVersion.version_number)).where(
+                        GeneratedMediaVersion.slot_id == slot.id
+                    )
+                )
+                or 0
+            )
+            if slot
+            else 0
+        )
+        try:
+            legacy_number = max(0, int(candidate.get("media_version", 0) or 0))
+        except (TypeError, ValueError):
+            legacy_number = 0
+        next_version = max(latest_number, legacy_number) + 1
+        path_value = str(
+            renderer.render(
+                "story",
+                f"{post.id}/story-slot-{variant_number}-v{next_version}.png",
+                {
+                    **facts,
+                    "template": design,
+                    "image_prompt": story_prompt,
+                    "story_output_index": variant_number,
+                },
+            )
+        )
+        rendering = (
+            renderer.metadata_for(path_value)
+            if hasattr(renderer, "metadata_for")
+            else {}
+        )
+        story_candidates[variant_number] = {
+            **candidate,
+            "path": path_value,
+            "output_position": 1,
+            "variant_number": variant_number,
+            "label": candidate.get("label") or f"Story-Variante {variant_number}",
+            "template": design,
+            "prompt": story_prompt.snapshot() if story_prompt else None,
+            "media_version": next_version,
+            "rendering": rendering,
+        }
+        for publication in matching_jobs:
+            if publication.status == JobStatus.PUBLISHED:
+                continue
+            publication.media_path = path_value
+            publication.version += 1
+            publication.idempotency_key = (
+                f"{post.id}:story:{publication.story_rule_id or variant_number}:"
+                f"v{next_version}"
+            )
+            entry = dict(snapshots.get(publication.story_rule_id) or {})
+            snapshots[publication.story_rule_id] = {
+                **entry,
+                "rule_id": publication.story_rule_id,
+                "media_slot": variant_number,
+                "path": path_value,
                 "template": design,
                 "prompt": story_prompt.snapshot() if story_prompt else None,
-                "media_version": media_version,
-                "rendering": renderer.metadata_for(job.media_path)
-                if hasattr(renderer, "metadata_for")
-                else {},
+                "media_version": next_version,
+                "rendering": rendering,
             }
     raw_prompts = old_snapshot.get("prompts")
     prompt_snapshot = dict(raw_prompts) if isinstance(raw_prompts, dict) else {}
@@ -962,11 +1557,36 @@ def rerender_post(
     if rerender_feed:
         media_snapshot["feed"] = _render_metadata(renderer, post.feed_path)
         media_snapshot["feed_outputs"] = [_render_metadata(renderer, path) for path in feed_paths]
+        if structured_feed_variants:
+            media_snapshot["feed_variants"] = [
+                {
+                    "path": path,
+                    "output_position": 1,
+                    "variant_number": index,
+                    "label": f"Feed-Variante {index}",
+                    "rendering": _render_metadata(renderer, path),
+                }
+                for index, path in enumerate(feed_paths, start=1)
+            ]
+        else:
+            media_snapshot["feed_variants"] = [
+                {
+                    "path": path,
+                    "output_position": index,
+                    "variant_number": 1,
+                    "label": f"Feed-Bild {index}",
+                    "rendering": _render_metadata(renderer, path),
+                }
+                for index, path in enumerate(feed_paths, start=1)
+            ]
     post.design_snapshot = {
         **old_snapshot,
         "feed": feed_design,
         "prompts": prompt_snapshot,
         "stories": list(snapshots.values()),
+        "story_variants": [
+            story_candidates[number] for number in sorted(story_candidates)
+        ],
         "logos": logos,
         "media": media_snapshot,
         "player_asset": {"id": asset.id, "filename": asset.filename, "checksum": asset.checksum}
@@ -1005,6 +1625,9 @@ def rerender_post(
                 job.approval_status = "reapproval_required"
                 job.approved_post_version = None
                 job.error = "Grafiken wurden neu erzeugt; erneute Freigabe erforderlich"
+    from app.posts.media_versions import synchronize_post_versions
+
+    synchronize_post_versions(db, post)
     db.flush()
     return post
 
@@ -1022,6 +1645,8 @@ def revise_post(
     story_job_ids: list[str] | None = None,
     logo_snapshot: dict | None = None,
     media_asset_id: str | None = None,
+    feed_positions: list[int] | None = None,
+    story_variant_numbers: list[int] | None = None,
 ) -> Post:
     """Apply a persistent AI revision while preserving published outputs."""
     instruction = instruction.strip()
@@ -1031,7 +1656,12 @@ def revise_post(
         raise ValueError("Bitte mindestens Begleittext oder Grafiken auswählen")
     if rerender_feed is None:
         rerender_feed = revise_graphics
-    if revise_graphics and not rerender_feed and not story_job_ids:
+    if (
+        revise_graphics
+        and not rerender_feed
+        and not story_job_ids
+        and not story_variant_numbers
+    ):
         raise ValueError("Bitte Feed oder mindestens eine Story auswählen")
     if revise_text and text_generator is None:
         raise ValueError("Textgenerator fehlt")
@@ -1068,6 +1698,8 @@ def revise_post(
             media_asset_id,
             instruction,
             rerender_feed=rerender_feed,
+            feed_positions=feed_positions,
+            story_variant_numbers=story_variant_numbers,
         )
 
     if revise_text:
@@ -1118,6 +1750,7 @@ def revise_post(
             "graphics": revise_graphics,
             "feed": bool(rerender_feed) if revise_graphics else False,
             "story_job_ids": sorted(set(story_job_ids or [])),
+            "story_variant_numbers": sorted(set(story_variant_numbers or [])),
             "text_model": generated_text.model if generated_text else None,
             "text_prompt_version": generated_text.prompt_version if generated_text else None,
             "text_tokens": generated_text.tokens if generated_text else None,
@@ -1126,6 +1759,11 @@ def revise_post(
         }
     )
     post.design_snapshot = {**snapshot, "ai_revisions": revisions}
+    from app.posts.media_versions import ensure_text_version, synchronize_post_versions
+
+    ensure_text_version(db, post, source="ai_revision")
+    if revise_graphics:
+        synchronize_post_versions(db, post)
     db.flush()
     return post
 
@@ -1347,20 +1985,85 @@ def reschedule_game(db: Session, game: Game, new_kickoff: datetime):
     old = game.kickoff
     game.original_kickoff = game.original_kickoff or old
     game.kickoff = new_kickoff
+    affected_posts: set[str] = set()
+    new_weekday = _aware_utc(new_kickoff).astimezone(BERLIN).weekday()
     for job in db.scalars(
         select(PublicationJob).where(
             PublicationJob.game_id == game.id,
             PublicationJob.status.not_in([JobStatus.PUBLISHED, JobStatus.CANCELLED]),
-        )
+        ).with_for_update()
     ):
-        if job.absolute_time:
+        affected_posts.add(job.post_id)
+        if job.schedule_source == "manual":
+            # A deliberate editor decision is not silently replaced by a rule.
+            continue
+        current_slot = (
+            db.get(PublicationRuleSlot, job.publication_rule_slot_id)
+            if job.publication_rule_slot_id
+            else None
+        )
+        if current_slot:
+            resolution = resolve_publication_slots(
+                db,
+                club_id=game.club_id,
+                post_type=db.get(Post, job.post_id).post_type,
+                match_weekday=new_weekday,
+                team_id=game.team_id,
+                game_id=game.id,
+            )
+            candidates = [
+                slot
+                for slot in resolution.slots
+                if slot.media_kind == ("story" if job.kind == "story" else "feed")
+                and slot.variant_number == current_slot.variant_number
+                and (
+                    not current_slot.legacy_story_rule_id
+                    or slot.legacy_story_rule_id == current_slot.legacy_story_rule_id
+                )
+            ]
+            replacement = candidates[0] if candidates else None
+            scheduled_at = (
+                calculate_publication_time(replacement, game) if replacement else None
+            )
+            if replacement and scheduled_at:
+                job.publication_rule_slot_id = replacement.id
+                job.scheduled_at = scheduled_at
+                job.absolute_time = replacement.timing_model == "weekday_fixed"
+                job.schedule_source = resolution.source
+                job.stale_time = False
+                job.error = "Spielverlegung erkannt; Termin anhand der neuen Regel berechnet"
+            else:
+                job.publication_rule_slot_id = None
+                job.status = JobStatus.DRAFT
+                job.approval_status = "manual_schedule_required"
+                job.approved_post_version = None
+                job.schedule_source = "manual_required"
+                job.stale_time = True
+                job.error = (
+                    "Für den neuen Spiel-Wochentag fehlt eine passende Regel; "
+                    "Veröffentlichungszeit bitte manuell festlegen"
+                )
+            job.version += 1
+        elif job.absolute_time:
             job.stale_time = True
         else:
             job.scheduled_at += new_kickoff - old
+            job.version += 1
+        if job.approval_status == "approved":
+            job.status = JobStatus.UNAPPROVED
+            job.approval_status = "reapproval_required"
+            job.approved_post_version = None
     for post in db.scalars(
         select(Post).where(
-            Post.game_id == game.id, Post.status.in_([PostStatus.APPROVED, PostStatus.SCHEDULED])
+            Post.id.in_(affected_posts),
+            Post.status.in_(
+                [PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL]
+            ),
         )
     ):
         post.status = PostStatus.REAPPROVAL
+        post.approved_version = None
+        post.approved_by = None
+        post.approved_at = None
+        post.version += 1
     db.commit()

@@ -39,6 +39,7 @@ from app.models import (
     ProviderSnapshot,
     PublicationJob,
     PublicationMediaItem,
+    PublicationRuleSlot,
     Role,
     SharedOpponentLogo,
     StorageObject,
@@ -1708,6 +1709,10 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
     assert "Dashboard Mannschaft 2" in response.text
     assert "Reihenfolge des Karussells" in response.text
     assert "Erstes Bild festlegen" in response.text
+    assert 'id="select-all-ai-outputs"' in response.text
+    assert 'id="clear-all-ai-outputs"' in response.text
+    assert response.text.count('class="ai-output-choice"') == 6
+    assert response.text.count('name="media_asset_choices"') == 2
     assert "Gemeinsamen Beitrag löschen" in response.text
     assert "Teilbeitrag einzeln bearbeiten" not in response.text
 
@@ -2576,3 +2581,131 @@ def test_mock_game_with_existing_post_is_safely_hidden_instead_of_destroyed(brow
         assert game.overrides["dashboard_deleted"] is True
         assert post is not None and post.publishing_enabled is False
         assert db.query(AuditLog).filter_by(action="game.mock_suppressed").count() == 1
+
+
+def test_publication_rule_slots_are_csrf_protected_validated_and_audited(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="rules-page",
+            display_name="Regelseite",
+            username="rules_page",
+            club="Dashboard Testverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="rules-team",
+            display_name="Regelmannschaft",
+            short_name="RM",
+            slug="rules-team",
+            club="Dashboard Testverein",
+            fussball_url="https://example.invalid/rules-team",
+            instagram_page_id=page.id,
+            media_subdir="rules-team/players",
+            rules={
+                "announcement_feed_generation_count": 2,
+                "announcement_story_generation_count": 3,
+            },
+        )
+        db.add(team)
+        db.commit()
+        team_id = team.id
+        page_id = page.id
+        team_version = team.version
+
+    payload = {
+        "csrf_token": "ungueltig",
+        "expected_team_version": str(team_version),
+        "label": "Freitagabend",
+        "post_type": "announcement",
+        "media_kind": "feed",
+        "variant_number": "1",
+        "timing_model": "weekday_fixed",
+        "match_weekday": "6",
+        "target_weekday": "4",
+        "local_time": "18:00",
+        "reference": "kickoff",
+        "direction": "before",
+        "offset_minutes": "0",
+        "instagram_page_id": page_id,
+        "sort_order": "10",
+    }
+    denied = client.post(
+        f"/rules/{team_id}/publication-slots", data=payload, follow_redirects=False
+    )
+    assert denied.status_code == 403
+
+    payload["csrf_token"] = session_csrf(client)
+    created = client.post(
+        f"/rules/{team_id}/publication-slots", data=payload, follow_redirects=False
+    )
+    assert created.status_code == 303
+    with factory() as db:
+        saved_team = db.get(Team, team_id)
+        saved_slot = db.scalar(
+            select(PublicationRuleSlot).where(
+                PublicationRuleSlot.club_id == saved_team.club_id,
+                PublicationRuleSlot.media_kind == "feed",
+            )
+        )
+        assert saved_slot is not None
+        assert saved_slot.match_weekday == 6
+        assert saved_slot.target_weekday == 4
+        assert saved_slot.local_time == "18:00"
+        assert saved_slot.variant_number == 1
+        assert db.scalar(
+            select(AuditLog.id).where(AuditLog.action == "publication_rule_slot.created")
+        )
+        second_version = saved_team.version
+
+    duplicate = {
+        **payload,
+        "csrf_token": session_csrf(client),
+        "expected_team_version": str(second_version),
+        "label": "Zweite Veröffentlichung derselben Datei",
+        "timing_model": "relative",
+        "reference": "kickoff",
+        "offset_minutes": "30",
+        "local_time": "",
+        "target_weekday": "",
+    }
+    rejected = client.post(
+        f"/rules/{team_id}/publication-slots", data=duplicate, follow_redirects=False
+    )
+    assert rejected.status_code == 422
+    assert "Wiederverwendung" in rejected.text
+
+    overview = client.get(f"/rules?team_id={team_id}")
+    assert overview.status_code == 200
+    assert 'id="publication-rules"' in overview.text
+    assert "Freitagabend" in overview.text
+
+    with factory() as db:
+        current_version = db.get(Team, team_id).version
+    copied = client.post(
+        f"/rules/{team_id}/publication-weekdays/copy",
+        data={
+            "csrf_token": session_csrf(client),
+            "expected_team_version": str(current_version),
+            "source_weekday": "6",
+            "target_weekday": "5",
+        },
+        follow_redirects=False,
+    )
+    assert copied.status_code == 303
+    with factory() as db:
+        copied_slot = db.scalar(
+            select(PublicationRuleSlot).where(
+                PublicationRuleSlot.club_id == db.get(Team, team_id).club_id,
+                PublicationRuleSlot.match_weekday == 5,
+            )
+        )
+        assert copied_slot is not None
+        assert copied_slot.target_weekday == 3
+        assert db.scalar(
+            select(AuditLog.id).where(
+                AuditLog.action == "publication_weekday_rules.copied"
+            )
+        )

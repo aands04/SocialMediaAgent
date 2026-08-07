@@ -11,6 +11,24 @@
 </form>
 
 {% if selected %}
+{% if teams|length > 1 %}
+<details class="rule-copy-panel">
+  <summary>Regeln einer anderen Mannschaft übernehmen</summary>
+  <form method="post" action="/rules/{{selected.id}}/copy-from" onsubmit="return confirm('Die aktuellen Regeln und Veröffentlichungstermine dieser Mannschaft wirklich durch die gewählte Konfiguration ersetzen?');">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <input type="hidden" name="target_version" value="{{selected.version}}">
+    <label>Quellmannschaft
+      <select name="source_team_id" required>
+        {% for source_team in teams if source_team.id != selected.id %}
+        <option value="{{source_team.id}}">{{source_team.display_name}}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="secondary">Regeln nach Bestätigung kopieren</button>
+    <small>Spielzeiten, Erstellungszahlen und Veröffentlichungstermine werden kopiert. Die Instagram-Seite der Zielmannschaft bleibt unverändert.</small>
+  </form>
+</details>
+{% endif %}
 {% set weekday_names=['monday','tuesday','wednesday','thursday','friday','saturday','sunday'] %}
 {% set weekday_options=[('0','Montag'),('1','Dienstag'),('2','Mittwoch'),('3','Donnerstag'),('4','Freitag'),('5','Samstag'),('6','Sonntag')] %}
 {% set announcement_times=selected.rules.get('announcement_weekday_times',{}) %}
@@ -29,15 +47,20 @@
     <h2>1. Spielankündigungen</h2>
     <div class="gridform">
       <label><input type="checkbox" name="announcement_enabled" value="true" {% if selected.rules.get('announcement_enabled') %}checked{% endif %}> Spielankündigungen erzeugen</label>
-      <label>Feed-Zeitmodell
-        <select name="announcement_timing_mode" id="announcement-timing-mode">
-          <option value="relative" {% if selected.rules.get('announcement_timing_mode','relative')=='relative' %}selected{% endif %}>Relativ zum Anpfiff</option>
-          <option value="weekday_fixed" {% if selected.rules.get('announcement_timing_mode')=='weekday_fixed' %}selected{% endif %}>Zieltag und Uhrzeit je Spiel-Wochentag</option>
-        </select>
+      <p><strong>Veröffentlichung:</strong> Die konkreten Feed- und Story-Termine werden unten als einzelne Veröffentlichungsregeln verwaltet.</p>
+      <input type="hidden" name="announcement_timing_mode" value="{{selected.rules.get('announcement_timing_mode','relative')}}">
+    </div>
+
+    <div class="gridform generation-selection">
+      <label>Feed-Varianten standardmäßig auswählen
+        <input type="number" name="announcement_feed_publish_count" min="0" max="10" value="{{selected.rules.get('announcement_feed_publish_count',selected.rules.get('announcement_feed_output_count',1))}}">
+      </label>
+      <label>Story-Varianten standardmäßig auswählen
+        <input type="number" name="announcement_story_publish_count" min="0" max="10" value="{{selected.rules.get('announcement_story_publish_count',selected.rules.get('announcement_story_output_count',story_output_defaults.get('announcement',1)))}}">
       </label>
     </div>
 
-    <div id="announcement-relative" class="gridform timing-panel">
+    <div id="announcement-relative" class="gridform timing-panel" hidden>
       <label>Richtung zum Anpfiff
         <select name="announcement_offset_direction">
           <option value="before" {% if selected.rules.get('announcement_offset_direction','before')=='before' %}selected{% endif %}>vor dem Anpfiff</option>
@@ -47,7 +70,7 @@
       <label>Abstand in Minuten<input type="number" name="announcement_offset_minutes" min="0" max="43200" value="{{selected.rules.get('announcement_offset_minutes',selected.rules.get('feed_before_minutes',1440))}}"></label>
     </div>
 
-    <div id="announcement-weekday" class="timing-panel">
+    <div id="announcement-weekday" class="timing-panel" hidden>
       <h3>Feed-Termin nach Wochentag des Spiels</h3>
       <div class="schedule-grid">
       {% for key,label in weekday_options %}
@@ -66,12 +89,12 @@
     </div>
 
     <div class="gridform">
-      <label>Feed-Bilder pro Spiel
-        <input type="number" name="announcement_feed_output_count" min="0" max="10" value="{{selected.rules.get('announcement_feed_output_count',1)}}">
-        <small>0 = kein Feed. Ab 2 Bildern wird ein geordnetes Instagram-Karussell erzeugt.</small>
+      <label>Alternative Feed-Gestaltungen erzeugen
+        <input type="number" name="announcement_feed_generation_count" min="0" max="10" value="{{selected.rules.get('announcement_feed_generation_count',selected.rules.get('announcement_feed_output_count',1))}}">
+        <small>Diese Zahl bestimmt nur die verfügbaren Alternativen. Karussellpositionen entstehen getrennt davon aus den beteiligten Spielen.</small>
       </label>
-      <label>Story-Ausgaben pro Spiel
-        <input type="number" name="announcement_story_output_count" min="0" max="10" value="{{selected.rules.get('announcement_story_output_count',story_output_defaults.get('announcement',1))}}">
+      <label>Alternative Story-Gestaltungen erzeugen
+        <input type="number" name="announcement_story_generation_count" min="0" max="10" value="{{selected.rules.get('announcement_story_generation_count',selected.rules.get('announcement_story_output_count',story_output_defaults.get('announcement',1)))}}">
         <small>Jeder Story-Zeitpunkt wählt unten eine dieser Ausgaben aus.</small>
       </label>
       <label>Verspätete Freigabe
@@ -86,12 +109,19 @@
     <p>Der Erinnerungs-Feed ist ein zusätzlicher, eigenständiger Beitrag kurz vor dem Spiel. Er ist nicht die erste oder zweite Story.</p>
     <div class="gridform">
       <label><input type="checkbox" name="reminder_enabled" value="true" {% if selected.rules.get('reminder_enabled') %}checked{% endif %}> Separaten Erinnerungsbeitrag automatisch erzeugen</label>
-      <label>Feed-Zeitmodell<select name="reminder_timing_mode" id="reminder-timing-mode"><option value="relative" {% if selected.rules.get('reminder_timing_mode','relative')=='relative' %}selected{% endif %}>Relativ zum Anpfiff</option><option value="weekday_fixed" {% if selected.rules.get('reminder_timing_mode')=='weekday_fixed' %}selected{% endif %}>Zieltag und Uhrzeit je Spiel-Wochentag</option></select></label>
+      <p><strong>Veröffentlichung:</strong> Lege unten beliebig viele Feed- und Story-Termine an.</p>
+      <input type="hidden" name="reminder_timing_mode" value="{{selected.rules.get('reminder_timing_mode','relative')}}">
     </div>
-    <div id="reminder-relative" class="timing-panel gridform">
+    <div class="gridform generation-selection">
+      <label>Feed-Varianten erzeugen<input type="number" name="reminder_feed_generation_count" min="0" max="10" value="{{selected.rules.get('reminder_feed_generation_count',selected.rules.get('reminder_feed_output_count',1))}}"></label>
+      <label>Feed-Varianten standardmäßig auswählen<input type="number" name="reminder_feed_publish_count" min="0" max="10" value="{{selected.rules.get('reminder_feed_publish_count',selected.rules.get('reminder_feed_output_count',1))}}"></label>
+      <label>Story-Varianten erzeugen<input type="number" name="reminder_story_generation_count" min="0" max="10" value="{{selected.rules.get('reminder_story_generation_count',selected.rules.get('reminder_story_output_count',story_output_defaults.get('reminder',1)))}}"></label>
+      <label>Story-Varianten standardmäßig auswählen<input type="number" name="reminder_story_publish_count" min="0" max="10" value="{{selected.rules.get('reminder_story_publish_count',selected.rules.get('reminder_story_output_count',story_output_defaults.get('reminder',1)))}}"></label>
+    </div>
+    <div id="reminder-relative" class="timing-panel gridform" hidden>
       <label>Feed-Veröffentlichung vor Anpfiff (Minuten)<input type="number" name="reminder_feed_before_minutes" min="0" max="10080" value="{{selected.rules.get('reminder_feed_before_minutes',360)}}"></label>
     </div>
-    <div id="reminder-weekday" class="timing-panel">
+    <div id="reminder-weekday" class="timing-panel" hidden>
       <h3>Feed-Termin nach Wochentag des Spiels</h3>
       <div class="schedule-grid">
       {% for key,label in weekday_options %}
@@ -112,23 +142,24 @@
     <h2>3. Ergebnismeldungen</h2>
     <div class="gridform">
       <label><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Ergebnismeldungen erzeugen</label>
-      <label>Feed-Zeitmodell
-        <select name="result_timing_mode" id="result-timing-mode">
-          <option value="result_detected" {% if selected.rules.get('result_timing_mode','result_detected')=='result_detected' %}selected{% endif %}>Sofort nach bestätigter Erkennung</option>
-          <option value="relative" {% if selected.rules.get('result_timing_mode')=='relative' %}selected{% endif %}>Relativ zum Anpfiff</option>
-          <option value="weekday_fixed" {% if selected.rules.get('result_timing_mode')=='weekday_fixed' %}selected{% endif %}>Zieltag und Uhrzeit je Spiel-Wochentag</option>
-        </select>
-      </label>
+      <p><strong>Veröffentlichung:</strong> „Direkt nach Ergebnis“, Verzögerungen und feste Termine werden unten je Slot festgelegt.</p>
+      <input type="hidden" name="result_timing_mode" value="{{selected.rules.get('result_timing_mode','result_detected')}}">
     </div>
 
-    <div id="result-relative" class="gridform timing-panel">
+    <div class="gridform generation-selection">
+      <label>Feed-Varianten erzeugen<input type="number" name="result_feed_generation_count" min="0" max="10" value="{{selected.rules.get('result_feed_generation_count',selected.rules.get('result_feed_output_count',1))}}"></label>
+      <label>Feed-Varianten standardmäßig auswählen<input type="number" name="result_feed_publish_count" min="0" max="10" value="{{selected.rules.get('result_feed_publish_count',selected.rules.get('result_feed_output_count',1))}}"></label>
+      <label>Story-Varianten erzeugen<input type="number" name="result_story_generation_count" min="0" max="10" value="{{selected.rules.get('result_story_generation_count',selected.rules.get('result_story_output_count',story_output_defaults.get('result',1)))}}"></label>
+      <label>Story-Varianten standardmäßig auswählen<input type="number" name="result_story_publish_count" min="0" max="10" value="{{selected.rules.get('result_story_publish_count',selected.rules.get('result_story_output_count',story_output_defaults.get('result',1)))}}"></label>
+    </div>
+    <div id="result-relative" class="gridform timing-panel" hidden>
       <label>Richtung zum Anpfiff
         <select name="result_offset_direction"><option value="before" {% if selected.rules.get('result_offset_direction')=='before' %}selected{% endif %}>vor dem Anpfiff</option><option value="after" {% if selected.rules.get('result_offset_direction','after')=='after' %}selected{% endif %}>nach dem Anpfiff</option></select>
       </label>
       <label>Abstand in Minuten<input type="number" name="result_offset_minutes" min="0" max="43200" value="{{selected.rules.get('result_offset_minutes',120)}}"></label>
     </div>
 
-    <div id="result-weekday" class="timing-panel">
+    <div id="result-weekday" class="timing-panel" hidden>
       <h3>Feed-Termin nach Wochentag des Spiels</h3>
       <div class="schedule-grid">
       {% for key,label in weekday_options %}
@@ -195,64 +226,100 @@
   <button>Alle Regeln speichern</button>
 </form>
 
-<section>
-  <h2>Story-Veröffentlichungszeitpunkt hinzufügen</h2>
-  <p>Ein Zeitpunkt legt fest, <strong>welche Story-Ausgabe</strong> wann veröffentlicht wird. Mehrere Zeitpunkte dürfen dieselbe Ausgabe wiederverwenden.</p>
-  <form method="post" action="/rules/{{selected.id}}/stories" class="gridform" id="story-rule-form">
-    <input type="hidden" name="csrf_token" value="{{csrf}}">
-    <label>Name<input name="name" required placeholder="z. B. Freitag 18:30 – Story 1"></label>
-    <label>Beitragstyp<select name="post_type" id="story-post-type"><option value="announcement">Ankündigung</option><option value="reminder">Erinnerung</option><option value="result">Ergebnis</option></select></label>
-    <label>Zu veröffentlichende Story-Ausgabe
-      <select name="media_slot" id="story-media-slot">
-        {% for slot in range(1,11) %}<option value="{{slot}}">Story-Ausgabe {{slot}}</option>{% endfor %}
-      </select>
-      <small>Die maximal verfügbare Zahl wird oben je Beitragstyp festgelegt.</small>
-    </label>
-    <label>Zeitmodell<select name="timing_mode" id="story-timing-mode"><option value="relative">Relativ zum Bezugspunkt</option><option value="weekday_fixed">Zieltag und Uhrzeit je Spiel-Wochentag</option></select></label>
+<section id="publication-rules" class="publication-rule-manager">
+  <h2>Veröffentlichungspläne</h2>
+  <p>Jede Karte gilt nur für den angegebenen Spielwochentag. Nicht angelegte Tage bleiben bewusst ohne Termin; die Inhalte werden trotzdem erzeugt und müssen dann manuell geplant werden.</p>
 
-    <div id="story-relative" class="timing-panel gridform full-span">
-      <label>Bezug<select name="reference"><option value="kickoff">Anpfiff</option><option value="planned_end">Geplantes Ende</option><option value="result_detected">Ergebniserkennung</option><option value="approval">Freigabe</option></select></label>
-      <label>Richtung<select name="direction"><option value="before">vorher</option><option value="after">nachher</option></select></label>
-      <label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" value="0"></label>
-      <label>Optionale feste Uhrzeit<input name="fixed_time" type="time"><small>Ersetzt nur die Uhrzeit des relativ berechneten Tages.</small></label>
-      <label><input type="checkbox" name="next_day" value="true"> Zusätzlich auf den Folgetag verschieben</label>
-    </div>
-
-    <fieldset id="story-weekday" class="timing-panel full-span">
-      <legend>Zieltag und Uhrzeit je Wochentag des Spiels</legend>
-      <div class="schedule-grid">
-      {% for key,label in weekday_options %}
-        <fieldset>
-          <legend>Spiel am {{label}}</legend>
-          <label>Story veröffentlichen am
-            <select name="target_{{weekday_names[key|int]}}">
-              {% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if target_key==key %}selected{% endif %}>{{target_label}}</option>{% endfor %}
-            </select>
-          </label>
-          <label>Uhrzeit<input name="weekday_{{weekday_names[key|int]}}" type="time"></label>
-        </fieldset>
-      {% endfor %}
-      </div>
-    </fieldset>
-
-    <label>HTML/CSS-Fallbackvorlage<input name="template" value="default-story" required></label>
-    <label>Zielseite<select name="instagram_page_id"><option value="">Mannschaftsstandard</option>{% for p in pages %}<option value="{{p.id}}">{{p.display_name}}</option>{% endfor %}</select></label>
-    <label><input type="checkbox" name="reuse_media" value="true"> Dieselbe Datei bei wiederholter Verwendung dieser Ausgabe nutzen</label>
-    <label>Sortierung<input type="number" name="sort_order" value="0"></label>
-    <button>Zeitpunkt hinzufügen</button>
-  </form>
-
-  <table>
-    <tr><th>Name</th><th>Typ</th><th>Story</th><th>Zeitmodell</th><th>Fallback</th><th>Aktion</th></tr>
-    {% for x in stories %}
-    <tr>
-      <td>{{x.name}}</td><td>{{x.post_type}}</td><td>Ausgabe {{x.media_slot or 1}}</td>
-      <td>{% if x.timing_mode=='weekday_fixed' %}Zieltag/Uhrzeit je Spieltag{% else %}{{x.reference}} / {{x.direction}} / {{x.offset_minutes}} min{% if x.fixed_time %}, {{x.fixed_time}} Uhr{% endif %}{% endif %}</td>
-      <td>{{x.template}}</td>
-      <td><form method="post" action="/rules/{{selected.id}}/stories/{{x.id}}/delete" onsubmit="return confirm('Story-Zeitpunkt wirklich löschen? Bereits erzeugte Beiträge und Veröffentlichungsaufträge bleiben unverändert.');"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Löschen</button></form></td>
-    </tr>
+  {% if publication_rule_cards %}
+  <div class="weekday-rule-grid">
+    {% for card in publication_rule_cards %}
+    <article class="weekday-rule-card">
+      <header>
+        <div><strong>{% if card.weekday is none %}Allgemeine Regeln{% else %}Spiel am {{card.label}}{% endif %}</strong><small>{{card.slots|length}} Veröffentlichung{% if card.slots|length != 1 %}en{% endif %}</small></div>
+      </header>
+      <ol class="rule-timeline">
+        {% for slot in card.slots %}
+        <li>
+          <span class="timeline-dot" aria-hidden="true"></span>
+          <div>
+            <strong>{{slot.summary}}</strong>
+            <small>
+              {% if slot.post_type=='announcement' %}Ankündigung{% elif slot.post_type=='reminder' %}Erinnerung{% else %}Ergebnis{% endif %}
+              · {% if slot.media_kind=='feed' %}Feed{% else %}Story{% endif %}
+              · Variante {{slot.variant_number}}
+            </small>
+            <span>{{slot.label}}</span>
+            <details>
+              <summary>Regel bearbeiten</summary>
+              <form method="post" action="/rules/{{selected.id}}/publication-slots" class="gridform publication-slot-form">
+                <input type="hidden" name="csrf_token" value="{{csrf}}">
+                <input type="hidden" name="expected_team_version" value="{{selected.version}}">
+                <input type="hidden" name="slot_key" value="{{slot.slot_key}}">
+                <label>Bezeichnung<input name="label" maxlength="160" value="{{slot.label}}" required></label>
+                <label>Inhalt<select name="post_type"><option value="announcement" {% if slot.post_type=='announcement' %}selected{% endif %}>Spielankündigung</option><option value="reminder" {% if slot.post_type=='reminder' %}selected{% endif %}>Erinnerung</option><option value="result" {% if slot.post_type=='result' %}selected{% endif %}>Ergebnis</option></select></label>
+                <label>Format<select name="media_kind"><option value="feed" {% if slot.media_kind=='feed' %}selected{% endif %}>Feed</option><option value="story" {% if slot.media_kind=='story' %}selected{% endif %}>Story</option></select></label>
+                <label>Verwendete Variante<input type="number" name="variant_number" min="1" max="10" value="{{slot.variant_number}}" required></label>
+                <label>Gilt für Spiel am<select name="match_weekday"><option value="">Alle Spieltage</option>{% for key,label in weekday_options %}<option value="{{key}}" {% if slot.match_weekday == key|int %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
+                <label>Zeitmodell<select name="timing_model" class="slot-timing-model"><option value="weekday_fixed" {% if slot.timing_model=='weekday_fixed' %}selected{% endif %}>Kalenderbasiert</option><option value="relative" {% if slot.timing_model=='relative' %}selected{% endif %}>Relativ zum Bezugspunkt</option><option value="result_detected" {% if slot.timing_model=='result_detected' %}selected{% endif %}>Nach bestätigtem Ergebnis</option><option value="manual" {% if slot.timing_model=='manual' %}selected{% endif %}>Manuelle Planung</option></select></label>
+                <div class="slot-calendar-fields gridform full-span">
+                  <label>Veröffentlichen am<select name="target_weekday"><option value="">Bitte wählen</option>{% for key,label in weekday_options %}<option value="{{key}}" {% if slot.target_weekday == key|int %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
+                  <label>Uhrzeit<input type="time" name="local_time" value="{{slot.local_time or ''}}"></label>
+                </div>
+                <div class="slot-relative-fields gridform full-span">
+                  <label>Bezug<select name="reference"><option value="kickoff" {% if slot.reference=='kickoff' %}selected{% endif %}>Anpfiff</option><option value="planned_end" {% if slot.reference=='planned_end' %}selected{% endif %}>Geplantes Spielende</option><option value="result_detected" {% if slot.reference=='result_detected' %}selected{% endif %}>Bestätigtes Ergebnis</option><option value="approval" {% if slot.reference=='approval' %}selected{% endif %}>Freigabe</option></select></label>
+                  <label>Richtung<select name="direction"><option value="before" {% if slot.direction=='before' %}selected{% endif %}>vorher</option><option value="after" {% if slot.direction=='after' %}selected{% endif %}>nachher</option></select></label>
+                  <label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" max="43200" value="{{slot.offset_minutes or 0}}"></label>
+                </div>
+                <label>Zielseite<select name="instagram_page_id"><option value="">Mannschaftsstandard</option>{% for p in pages %}<option value="{{p.id}}" {% if slot.instagram_page_id==p.id %}selected{% endif %}>{{p.display_name}}</option>{% endfor %}</select></label>
+                <label>Sortierung<input type="number" name="sort_order" value="{{slot.sort_order or 0}}"></label>
+                <label><input type="checkbox" name="reuse_media" value="true" {% if slot.reuse_media %}checked{% endif %}> Dieselbe Datei darf in mehreren Slots verwendet werden</label>
+                <label class="full-span">Optionale technische Fallbackvorlage<input name="template" value="{{slot.template or ''}}" maxlength="100"></label>
+                <button>Änderungen speichern</button>
+              </form>
+              <form method="post" action="/rules/{{selected.id}}/publication-slots/{{slot.slot_key}}/delete" onsubmit="return confirm('Diese Veröffentlichungsregel wirklich löschen? Bereits erzeugte oder veröffentlichte Inhalte bleiben unverändert.');">
+                <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}"><button class="danger">Regel löschen</button>
+              </form>
+            </details>
+          </div>
+        </li>
+        {% endfor %}
+        {% if card.weekday is not none %}<li class="match-marker"><span class="timeline-dot"></span><strong>SPIEL · {{card.label}}</strong></li>{% endif %}
+      </ol>
+      {% if card.weekday is not none %}
+      <details>
+        <summary>Auf anderen Wochentag kopieren</summary>
+        <form method="post" action="/rules/{{selected.id}}/publication-weekdays/copy" class="gridform" onsubmit="return confirm('Die angezeigten {{card.slots|length}} Regeln wirklich kopieren? Bestehende Zielregeln werden nur bei gesetzter Auswahl ersetzt.');">
+          <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}"><input type="hidden" name="source_weekday" value="{{card.weekday}}">
+          <label>Zielwochentag<select name="target_weekday">{% for key,label in weekday_options if key|int != card.weekday %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label>
+          <label><input type="checkbox" name="replace_existing" value="true"> Bestehende Regeln des Zieltags nach Bestätigung ersetzen</label>
+          <button class="secondary">{{card.slots|length}} Regeln kopieren</button>
+        </form>
+      </details>
+      {% endif %}
+    </article>
     {% endfor %}
-  </table>
+  </div>
+  {% else %}<div class="notice">Noch keine Veröffentlichungstermine hinterlegt. Beiträge werden erzeugt, erhalten aber den Status „Manuelle Planung erforderlich“.</div>{% endif %}
+
+  <details class="add-rule-panel" open>
+    <summary>Veröffentlichungsregel hinzufügen</summary>
+    <form method="post" action="/rules/{{selected.id}}/publication-slots" class="gridform publication-slot-form">
+      <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}">
+      <label>Bezeichnung<input name="label" maxlength="160" placeholder="z. B. Story am Vorabend" required></label>
+      <label>Inhalt<select name="post_type"><option value="announcement">Spielankündigung</option><option value="reminder">Erinnerung</option><option value="result">Ergebnis</option></select></label>
+      <label>Format<select name="media_kind"><option value="feed">Feed</option><option value="story">Story</option></select></label>
+      <label>Verwendete Variante<input type="number" name="variant_number" min="1" max="10" value="1" required><small>Eine bereits erzeugte Alternative; die Auswahl selbst verursacht keine KI-Kosten.</small></label>
+      <label>Gilt für Spiel am<select name="match_weekday" required><option value="">Bitte wählen</option>{% for key,label in weekday_options %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label>
+      <label>Zeitmodell<select name="timing_model" class="slot-timing-model"><option value="weekday_fixed">Kalenderbasiert</option><option value="relative">Relativ zum Bezugspunkt</option><option value="result_detected">Nach bestätigtem Ergebnis</option><option value="manual">Manuelle Planung</option></select></label>
+      <div class="slot-calendar-fields gridform full-span"><label>Veröffentlichen am<select name="target_weekday"><option value="">Bitte wählen</option>{% for key,label in weekday_options %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label><label>Uhrzeit<input type="time" name="local_time"></label></div>
+      <div class="slot-relative-fields gridform full-span"><label>Bezug<select name="reference"><option value="kickoff">Anpfiff</option><option value="planned_end">Geplantes Spielende</option><option value="result_detected">Bestätigtes Ergebnis</option><option value="approval">Freigabe</option></select></label><label>Richtung<select name="direction"><option value="before">vorher</option><option value="after">nachher</option></select></label><label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" max="43200" value="0"></label></div>
+      <label>Zielseite<select name="instagram_page_id"><option value="">Mannschaftsstandard</option>{% for p in pages %}<option value="{{p.id}}">{{p.display_name}}</option>{% endfor %}</select></label>
+      <label>Sortierung<input type="number" name="sort_order" value="0"></label>
+      <label><input type="checkbox" name="reuse_media" value="true"> Dieselbe Datei darf in mehreren Slots verwendet werden</label>
+      <label class="full-span">Optionale technische Fallbackvorlage<input name="template" maxlength="100"></label>
+      <button>Regel hinzufügen</button>
+    </form>
+  </details>
 </section>
 
 <style>
@@ -261,52 +328,37 @@
   .schedule-grid fieldset { margin: 0; }
   .full-span { grid-column: 1 / -1; }
   #publishing-rules-form > section { margin-top: 1rem; }
+  .weekday-rule-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:1rem; }
+  .weekday-rule-card { border:1px solid #d9e0ec; border-radius:.75rem; padding:1rem; background:#fff; }
+  .weekday-rule-card header div { display:flex; justify-content:space-between; gap:.75rem; align-items:baseline; }
+  .weekday-rule-card small { color:#526079; }
+  .rule-timeline { list-style:none; padding:0 0 0 1.1rem; border-left:2px solid #cad5e7; }
+  .rule-timeline li { position:relative; margin:0 0 1rem; padding-left:.8rem; }
+  .timeline-dot { position:absolute; width:.7rem; height:.7rem; border-radius:50%; background:#2456db; left:-1.53rem; top:.35rem; }
+  .match-marker .timeline-dot { background:#172b58; }
+  .rule-timeline li > div { display:grid; gap:.18rem; }
+  .publication-slot-form .slot-calendar-fields[hidden],
+  .publication-slot-form .slot-relative-fields[hidden] { display:none !important; }
+  .add-rule-panel { margin-top:1rem; }
 </style>
 <script>
 (() => {
-  const toggle = (id, visible) => {
-    const node = document.getElementById(id);
-    if (!node) return;
-    node.hidden = !visible;
+  const refreshSlotForm = (form) => {
+    const mode = form.querySelector('.slot-timing-model')?.value || 'manual';
+    const calendar = form.querySelector('.slot-calendar-fields');
+    const relative = form.querySelector('.slot-relative-fields');
+    if (calendar) calendar.hidden = mode !== 'weekday_fixed';
+    if (relative) relative.hidden = !['relative', 'result_detected'].includes(mode);
   };
-  const refreshAnnouncement = () => {
-    const mode = document.getElementById('announcement-timing-mode').value;
-    toggle('announcement-relative', mode === 'relative');
-    toggle('announcement-weekday', mode === 'weekday_fixed');
-  };
-  const refreshResult = () => {
-    const mode = document.getElementById('result-timing-mode').value;
-    toggle('result-relative', mode === 'relative');
-    toggle('result-weekday', mode === 'weekday_fixed');
-    toggle('result-minimum-wait', mode !== 'result_detected');
-  };
-  const refreshReminder = () => {
-    const mode = document.getElementById('reminder-timing-mode').value;
-    toggle('reminder-relative', mode === 'relative');
-    toggle('reminder-weekday', mode === 'weekday_fixed');
-  };
-  const counts = {
-    announcement: {{selected.rules.get('announcement_story_output_count',story_output_defaults.get('announcement',1))}},
-    reminder: {{selected.rules.get('reminder_story_output_count',story_output_defaults.get('reminder',1))}},
-    result: {{selected.rules.get('result_story_output_count',story_output_defaults.get('result',1))}}
-  };
-  const refreshStory = () => {
-    const mode = document.getElementById('story-timing-mode').value;
-    toggle('story-relative', mode === 'relative');
-    toggle('story-weekday', mode === 'weekday_fixed');
-    const type = document.getElementById('story-post-type').value;
-    const max = counts[type] || 0;
-    const select = document.getElementById('story-media-slot');
-    [...select.options].forEach(option => option.hidden = Number(option.value) > max);
-    if (Number(select.value) > max) select.value = max > 0 ? '1' : '';
-    select.disabled = max === 0;
-  };
-  document.getElementById('announcement-timing-mode').addEventListener('change', refreshAnnouncement);
-  document.getElementById('result-timing-mode').addEventListener('change', refreshResult);
-  document.getElementById('reminder-timing-mode').addEventListener('change', refreshReminder);
-  document.getElementById('story-timing-mode').addEventListener('change', refreshStory);
-  document.getElementById('story-post-type').addEventListener('change', refreshStory);
-  refreshAnnouncement(); refreshReminder(); refreshResult(); refreshStory();
+  document.querySelectorAll('.publication-slot-form').forEach(form => {
+    const mode = form.querySelector('.slot-timing-model');
+    mode?.addEventListener('change', () => refreshSlotForm(form));
+    refreshSlotForm(form);
+  });
+  document.querySelectorAll('input[name$="_output_count"]').forEach(input => {
+    const legacyLabel = input.closest('label');
+    if (legacyLabel) legacyLabel.hidden = true;
+  });
 })();
 </script>
 {% endif %}

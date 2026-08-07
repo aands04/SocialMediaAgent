@@ -234,3 +234,9 @@ vereinsweise oder plattformweit rein lesend abgleichen; automatische
 Korrekturen oder Löschungen erfolgen dabei nicht. Die vollständige Betriebs-
 und Rollout-Dokumentation beginnt bei
 [`docs/SAAS_ADMINISTRATION.md`](docs/SAAS_ADMINISTRATION.md).
+
+Generierte Feed-/Story-Ausgaben besitzen eine auswählbare, unveränderliche
+Versionshistorie; Freigaben binden konkrete Text- und Medienversionen. Mehrere
+Ausgaben und flexible Veröffentlichungsslots werden getrennt konfiguriert. Die
+Bedienung, Abwärtskompatibilität und bewussten Grenzen beschreibt
+[`docs/MEDIA_VARIANTS_AND_RULES_PLAN.md`](docs/MEDIA_VARIANTS_AND_RULES_PLAN.md).

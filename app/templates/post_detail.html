@@ -1,7 +1,32 @@
 {% extends 'base.html' %}
 {% block content %}
-<h1>Beitrag prüfen</h1>
-<p>Status: <span class="badge">{{item.status.value}}</span> · Beitragsversion {{item.version}}</p>
+{% set is_manual=item.design_snapshot.get('source') == 'manual_upload' %}
+<section class="review-hero">
+  <div>
+    <p class="eyebrow">Beitragsprüfung</p>
+    <h1>{% if item.post_type == 'result' %}Ergebnismeldung{% elif item.post_type == 'reminder' %}Spielerinnerung{% elif item.design_snapshot.get('source') == 'manual_upload' %}Manueller Beitrag{% else %}Spielankündigung{% endif %}</h1>
+    <p class="review-match">
+      {% if aggregate_bundle %}Gemeinsamer Spieltag · {{bundle_posts|length}} Spiele
+      {% elif detail_game %}{{detail_game.home_team}} – {{detail_game.away_team}} · {{detail_game.kickoff|berlin}}
+      {% elif detail_team %}{{detail_team.display_name}}
+      {% else %}Beitrag ohne Spielbezug{% endif %}
+    </p>
+  </div>
+  <div class="review-status"><span class="badge">{{publication_summary}}</span><small>Beitragsversion {{item.version}}</small></div>
+  <dl class="review-facts">
+    <div><dt>Mannschaft</dt><dd>{{detail_team.display_name if detail_team else '–'}}</dd></div>
+    <div><dt>Instagram</dt><dd>{% if detail_page %}@{{detail_page.username}}{% else %}Keine Zielseite{% endif %}</dd></div>
+    <div><dt>Nächster Termin</dt><dd>{{next_publication|berlin if next_publication else 'Manuell festlegen'}}</dd></div>
+    <div><dt>Freigabe</dt><dd>{{status_labels.get(item.status.value,item.status.value)}}</dd></div>
+  </dl>
+  <div class="review-actions" aria-label="Beitragsaktionen">
+    {% if can_approve %}<a class="button approve" href="#approval">Beitrag freigeben</a>{% endif %}
+    {% if not is_manual and can_generate %}<a class="button" href="#ai-review">Mit KI überarbeiten</a>{% endif %}
+    <a class="button secondary" href="#caption">Text bearbeiten</a>
+    <a class="button secondary" href="#publications">Veröffentlichungszeiten</a>
+    <a class="button secondary" href="#more-actions">Weitere Aktionen</a>
+  </div>
+</section>
 {% if aggregate_bundle %}
 <div class="notice">
   <strong>Gemeinsamer Spieltagsbeitrag:</strong>
@@ -18,8 +43,9 @@
 </div>
 {% endif %}
 {% endif %}
-{% set is_manual=item.design_snapshot.get('source') == 'manual_upload' %}
-{% if item.critical_warnings %}<div class="alert"><strong>Kritische Hinweise:</strong> {{item.critical_warnings|join('; ')}}</div>{% endif %}
+<details class="technical-review">
+<summary>Technische Prüfung und Referenzen anzeigen</summary>
+{% if item.critical_warnings %}<details class="alert"><summary><strong>{{item.critical_warnings|length}} kritische Hinweise anzeigen</strong></summary><ul>{% for warning in item.critical_warnings %}<li>{{warning}}</li>{% endfor %}</ul></details>{% endif %}
 {% if is_manual %}
 <div class="notice">
   <strong>Manuell erstellter Beitrag:</strong> Bild und Text wurden unverändert durch einen Benutzer bereitgestellt.
@@ -83,7 +109,8 @@
 <div class="warning">Legacy-Beitrag ohne eingefrorene Logoversion. Logos zuordnen und anschließend kontrolliert neu zusammensetzen.</div>
 {% endif %}
 {% endif %}
-<h2>Visuelle Prüfübersicht</h2>
+</details>
+<h2 id="media">Medien für die Veröffentlichung</h2>
 <div class="media-grid">
   {% for x in jobs %}
   {% if x.kind == 'carousel' %}
@@ -102,6 +129,63 @@
   {% endif %}
   {% endfor %}
 </div>
+{% if media_catalog %}
+<section>
+  <h2>Medienausgaben und Versionen</h2>
+  <p>Jede Karte ist eine eigenständige Ausgabe. Eine neue KI-Version ersetzt ältere Dateien nicht. Die markierte Version wird bei der nächsten Freigabe verbindlich eingefroren.</p>
+  {% for media_kind in ['feed', 'story'] %}
+  {% set kind_entries=media_catalog|selectattr('slot.media_kind','equalto',media_kind)|list %}
+  {% if kind_entries %}
+  <h3>{% if media_kind == 'feed' %}Feed und Karussellpositionen{% else %}Storys{% endif %}</h3>
+  <div class="media-version-grid">
+  {% for entry in kind_entries %}
+    {% set slot=entry.slot %}
+    {% set selected=entry.versions|selectattr('id','equalto',slot.selected_version_id)|first %}
+    <article class="media-version-card">
+      <header>
+        <div><strong>{{slot.label}}</strong>{% if entry.team %}<small>{{entry.team.display_name}}</small>{% endif %}</div>
+        <span class="badge">{{slot.media_kind|upper}} · Variante {{slot.variant_number}}</span>
+      </header>
+      {% if can_generate %}<p><a class="button secondary choose-ai-slot" href="#ai-review" data-slot-target="ai-slot-{{slot.id}}">Diese Ausgabe neu generieren</a></p>{% endif %}
+      {% if selected %}
+      <p><span class="badge">{% if slot.selection_mode == 'auto_latest' %}Automatisch neueste Version{% else %}Manuell festgelegt{% endif %}</span></p>
+      {% if can_edit and slot.selection_mode == 'manual' %}
+      <form method="post" action="/posts/{{entry.post.id}}/media-slots/{{slot.id}}/auto-latest">
+        <input type="hidden" name="csrf_token" value="{{csrf}}">
+        <input type="hidden" name="post_version" value="{{entry.post.version}}">
+        <button class="secondary">Automatisch neueste Version verwenden</button>
+      </form>
+      {% endif %}
+      <img src="/posts/{{entry.post.id}}/versions/{{selected.id}}" alt="{{slot.label}}, ausgewählte Version {{selected.version_number}}">
+      <p><strong>Ausgewählt: Version {{selected.version_number}}</strong> · {{selected.width}} × {{selected.height}} · {{selected.created_at|berlin}}</p>
+      {% else %}<div class="alert">Für diese Ausgabe ist keine verwendbare Version ausgewählt.</div>{% endif %}
+      <details>
+        <summary>{{entry.versions|length}} Version{% if entry.versions|length != 1 %}en{% endif %} vergleichen und auswählen</summary>
+        <div class="version-strip">
+        {% for media_version in entry.versions %}
+          <article class="version-tile {% if media_version.id==slot.selected_version_id %}selected{% endif %}">
+            <img src="/posts/{{entry.post.id}}/versions/{{media_version.id}}" alt="Version {{media_version.version_number}} von {{slot.label}}">
+            <strong>Version {{media_version.version_number}}</strong>
+            <small>{{media_version.created_at|berlin}} · {{media_version.validation_status}}</small>
+            {% if can_edit and media_version.id!=slot.selected_version_id %}
+            <form method="post" action="/posts/{{entry.post.id}}/media-slots/{{slot.id}}/select">
+              <input type="hidden" name="csrf_token" value="{{csrf}}">
+              <input type="hidden" name="post_version" value="{{entry.post.version}}">
+              <input type="hidden" name="version_id" value="{{media_version.id}}">
+              <button class="secondary">Diese Version verwenden</button>
+            </form>
+            {% else %}<span class="selection-label">Aktiv</span>{% endif %}
+          </article>
+        {% endfor %}
+        </div>
+      </details>
+    </article>
+  {% endfor %}
+  </div>
+  {% endif %}
+  {% endfor %}
+</section>
+{% endif %}
 {% if aggregate_bundle and carousel_job %}
 <section>
   <h2>Reihenfolge des Karussells</h2>
@@ -126,30 +210,41 @@
 </section>
 {% endif %}
 {% if not is_manual and can_generate %}
-<form method="post" action="/posts/{{item.id}}/ai-revision">
+<form id="ai-review" method="post" action="/posts/{{item.id}}/ai-revision">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
   <fieldset>
-    <legend>KI gezielt mit Änderungen beauftragen</legend>
+    <legend>Mit KI überarbeiten</legend>
     <p>Beschreibe konkret, was am Begleittext und/oder an den Grafiken anders werden soll. Die bestehenden Fakten-, Logo- und Sicherheitsregeln bleiben verbindlich.</p>
     <label>Änderungsanweisung
       <textarea name="instruction" rows="5" minlength="10" maxlength="2000" required placeholder="Beispiel: Verwende eine emotionalere Bildstimmung mit Flutlicht. Der Spieler soll zentraler stehen. Formuliere den Begleittext enthusiastischer, ohne neue Fakten zu erfinden."></textarea>
     </label>
-    <p><strong>Genau auswählen, was neu erstellt werden soll:</strong></p>
+    <p><strong>Inhalte auswählen:</strong></p>
     <label><input type="checkbox" name="revise_text" value="true"> Begleittext durch KI überarbeiten</label>
-    {% for x in jobs if x.kind=='feed' and x.status.value!='published' and job_posts.get(x.id,item).id==item.id %}
-      <label><input type="checkbox" name="revise_feed" value="true"> Feed-Grafik {{x.scheduled_at|berlin}} durch KI neu erzeugen</label>
+    <div class="review-selection-tools">
+      <button type="button" class="secondary" id="select-all-ai-outputs">Alle Grafiken auswählen</button>
+      <button type="button" class="secondary" id="clear-all-ai-outputs">Auswahl aufheben</button>
+    </div>
+    {% for entry in media_catalog %}
+      <label><input id="ai-slot-{{entry.slot.id}}" class="ai-output-choice" type="checkbox" name="media_slot_ids" value="{{entry.slot.id}}"> {{entry.slot.label}}{% if entry.team %} · {{entry.team.display_name}}{% endif %} neu erzeugen</label>
     {% endfor %}
-    {% for x in jobs if x.kind=='story' and x.status.value!='published' and job_posts.get(x.id,item).id==item.id %}
-      <label><input type="checkbox" name="story_job_ids" value="{{x.id}}"> Story {{x.scheduled_at|berlin}} durch KI neu erzeugen</label>
-    {% endfor %}
-    <label>Spielerbild für die neue Bildversion
-      <select name="media_asset_id">
-        {% if current_media_asset %}<option value="{{current_media_asset.id}}" selected>Bisheriges Bild verwenden: {{current_media_asset.filename}}</option>{% endif %}
-        {% for asset in alternative_media_assets %}<option value="{{asset.id}}">Anderes, unverbrauchtes Bild verwenden: {{asset.filename}}</option>{% endfor %}
-      </select>
-    </label>
-    {% if not alternative_media_assets %}<small>Aktuell ist kein anderes unverbrauchtes Spielerbild verfügbar.</small>{% endif %}
-    <button>KI-Änderungsauftrag starten</button>
+    <fieldset class="player-image-choices">
+      <legend>Spielerbild je Mannschaft</legend>
+      <p>Das gewählte Bild wird nur für die ausgewählten Grafiken der jeweiligen Mannschaft verwendet.</p>
+      {% for member in bundle_posts %}
+      {% set member_team=bundle_member_teams.get(member.id) %}
+      {% set member_asset=current_media_assets_by_post.get(member.id) %}
+      {% set alternatives=alternative_media_assets_by_post.get(member.id,[]) %}
+      <label>{{member_team.display_name if member_team else 'Mannschaft'}}
+        <select name="media_asset_choices">
+          {% if member_asset %}<option value="{{member.id}}:{{member_asset.id}}" selected>Bisheriges Bild verwenden: {{member_asset.filename}}</option>{% endif %}
+          {% for asset in alternatives %}<option value="{{member.id}}:{{asset.id}}">Anderes, unverbrauchtes Bild verwenden: {{asset.filename}}</option>{% endfor %}
+        </select>
+      </label>
+      {% if not member_asset and not alternatives %}<small>Für diese Mannschaft ist kein verfügbares Spielerbild vorhanden.</small>{% endif %}
+      {% endfor %}
+    </fieldset>
+    <div class="quota-estimate" aria-live="polite">Voraussichtlicher Verbrauch: <strong id="ai-image-estimate">0</strong> KI-Bilder{% if item.text %} und optional 1 KI-Text{% endif %}. Abgerechnet werden nur technisch verwendbare Ergebnisse.</div>
+    <button>KI-Überarbeitung starten</button>
   </fieldset>
 </form>
 {% if item.design_snapshot.get('ai_revisions') %}
@@ -162,21 +257,6 @@
   </ol>
 </details>
 {% endif %}
-<form method="post" action="/posts/{{item.id}}/rerender">
-  <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
-  <fieldset><legend>Grafiken neu erzeugen</legend><p>Wähle genau die neu zu erzeugenden Grafiken aus:</p>
-    {% for x in jobs if x.kind=='feed' and x.status.value!='published' and job_posts.get(x.id,item).id==item.id %}<label><input type="checkbox" name="rerender_feed" value="true"> Feed {{x.scheduled_at|berlin}}</label>{% endfor %}
-    {% for x in jobs if x.kind=='story' and x.status.value!='published' and job_posts.get(x.id,item).id==item.id %}<label><input type="checkbox" name="story_job_ids" value="{{x.id}}"> Story {{x.scheduled_at|berlin}}</label>{% endfor %}
-    <label>Spielerbild für die Neugenerierung
-      <select name="media_asset_id">
-        {% if current_media_asset %}<option value="{{current_media_asset.id}}" selected>Bisheriges Bild beibehalten: {{current_media_asset.filename}}</option>{% endif %}
-        {% for asset in alternative_media_assets %}<option value="{{asset.id}}">Anderes Bild verwenden: {{asset.filename}}</option>{% endfor %}
-      </select>
-    </label>
-    {% if not alternative_media_assets %}<small>Aktuell ist kein anderes unverbrauchtes Spielerbild verfügbar.</small>{% endif %}
-    <button>Grafiken neu erzeugen</button>
-  </fieldset>
-</form>
 {% if logo_recompose.feed.available %}
 <form method="post" action="/posts/{{item.id}}/recompose-logos">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
@@ -206,18 +286,55 @@
 </div>
 {% endif %}
 {% endif %}
-{% if can_edit %}<form method="post" action="/posts/{{item.id}}/text">
-  <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
-  <label>Begleittext<textarea name="text" rows="8" required>{{item.text}}</textarea></label><button>Text versioniert speichern</button>
-</form>{% else %}<section><h2>Begleittext</h2><p style="white-space:pre-wrap">{{item.text}}</p></section>{% endif %}
-<h2>Veröffentlichungsaufträge</h2>
+<section id="caption" class="caption-panel">
+  <h2>Begleittext</h2>
+  <div class="caption-preview">{{item.text or 'Noch kein Begleittext vorhanden.'}}</div>
+  {% if can_edit %}
+  <details>
+    <summary>Text bearbeiten</summary>
+    <form method="post" action="/posts/{{item.id}}/text">
+      <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
+      <label>Begleittext<textarea name="text" rows="8" required>{{item.text}}</textarea></label>
+      <button>Als neue Textversion speichern</button>
+    </form>
+  </details>
+  {% endif %}
+</section>
+{% if text_versions.get(item.id) %}
+<details class="text-version-history">
+  <summary>Textversionen vergleichen ({{text_versions[item.id]|length}})</summary>
+  <p><span class="badge">{% if item.text_selection_mode == 'auto_latest' %}Automatisch neueste Textversion{% else %}Textversion manuell festgelegt{% endif %}</span></p>
+  {% if can_edit and item.text_selection_mode == 'manual' %}
+  <form method="post" action="/posts/{{item.id}}/text-versions/auto-latest">
+    <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="post_version" value="{{item.version}}">
+    <button class="secondary">Automatisch neuesten Text verwenden</button>
+  </form>
+  {% endif %}
+  <div class="text-version-list">
+  {% for text_version in text_versions[item.id] %}
+    <article class="{% if text_version.id==item.selected_text_version_id %}selected{% endif %}">
+      <header><strong>Version {{text_version.version_number}}</strong><small>{{text_version.created_at|berlin}} · {{text_version.source}}</small></header>
+      <p>{{text_version.text}}</p>
+      {% if can_edit and text_version.id!=item.selected_text_version_id %}
+      <form method="post" action="/posts/{{item.id}}/text-versions/{{text_version.id}}/select">
+        <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="post_version" value="{{item.version}}">
+        <button class="secondary">Diese Textversion verwenden</button>
+      </form>
+      {% else %}<span class="selection-label">Aktiv</span>{% endif %}
+    </article>
+  {% endfor %}
+  </div>
+</details>
+{% endif %}
+<h2 id="publications">Geplante Veröffentlichungen</h2>
 {% if can_approve %}<form id="approve-publication-jobs" method="post" action="/posts/{{item.id}}/approve">
   <input type="hidden" name="csrf_token" value="{{csrf}}">
 </form>{% endif %}
-<table><tr><th>Freigeben</th><th>Typ</th>{% if aggregate_bundle %}<th>Mannschaft</th>{% endif %}<th>Zeitpunkt</th><th>Status</th><th>Medienprüfung</th></tr>
+{% if can_approve %}<div id="approval" class="approval-sticky"><div><strong>Bereit zur Veröffentlichung</strong><span>{{open_publication_count}} offen · {{published_publication_count}} bereits veröffentlicht</span></div><button form="approve-publication-jobs" class="approve">Ausgewählte Aufträge freigeben</button></div>{% endif %}
+<table><tr><th>Freigeben</th><th>Typ</th>{% if aggregate_bundle %}<th>Mannschaft</th>{% endif %}<th>Zeitpunkt</th><th>Status</th><th>Eingefrorene Versionen</th><th>Medienprüfung</th></tr>
   {% for x in jobs %}<tr class="{% if late_jobs.get(x.id) %}late{% endif %}">
-    <td>{% if can_approve %}<input form="approve-publication-jobs" type="checkbox" name="job_ids" value="{{x.id}}" checked>{% else %}—{% endif %}</td>
-    <td>{{x.kind}}</td>
+    <td>{% if can_approve and x.status.value!='published' %}<input form="approve-publication-jobs" type="checkbox" name="job_ids" value="{{x.id}}" checked>{% else %}—{% endif %}</td>
+    <td>{% if x.kind=='feed' %}Feed{% elif x.kind=='story' %}Story{% elif x.kind=='carousel' %}Karussell{% else %}{{x.kind}}{% endif %}</td>
     {% if aggregate_bundle %}<td>{{job_teams[x.id].display_name}}</td>{% endif %}
     <td>
       <strong>{{x.scheduled_at|berlin}}</strong>{% if late_jobs.get(x.id) %} <strong>verstrichen</strong>{% endif %}
@@ -236,27 +353,84 @@
       </details>
       {% endif %}
     </td>
-    <td>{{x.status.value}}</td><td>{{checks[x.id]}}</td>
+    <td><span class="badge">{{status_labels.get(x.status.value,x.status.value)}}</span>{% if x.approval_status and x.approval_status!=x.status.value %}<small>{{status_labels.get(x.approval_status,x.approval_status)}}</small>{% endif %}</td>
+    <td>
+      Bild{% if job_version_labels[x.id].media %} v{{job_version_labels[x.id].media}}{% else %}: Legacy{% endif %}<br>
+      Text{% if job_version_labels[x.id].text %} v{{job_version_labels[x.id].text}}{% else %}: Legacy{% endif %}<small>{{x.schedule_source}}</small>
+      {% if can_edit and x.status.value!='published' %}
+      {% for variant_row in publication_variant_choices.get(x.id,[]) if variant_row.choices|length > 1 %}
+      <details>
+        <summary>{{variant_row.label}}: vorhandene Alternative wählen</summary>
+        <form method="post" action="/posts/{{item.id}}/publications/{{x.id}}/variant">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <input type="hidden" name="post_version" value="{{item.version}}">
+          <input type="hidden" name="job_version" value="{{x.version}}">
+          {% if variant_row.media_item %}<input type="hidden" name="publication_media_item_id" value="{{variant_row.media_item.id}}">{% endif %}
+          <label>Variante
+            <select name="slot_id" required>
+              {% for choice in variant_row.choices %}
+              <option value="{{choice.slot.id}}" {% if choice.slot.id==variant_row.current_slot_id %}selected{% endif %}>
+                Variante {{choice.slot.variant_number}}{% if choice.slot.id==variant_row.current_slot_id %} – aktuell eingeplant{% endif %}
+              </option>
+              {% endfor %}
+            </select>
+          </label>
+          <button class="secondary">Ohne KI-Kosten übernehmen</button>
+        </form>
+      </details>
+      {% endfor %}
+      {% endif %}
+    </td>
+    <td>{{checks[x.id]}}</td>
   </tr>{% endfor %}
 </table>
-{% if can_approve %}
-  <button form="approve-publication-jobs" class="approve">Ausgewählte Aufträge ausdrücklich freigeben</button>
-{% if not aggregate_bundle %}<form method="post" action="/posts/{{item.id}}/reject">
-  <input type="hidden" name="csrf_token" value="{{csrf}}"><label>Ablehnungsgrund (optional)<input name="reason"></label><button class="danger">Ablehnen</button>
-</form>{% endif %}
-{% else %}
+{% if not can_approve %}
 <div class="notice">Dieser Beitrag wartet auf die Freigabe durch einen Redakteur oder Administrator.</div>
 {% endif %}
-{% if can_delete %}
-{% if item.status.value not in ['published','partially_published'] %}
-<form method="post" action="/posts/{{item.id}}/delete" onsubmit="return confirm('{% if aggregate_bundle %}Den gesamten unveröffentlichten gemeinsamen Spieltagsbeitrag einschließlich aller Teilbeiträge und Aufträge wirklich dauerhaft löschen?{% else %}Diesen unveröffentlichten Beitrag und seine Aufträge wirklich dauerhaft löschen?{% endif %}');">
-  <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
-  <input type="hidden" name="confirmation" value="BEITRAG LÖSCHEN">
-  <button class="danger">{% if aggregate_bundle %}Gemeinsamen Beitrag löschen{% else %}Beitrag löschen{% endif %}</button>
-  <small>{% if aggregate_bundle %}Alle noch vorhandenen, unveröffentlichten Teilbeiträge sowie ihre Feed- und Story-Aufträge werden gemeinsam gelöscht.{% else %}Nur vollständig unveröffentlichte Beiträge können gelöscht werden.{% endif %} Vor dem Löschen folgt eine Sicherheitsabfrage.</small>
-</form>
-{% else %}
-<div class="warning">Dieser Beitrag wurde bereits ganz oder teilweise veröffentlicht und kann deshalb nicht gelöscht werden.</div>
+{% if can_approve or can_delete %}
+<details id="more-actions" class="danger-zone">
+  <summary>Weitere Aktionen und Gefahrenbereich</summary>
+  {% if can_approve and not aggregate_bundle %}
+  <form method="post" action="/posts/{{item.id}}/reject">
+    <input type="hidden" name="csrf_token" value="{{csrf}}"><label>Ablehnungsgrund (optional)<input name="reason"></label><button class="danger">Beitrag ablehnen</button>
+  </form>
+  {% endif %}
+  {% if can_delete %}
+    {% if item.status.value not in ['published','partially_published'] %}
+    <form method="post" action="/posts/{{item.id}}/delete" onsubmit="return confirm('{% if aggregate_bundle %}Den gesamten unveröffentlichten gemeinsamen Spieltagsbeitrag einschließlich aller Teilbeiträge und Aufträge wirklich dauerhaft löschen?{% else %}Diesen unveröffentlichten Beitrag und seine Aufträge wirklich dauerhaft löschen?{% endif %}');">
+      <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
+      <input type="hidden" name="confirmation" value="BEITRAG LÖSCHEN">
+      <button class="danger">{% if aggregate_bundle %}Gemeinsamen Beitrag löschen{% else %}Beitrag löschen{% endif %}</button>
+      <small>{% if aggregate_bundle %}Alle noch vorhandenen, unveröffentlichten Teilbeiträge sowie ihre Feed- und Story-Aufträge werden gemeinsam gelöscht.{% else %}Nur vollständig unveröffentlichte Beiträge können gelöscht werden.{% endif %} Vor dem Löschen folgt eine Sicherheitsabfrage.</small>
+    </form>
+    {% else %}
+    <div class="warning">Dieser Beitrag wurde bereits ganz oder teilweise veröffentlicht und kann deshalb nicht gelöscht werden.</div>
+    {% endif %}
+  {% endif %}
+</details>
 {% endif %}
-{% endif %}
+<script>
+(() => {
+  const outputChoices = [...document.querySelectorAll('.ai-output-choice')];
+  const estimate = document.getElementById('ai-image-estimate');
+  const updateEstimate = () => {
+    if (estimate) estimate.textContent = String(outputChoices.filter(item => item.checked).length);
+  };
+  outputChoices.forEach(item => item.addEventListener('change', updateEstimate));
+  document.getElementById('select-all-ai-outputs')?.addEventListener('click', () => {
+    outputChoices.forEach(item => { item.checked = true; });
+    updateEstimate();
+  });
+  document.getElementById('clear-all-ai-outputs')?.addEventListener('click', () => {
+    outputChoices.forEach(item => { item.checked = false; });
+    updateEstimate();
+  });
+  document.querySelectorAll('.choose-ai-slot').forEach(link => link.addEventListener('click', () => {
+    const input = document.getElementById(link.dataset.slotTarget);
+    if (input) input.checked = true;
+    updateEstimate();
+  }));
+  updateEstimate();
+})();
+</script>
 {% endblock %}

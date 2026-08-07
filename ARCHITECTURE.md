@@ -146,3 +146,26 @@ geprüft. Die browserseitige Vorschau erhält ausschließlich diese validierten
 Brandingwerte und dynamische Bezeichnungen des aktuellen Vereins, jedoch keine
 zentralen oder zusammengesetzten Prompttexte. Details stehen in
 [`docs/BRANDING.md`](docs/BRANDING.md).
+
+## Unveränderliche Medien- und Textversionen
+
+Generierte Inhalte werden fachlich in Ausgabe und Version getrennt.
+`GeneratedMediaSlot` bezeichnet eine konkrete Feed-/Karussellposition oder
+Story-Ausgabe; `GeneratedMediaVersion` bewahrt jede technisch validierte Datei
+mit Prüfsumme und Herkunft unveränderlich auf. `PostTextVersion` bietet dieselbe
+Historie für Begleittexte. Die Auswahl eines Slots kann automatisch der neuesten
+Version folgen oder manuell auf einer älteren Version stehen bleiben.
+
+Eine Freigabe friert konkrete Text- und Medienversions-IDs in
+`PublicationJob` beziehungsweise `PublicationMediaItem` ein. Neue
+Generierungen ersetzen daher weder freigegebene noch veröffentlichte Dateien.
+Die zentrale Session-Schicht verweigert skalare Änderungen historischer
+Versionen; parallele Versionsanlage sperrt den Slot und vergibt fortlaufende
+Nummern transaktionssicher.
+
+`ContentRuleSet` trennt die Anzahl erzeugter Feed-/Story-Ausgaben von den
+`PublicationRuleSlot`-Zeitpunkten. Die Hierarchie ist Spiel, Mannschaft,
+Verein. Für einen nicht konfigurierten Spielwochentag wird bewusst keine
+Ersatzzeit aus einem anderen Wochentag angenommen; die Ausgabe bleibt sichtbar
+und wird als manuell zu planen markiert. Details und Migrationsstrategie stehen
+in [`docs/MEDIA_VARIANTS_AND_RULES_PLAN.md`](docs/MEDIA_VARIANTS_AND_RULES_PLAN.md).

@@ -589,6 +589,99 @@ class StoryRule(Base, Timestamped):
     reuse_media: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class ContentRuleSet(Base, Timestamped):
+    """Versioned generation policy at club, team, or game scope.
+
+    ``scope_key`` deliberately avoids nullable-column uniqueness semantics and
+    is also safe to include in cache and idempotency keys.
+    """
+
+    __tablename__ = "content_rule_sets"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id", "scope_key", "post_type", "rule_version",
+            name="uq_content_rule_set_scope_version",
+        ),
+        CheckConstraint("scope_type IN ('club', 'team', 'game')", name="ck_content_rule_scope"),
+        CheckConstraint(
+            "feed_generation_count >= 0 AND feed_generation_count <= 10",
+            name="ck_content_rule_feed_count",
+        ),
+        CheckConstraint(
+            "story_generation_count >= 0 AND story_generation_count <= 10",
+            name="ck_content_rule_story_count",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    scope_type: Mapped[str] = mapped_column(String(10))
+    scope_key: Mapped[str] = mapped_column(String(80), index=True)
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id", ondelete="CASCADE"), index=True)
+    post_type: Mapped[str] = mapped_column(String(30), index=True)
+    rule_version: Mapped[int] = mapped_column(Integer, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    feed_generation_count: Mapped[int] = mapped_column(Integer, default=1)
+    story_generation_count: Mapped[int] = mapped_column(Integer, default=1)
+    feed_publish_variants: Mapped[list] = mapped_column(JSON, default=lambda: [1])
+    story_publish_variants: Mapped[list] = mapped_column(JSON, default=lambda: [1])
+    approval_policy: Mapped[str] = mapped_column(String(30), default="manual")
+    inherited_from_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_rule_sets.id", ondelete="SET NULL")
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PublicationRuleSlot(Base, Timestamped):
+    """One deterministic publication slot within a content rule set."""
+
+    __tablename__ = "publication_rule_slots"
+    __table_args__ = (
+        UniqueConstraint("rule_set_id", "slot_key", name="uq_publication_rule_slot_key"),
+        CheckConstraint("media_kind IN ('feed', 'story')", name="ck_publication_rule_media_kind"),
+        CheckConstraint(
+            "timing_model IN ('relative', 'weekday_fixed', 'result_detected', 'manual')",
+            name="ck_publication_rule_timing_model",
+        ),
+        CheckConstraint("variant_number > 0", name="ck_publication_rule_variant"),
+        CheckConstraint(
+            "match_weekday IS NULL OR (match_weekday >= 0 AND match_weekday <= 6)",
+            name="ck_publication_rule_match_weekday",
+        ),
+        CheckConstraint(
+            "target_weekday IS NULL OR (target_weekday >= 0 AND target_weekday <= 6)",
+            name="ck_publication_rule_target_weekday",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    rule_set_id: Mapped[str] = mapped_column(
+        ForeignKey("content_rule_sets.id", ondelete="CASCADE"), index=True
+    )
+    slot_key: Mapped[str] = mapped_column(String(100))
+    label: Mapped[str] = mapped_column(String(160))
+    media_kind: Mapped[str] = mapped_column(String(10))
+    variant_number: Mapped[int] = mapped_column(Integer, default=1)
+    timing_model: Mapped[str] = mapped_column(String(30), default="manual")
+    reference: Mapped[str | None] = mapped_column(String(40))
+    direction: Mapped[str | None] = mapped_column(String(10))
+    offset_minutes: Mapped[int | None] = mapped_column(Integer)
+    match_weekday: Mapped[int | None] = mapped_column(Integer, index=True)
+    target_weekday: Mapped[int | None] = mapped_column(Integer)
+    local_time: Mapped[str | None] = mapped_column(String(5))
+    timezone: Mapped[str] = mapped_column(String(50), default="Europe/Berlin")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    instagram_page_id: Mapped[str | None] = mapped_column(
+        ForeignKey("instagram_pages.id", ondelete="SET NULL"), index=True
+    )
+    template: Mapped[str | None] = mapped_column(String(100))
+    reuse_media: Mapped[bool] = mapped_column(Boolean, default=False)
+    legacy_story_rule_id: Mapped[str | None] = mapped_column(
+        ForeignKey("story_rules.id", ondelete="SET NULL"), index=True
+    )
+
+
 class Post(Base, Timestamped):
     __tablename__ = "posts"
     __table_args__ = (
@@ -614,6 +707,25 @@ class Post(Base, Timestamped):
     status: Mapped[PostStatus] = mapped_column(Enum(PostStatus), default=PostStatus.DETECTED)
     text: Mapped[str | None] = mapped_column(Text)
     text_version: Mapped[int] = mapped_column(Integer, default=1)
+    text_selection_mode: Mapped[str] = mapped_column(
+        String(20), default="auto_latest", server_default="auto_latest"
+    )
+    selected_text_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "post_text_versions.id",
+            name="fk_posts_selected_text_version",
+            use_alter=True,
+            ondelete="SET NULL",
+        )
+    )
+    latest_text_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "post_text_versions.id",
+            name="fk_posts_latest_text_version",
+            use_alter=True,
+            ondelete="SET NULL",
+        )
+    )
     feed_path: Mapped[str | None] = mapped_column(String(800))
     feed_version: Mapped[int] = mapped_column(Integer, default=1)
     media_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id"))
@@ -624,6 +736,119 @@ class Post(Base, Timestamped):
     approved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_edited_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+
+
+class PostTextVersion(Base, Timestamped):
+    """Immutable, tenant-scoped history of a post caption."""
+
+    __tablename__ = "post_text_versions"
+    __table_args__ = (
+        UniqueConstraint("post_id", "version_number", name="uq_post_text_version"),
+        CheckConstraint("version_number > 0", name="ck_post_text_version_number"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    post_id: Mapped[str] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"), index=True)
+    version_number: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="SET NULL"), index=True
+    )
+    prompt_template_id: Mapped[str | None] = mapped_column(
+        ForeignKey("prompt_templates.id", ondelete="SET NULL")
+    )
+    prompt_version: Mapped[int | None] = mapped_column(Integer)
+    prompt_checksum: Mapped[str | None] = mapped_column(String(64))
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    source: Mapped[str] = mapped_column(String(30), default="generation")
+    validation_status: Mapped[str] = mapped_column(String(30), default="valid")
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class GeneratedMediaSlot(Base, Timestamped):
+    """A stable feed/story output; variants and versions never replace it."""
+
+    __tablename__ = "generated_media_slots"
+    __table_args__ = (
+        UniqueConstraint("club_id", "post_id", "slot_key", name="uq_generated_media_slot_key"),
+        UniqueConstraint("id", "club_id", name="uq_generated_media_slots_id_club"),
+        CheckConstraint("media_kind IN ('feed', 'story')", name="ck_generated_media_slot_kind"),
+        CheckConstraint("variant_number > 0", name="ck_generated_media_slot_variant"),
+        CheckConstraint("output_position > 0", name="ck_generated_media_slot_position"),
+        CheckConstraint(
+            "selection_mode IN ('auto_latest', 'manual')",
+            name="ck_generated_media_slot_selection_mode",
+        ),
+        ForeignKeyConstraint(
+            ["selected_version_id", "id"],
+            ["generated_media_versions.id", "generated_media_versions.slot_id"],
+            name="fk_generated_media_slots_selected_version_same_slot",
+            use_alter=True,
+        ),
+        ForeignKeyConstraint(
+            ["latest_version_id", "id"],
+            ["generated_media_versions.id", "generated_media_versions.slot_id"],
+            name="fk_generated_media_slots_latest_version_same_slot",
+            use_alter=True,
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    post_id: Mapped[str] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"), index=True)
+    game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id", ondelete="SET NULL"), index=True)
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="RESTRICT"), index=True)
+    story_rule_id: Mapped[str | None] = mapped_column(
+        ForeignKey("story_rules.id", ondelete="SET NULL"), index=True
+    )
+    slot_key: Mapped[str] = mapped_column(String(120))
+    media_kind: Mapped[str] = mapped_column(String(10), index=True)
+    output_position: Mapped[int] = mapped_column(Integer, default=1)
+    variant_number: Mapped[int] = mapped_column(Integer, default=1)
+    label: Mapped[str] = mapped_column(String(180))
+    selection_mode: Mapped[str] = mapped_column(String(20), default="auto_latest")
+    selected_version_id: Mapped[str | None] = mapped_column(String(36))
+    latest_version_id: Mapped[str | None] = mapped_column(String(36))
+
+
+class GeneratedMediaVersion(Base, Timestamped):
+    """Immutable technical result for one generated media slot."""
+
+    __tablename__ = "generated_media_versions"
+    __table_args__ = (
+        UniqueConstraint("slot_id", "version_number", name="uq_generated_media_version"),
+        UniqueConstraint("id", "club_id", name="uq_generated_media_versions_id_club"),
+        UniqueConstraint("id", "slot_id", name="uq_generated_media_versions_id_slot"),
+        CheckConstraint("version_number > 0", name="ck_generated_media_version_number"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    slot_id: Mapped[str] = mapped_column(
+        ForeignKey("generated_media_slots.id", ondelete="CASCADE"), index=True
+    )
+    version_number: Mapped[int] = mapped_column(Integer)
+    media_path: Mapped[str] = mapped_column(String(800))
+    checksum: Mapped[str] = mapped_column(String(64))
+    mime_type: Mapped[str] = mapped_column(String(80), default="image/png")
+    file_size: Mapped[int] = mapped_column(Integer)
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    generation_status: Mapped[str] = mapped_column(String(30), default="completed")
+    validation_status: Mapped[str] = mapped_column(String(30), default="valid")
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="SET NULL"), index=True
+    )
+    source_media_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="SET NULL")
+    )
+    prompt_template_id: Mapped[str | None] = mapped_column(
+        ForeignKey("prompt_templates.id", ondelete="SET NULL")
+    )
+    prompt_version: Mapped[int | None] = mapped_column(Integer)
+    prompt_checksum: Mapped[str | None] = mapped_column(String(64))
+    logo_references: Mapped[dict] = mapped_column(JSON, default=dict)
+    design_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    legacy_import: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class PublicationJob(Base, Timestamped):
@@ -641,6 +866,18 @@ class PublicationJob(Base, Timestamped):
     kind: Mapped[str] = mapped_column(String(10))
     media_path: Mapped[str] = mapped_column(String(800))
     text_snapshot: Mapped[str | None] = mapped_column(Text)
+    text_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("post_text_versions.id", ondelete="SET NULL"), index=True
+    )
+    media_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generated_media_versions.id", ondelete="SET NULL"), index=True
+    )
+    publication_rule_slot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("publication_rule_slots.id", ondelete="SET NULL"), index=True
+    )
+    schedule_source: Mapped[str] = mapped_column(
+        String(30), default="legacy", server_default="legacy"
+    )
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     absolute_time: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -669,6 +906,9 @@ class PublicationMediaItem(Base, Timestamped):
         ForeignKey("publication_jobs.id", ondelete="CASCADE"), index=True
     )
     position: Mapped[int] = mapped_column(Integer)
+    media_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generated_media_versions.id", ondelete="SET NULL"), index=True
+    )
     media_path: Mapped[str] = mapped_column(String(800))
     checksum: Mapped[str] = mapped_column(String(64))
     mime_type: Mapped[str] = mapped_column(String(80), default="image/png")
