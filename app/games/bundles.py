@@ -242,6 +242,12 @@ def dashboard_game_groups(
                     "grouped": True,
                     "manual": key.startswith("manual:"),
                     "result_grouped": result_grouped,
+                    "all_results_confirmed": all(
+                        item.result_confirmed
+                        and item.home_score is not None
+                        and item.away_score is not None
+                        for item in bundled
+                    ),
                 }
             )
         else:
@@ -254,6 +260,11 @@ def dashboard_game_groups(
                     "grouped": False,
                     "manual": False,
                     "result_grouped": False,
+                    "all_results_confirmed": bool(
+                        game.result_confirmed
+                        and game.home_score is not None
+                        and game.away_score is not None
+                    ),
                 }
             )
     return groups
