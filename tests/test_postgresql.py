@@ -3,8 +3,10 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
+from PIL import Image
 from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -13,18 +15,25 @@ from app.db import Base
 from app.jobs.generation import claim_next, enqueue_create
 from app.meta.publishing import MetaPublishingError, _reload_attempt_context
 from app.models import (
+    AccountType,
+    Club,
+    ClubStatus,
     Game,
+    GeneratedMediaSlot,
+    GeneratedMediaVersion,
     GenerationJob,
     InstagramConnection,
     InstagramPage,
     MediaAsset,
     MetaPublishingAttempt,
+    PlanProfile,
     Post,
     PublicationJob,
     Role,
     Team,
     User,
 )
+from app.posts.media_versions import register_media_version
 from app.posts.service import reserve_image
 
 URL = os.getenv("TEST_POSTGRES_URL")
@@ -46,12 +55,31 @@ def pg():
 
 def graph(factory):
     with factory() as db:
+        profile = PlanProfile(name="PostgreSQL-Test", description="Testprofil", version=1)
+        db.add(profile)
+        db.flush()
+        club = Club(
+            name="PostgreSQL-Testverein",
+            short_name="PG",
+            slug="postgresql-testverein",
+            status=ClubStatus.ACTIVE,
+            timezone="Europe/Berlin",
+            plan_profile_id=profile.id,
+        )
+        db.add(club)
+        db.flush()
         page = InstagramPage(
-            internal_name="pg", display_name="PG", username="pg", club="C", active=True
+            club_id=club.id,
+            internal_name="pg",
+            display_name="PG",
+            username="pg",
+            club="C",
+            active=True,
         )
         db.add(page)
         db.flush()
         team = Team(
+            club_id=club.id,
             internal_name="pg",
             display_name="PG",
             short_name="PG",
@@ -65,6 +93,7 @@ def graph(factory):
         db.flush()
         games = [
             Game(
+                club_id=club.id,
                 team_id=team.id,
                 external_id=f"g{x}",
                 home_team="A",
@@ -77,6 +106,7 @@ def graph(factory):
         db.add_all(games)
         db.flush()
         asset = MediaAsset(
+            club_id=club.id,
             team_id=team.id,
             relative_path="p.png",
             filename="p.png",
@@ -87,11 +117,11 @@ def graph(factory):
         )
         db.add(asset)
         db.commit()
-        return page.id, team.id, [x.id for x in games], asset.id
+        return club.id, page.id, team.id, [x.id for x in games], asset.id
 
 
 def test_parallel_image_reservation_uses_postgresql_lock(pg):
-    _, team_id, game_ids, asset_id = graph(pg)
+    _, _, team_id, game_ids, asset_id = graph(pg)
 
     def reserve(game_id):
         with pg() as db:
@@ -107,9 +137,10 @@ def test_parallel_image_reservation_uses_postgresql_lock(pg):
 
 
 def test_unique_idempotency_key_and_main_post_constraint(pg):
-    page_id, team_id, game_ids, _ = graph(pg)
+    club_id, page_id, team_id, game_ids, _ = graph(pg)
     with pg() as db:
         post = Post(
+            club_id=club_id,
             game_id=game_ids[0],
             team_id=team_id,
             instagram_page_id=page_id,
@@ -118,6 +149,7 @@ def test_unique_idempotency_key_and_main_post_constraint(pg):
         db.add(post)
         db.flush()
         base = dict(
+            club_id=club_id,
             post_id=post.id,
             game_id=game_ids[0],
             team_id=team_id,
@@ -136,6 +168,7 @@ def test_unique_idempotency_key_and_main_post_constraint(pg):
         original = db.scalar(select(Post).where(Post.game_id == game_ids[0]))
         db.add(
             Post(
+                club_id=club_id,
                 game_id=game_ids[0],
                 team_id=team_id,
                 instagram_page_id=page_id,
@@ -148,10 +181,15 @@ def test_unique_idempotency_key_and_main_post_constraint(pg):
 
 
 def test_generation_job_claim_uses_skip_locked(pg):
-    _, team_id, game_ids, _ = graph(pg)
+    club_id, _, team_id, game_ids, _ = graph(pg)
     with pg() as db:
         user = User(
-            email="generation@pg.invalid", password_hash="x", role=Role.ADMIN, all_teams=True
+            club_id=club_id,
+            account_type=AccountType.CLUB_USER,
+            email="generation@pg.invalid",
+            password_hash="x",
+            role=Role.ADMIN,
+            all_teams=True,
         )
         db.add(user)
         db.flush()
@@ -173,20 +211,24 @@ def test_generation_job_claim_uses_skip_locked(pg):
 
 
 def test_meta_attempt_lock_uses_skip_locked(pg):
-    page_id, team_id, game_ids, _ = graph(pg)
+    club_id, page_id, team_id, game_ids, _ = graph(pg)
     with pg() as db:
         user = User(
+            club_id=club_id,
+            account_type=AccountType.CLUB_USER,
             email="meta-lock@pg.invalid",
             password_hash="x",
             role=Role.ADMIN,
             all_teams=True,
         )
         connection = InstagramConnection(
+            club_id=club_id,
             instagram_page_id=page_id,
             instagram_user_id="ig-test",
             status="connected",
         )
         post = Post(
+            club_id=club_id,
             game_id=game_ids[0],
             team_id=team_id,
             instagram_page_id=page_id,
@@ -195,6 +237,7 @@ def test_meta_attempt_lock_uses_skip_locked(pg):
         db.add_all([user, connection, post])
         db.flush()
         publication = PublicationJob(
+            club_id=club_id,
             post_id=post.id,
             game_id=game_ids[0],
             team_id=team_id,
@@ -207,6 +250,7 @@ def test_meta_attempt_lock_uses_skip_locked(pg):
         db.add(publication)
         db.flush()
         attempt = MetaPublishingAttempt(
+            club_id=club_id,
             publication_job_id=publication.id,
             connection_id=connection.id,
             active_key=publication.id,
@@ -235,3 +279,63 @@ def test_meta_attempt_lock_uses_skip_locked(pg):
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             pool.submit(competing_lock).result(timeout=5)
+
+
+def test_parallel_media_versions_are_monotonic_and_never_overwritten(pg, tmp_path):
+    club_id, page_id, team_id, game_ids, _ = graph(pg)
+    with pg() as db:
+        post = Post(
+            club_id=club_id,
+            game_id=game_ids[0],
+            team_id=team_id,
+            instagram_page_id=page_id,
+            post_type="announcement",
+        )
+        db.add(post)
+        db.flush()
+        slot = GeneratedMediaSlot(
+            club_id=post.club_id,
+            post_id=post.id,
+            game_id=post.game_id,
+            team_id=post.team_id,
+            slot_key="feed:1:variant:1",
+            media_kind="feed",
+            output_position=1,
+            variant_number=1,
+            label="Feed-Variante 1",
+        )
+        db.add(slot)
+        db.commit()
+        post_id, slot_id = post.id, slot.id
+
+    paths: list[Path] = []
+    for number, color in ((1, "blue"), (2, "red")):
+        path = tmp_path / f"parallel-version-{number}.png"
+        Image.new("RGB", (1080, 1350), color).save(path)
+        paths.append(path)
+
+    def create_version(path: Path):
+        with pg() as db:
+            post = db.get(Post, post_id)
+            slot = db.get(GeneratedMediaSlot, slot_id)
+            version = register_media_version(db, post, slot, str(path))
+            db.commit()
+            return version.id, version.version_number, version.media_path
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        created = list(pool.map(create_version, paths))
+
+    assert sorted(number for _, number, _ in created) == [1, 2]
+    assert {path for _, _, path in created} == {str(path) for path in paths}
+    with pg() as db:
+        versions = list(
+            db.scalars(
+                select(GeneratedMediaVersion)
+                .where(GeneratedMediaVersion.slot_id == slot_id)
+                .order_by(GeneratedMediaVersion.version_number)
+            )
+        )
+        slot = db.get(GeneratedMediaSlot, slot_id)
+        assert [item.version_number for item in versions] == [1, 2]
+        assert slot.latest_version_id == versions[-1].id
+        assert slot.selected_version_id == versions[-1].id

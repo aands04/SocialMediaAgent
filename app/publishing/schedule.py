@@ -140,9 +140,14 @@ def reschedule_publication_job(
     )
     job.scheduled_at = new_time
     job.absolute_time = True
+    job.schedule_source = "manual"
     job.stale_time = False
     job.next_attempt_at = None
     job.version += 1
+    if job.approval_status == "manual_schedule_required":
+        job.approval_status = "unapproved"
+        job.status = JobStatus.UNAPPROVED
+        job.error = None
 
     if approval_invalidated:
         post.version += 1

@@ -44,7 +44,14 @@ def approve(
     team = db.get(Team, post.team_id)
     jobs = list(db.scalars(select(PublicationJob).where(PublicationJob.post_id == post.id)))
     selected = [j for j in jobs if selected_jobs is None or j.id in selected_jobs]
+    from app.posts.media_versions import freeze_publication_versions
+
+    # Resolve auto-latest/manual selections before validating and freezing the
+    # approval. The legacy path columns are updated in the same transaction.
+    freeze_publication_versions(db, post, selected)
     problems = []
+    if any(job.approval_status == "manual_schedule_required" for job in selected):
+        problems.append("Mindestens eine Veröffentlichung benötigt noch einen manuellen Zeitpunkt")
     if any(job.approval_status == "bundle_wait" for job in selected):
         problems.append(
             "Der gemeinsame Vereins-Feed wartet noch auf weitere Spiele oder Ergebnisse"
@@ -251,4 +258,7 @@ def edit_text(db: Session, post: Post, user: User, text: str, expected_version: 
         job.approval_status = "reapproval_required"
         if job.kind in {"feed", "carousel"}:
             job.text_snapshot = post.text
+    from app.posts.media_versions import ensure_text_version
+
+    ensure_text_version(db, post, created_by=user.id, source="manual_edit")
     db.commit()

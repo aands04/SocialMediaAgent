@@ -415,7 +415,10 @@ def _story_count(db: Session, team: Team, post_type: str) -> int:
             .order_by(StoryRule.sort_order, StoryRule.created_at, StoryRule.id)
         ).all()
     )
+    generation_key = f"{post_type}_story_generation_count"
     count_key = f"{post_type}_story_output_count"
+    if generation_key in (team.rules or {}):
+        return max(0, min(10, int((team.rules or {}).get(generation_key, 0))))
     if count_key not in (team.rules or {}):
         return len(rows) or (1 if post_type == "result" else 0)
 
@@ -435,7 +438,15 @@ def _story_count(db: Session, team: Team, post_type: str) -> int:
 def _feed_count(team: Team, post_type: str) -> int:
     return max(
         0,
-        min(10, int((team.rules or {}).get(f"{post_type}_feed_output_count", 1))),
+        min(
+            10,
+            int(
+                (team.rules or {}).get(
+                    f"{post_type}_feed_generation_count",
+                    (team.rules or {}).get(f"{post_type}_feed_output_count", 1),
+                )
+            ),
+        ),
     )
 
 
@@ -607,11 +618,24 @@ def enqueue_rerender(
     media_asset_id: str | None = None,
     *,
     rerender_feed: bool = True,
+    feed_positions: list[int] | None = None,
+    story_variant_numbers: list[int] | None = None,
 ) -> GenerationJob:
     selected = sorted(set(story_job_ids))
-    if not rerender_feed and not selected:
+    selected_feed_positions = sorted(set(feed_positions or []))
+    selected_story_variants = sorted(set(story_variant_numbers or []))
+    if not rerender_feed and not selected and not selected_story_variants:
         raise ValueError("Bitte mindestens Feed oder eine Story auswählen")
-    selection_hash = hashlib.sha256(repr((rerender_feed, selected)).encode()).hexdigest()[:16]
+    selection_hash = hashlib.sha256(
+        repr(
+            (
+                rerender_feed,
+                selected_feed_positions,
+                selected,
+                selected_story_variants,
+            )
+        ).encode()
+    ).hexdigest()[:16]
     asset_key = media_asset_id or post.media_asset_id or "neutral"
     key = f"rerender:{post.id}:v{expected_version}:{selection_hash}:{asset_key}"
     active_key = f"rerender:{post.id}"
@@ -634,13 +658,18 @@ def enqueue_rerender(
         requested_by=user.id,
         status=GenerationJobStatus.QUEUED,
         phase="preparing",
-        planned_outputs=int(rerender_feed) + len(selected),
+        planned_outputs=(
+            (len(selected_feed_positions) if selected_feed_positions else int(rerender_feed))
+            + len(selected_story_variants or selected)
+        ),
         idempotency_key=key,
         active_key=active_key,
         parameters={
             "expected_post_version": expected_version,
             "rerender_feed": rerender_feed,
+            "feed_positions": selected_feed_positions,
             "story_job_ids": selected,
+            "story_variant_numbers": selected_story_variants,
             "media_asset_id": media_asset_id or post.media_asset_id,
             "logos": frozen_logo_set(db, db.get(Game, post.game_id), db.get(Team, post.team_id)),
         },
@@ -678,6 +707,8 @@ def enqueue_ai_revision(
     story_job_ids: list[str],
     media_asset_id: str | None = None,
     revise_feed: bool | None = None,
+    feed_positions: list[int] | None = None,
+    story_variant_numbers: list[int] | None = None,
 ) -> GenerationJob:
     instruction = instruction.strip()
     if not 10 <= len(instruction) <= 2000:
@@ -687,7 +718,9 @@ def enqueue_ai_revision(
     if not post.game_id:
         raise ValueError("Nur spielbezogene KI-Beiträge können durch KI geändert werden")
     selected = sorted(set(story_job_ids))
-    revise_graphics = bool(revise_feed or selected)
+    selected_feed_positions = sorted(set(feed_positions or []))
+    selected_story_variants = sorted(set(story_variant_numbers or []))
+    revise_graphics = bool(revise_feed or selected or selected_story_variants)
     if not revise_text and not revise_graphics:
         raise ValueError("Bitte Begleittext, Feed oder mindestens eine Story auswählen")
     digest = hashlib.sha256(
@@ -698,7 +731,9 @@ def enqueue_ai_revision(
                 revise_text,
                 revise_graphics,
                 revise_feed,
+                selected_feed_positions,
                 selected,
+                selected_story_variants,
                 media_asset_id or post.media_asset_id,
             )
         ).encode("utf-8")
@@ -728,7 +763,11 @@ def enqueue_ai_revision(
         requested_by=user.id,
         status=GenerationJobStatus.QUEUED,
         phase="preparing",
-        planned_outputs=(int(revise_text) + int(revise_feed) + len(selected)),
+        planned_outputs=(
+            int(revise_text)
+            + (len(selected_feed_positions) if selected_feed_positions else int(revise_feed))
+            + len(selected_story_variants or selected)
+        ),
         idempotency_key=key,
         active_key=active_key,
         parameters={
@@ -738,7 +777,9 @@ def enqueue_ai_revision(
             "revise_text": revise_text,
             "revise_graphics": revise_graphics,
             "revise_feed": revise_feed,
+            "feed_positions": selected_feed_positions,
             "story_job_ids": selected,
+            "story_variant_numbers": selected_story_variants,
             "media_asset_id": media_asset_id or post.media_asset_id,
             "logos": frozen_logo_set(db, game, team),
         },
@@ -768,7 +809,7 @@ def enqueue_ai_revision(
             "revise_text": revise_text,
             "revise_graphics": revise_graphics,
             "revise_feed": revise_feed,
-            "story_count": len(selected),
+            "story_count": len(selected_story_variants or selected),
         },
     )
     db.commit()
@@ -1215,6 +1256,10 @@ def process_generation_job(
                     story_job_ids=list(parameters.get("story_job_ids", [])),
                     logo_snapshot=logos,
                     media_asset_id=parameters.get("media_asset_id"),
+                    feed_positions=list(parameters.get("feed_positions", [])),
+                    story_variant_numbers=list(
+                        parameters.get("story_variant_numbers", [])
+                    ),
                 )
                 _audit(
                     db,
@@ -1255,6 +1300,10 @@ def process_generation_job(
                     logos,
                     job.parameters.get("media_asset_id"),
                     rerender_feed=bool(job.parameters.get("rerender_feed", True)),
+                    feed_positions=list(job.parameters.get("feed_positions", [])),
+                    story_variant_numbers=list(
+                        job.parameters.get("story_variant_numbers", [])
+                    ),
                 )
             job.result_post_id = post.id
             db.commit()

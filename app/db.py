@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker, with_loader_criteria
 
 from app.config import get_settings
@@ -89,8 +89,29 @@ def _tenant_filter(execute_state):
 
 @event.listens_for(TenantSession, "before_flush")
 def _tenant_write_guard(session, _flush_context, _instances):
-    from app.models import AccountType, AuditLog, User
+    from app.models import (
+        AccountType,
+        AuditLog,
+        GeneratedMediaVersion,
+        PostTextVersion,
+        User,
+    )
     from app.tenancy.state import active_scope
+
+    immutable_versions = (GeneratedMediaVersion, PostTextVersion)
+    for item in session.dirty:
+        if isinstance(item, immutable_versions) and session.is_modified(
+            item, include_collections=False
+        ):
+            changed = sorted(
+                attribute.key
+                for attribute in inspect(item).attrs
+                if attribute.history.has_changes()
+            )
+            raise PermissionError(
+                "Historische Medien- und Textversionen sind unveränderlich"
+                + (f" ({', '.join(changed)})" if changed else "")
+            )
 
     scope = active_scope()
     changed = session.new.union(session.dirty).union(session.deleted)
