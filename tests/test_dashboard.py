@@ -131,6 +131,34 @@ def session_csrf(client):
     return re.search(r'name="csrf_token" value="([^"]+)', response.text).group(1)
 
 
+def create_automation_team(factory, *, suffix: str, rules: dict | None = None):
+    with factory() as db:
+        page = InstagramPage(
+            internal_name=f"automation-page-{suffix}",
+            display_name=f"Automatik Seite {suffix}",
+            username=f"automation_{suffix}",
+            club="Dashboard Testverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name=f"automation-team-{suffix}",
+            display_name=f"Automatik Mannschaft {suffix}",
+            short_name=f"AM{suffix[:4]}",
+            slug=f"automation-team-{suffix}",
+            club="Dashboard Testverein",
+            fussball_url=f"https://example.invalid/automation-{suffix}",
+            instagram_page_id=page.id,
+            media_subdir=f"automation-{suffix}/players",
+            timezone="Europe/Berlin",
+            rules=rules or {},
+        )
+        db.add(team)
+        db.commit()
+        return team.id
+
+
 def test_publication_time_can_be_changed_from_post_detail(browser):
     client, factory = browser
     with factory() as db:
@@ -1925,6 +1953,7 @@ def test_dashboard_admin_flow(browser):
             "sync_interval_hours": "24",
             "result_poll_interval_minutes": "15",
             "auto_approve_announcements": "true",
+            "auto_approve_announcements_acknowledged": "true",
             "club_matchday_feed_mode": "announcements",
             "club_matchday_primary_team_id": team.id,
             "announcement_feed_output_count": "1",
@@ -1950,7 +1979,7 @@ def test_dashboard_admin_flow(browser):
         assert saved_team.rules["announcement_weekday_times"]["6"] == "09:00"
         assert saved_team.rules["announcement_weekday_targets"]["4"] == "3"
         assert saved_team.rules["announcement_weekday_targets"]["6"] == "4"
-    assert "Vorläufige FUSSBALL.DE-Spielpläne" in client.get(
+    assert "Vorläufige Spielpläne für Ankündigungen verwenden" in client.get(
         f"/rules?team_id={team.id}"
     ).text
     result = client.post(
@@ -2946,3 +2975,238 @@ def test_publication_rule_slots_are_csrf_protected_validated_and_audited(browser
                 AuditLog.action == "publication_weekday_rules.copied"
             )
         )
+
+
+def test_automatic_posts_page_hides_platform_prompts_and_explains_safe_flow(browser):
+    client, factory = browser
+    team_id = create_automation_team(
+        factory,
+        suffix="page",
+        rules={
+            "text_prompt": "SECRET-PLATFORM-PROMPT-MUST-NOT-LEAK",
+            "style_direction": "legacy value remains stored",
+            "result_poll_interval_minutes": 15,
+        },
+    )
+
+    response = client.get(f"/rules?team_id={team_id}")
+
+    assert response.status_code == 200
+    assert "Automatische Beiträge" in response.text
+    assert "Empfohlene Grundeinstellung" in response.text
+    assert "Zeitplanung testen" in response.text
+    assert "Vereinsbranding" in response.text
+    assert "SECRET-PLATFORM-PROMPT-MUST-NOT-LEAK" not in response.text
+    assert "Vereinsstil" not in response.text
+
+
+def test_recommended_preset_requires_csrf_and_replace_confirmation(browser):
+    client, factory = browser
+    team_id = create_automation_team(
+        factory,
+        suffix="preset",
+        rules={
+            "announcement_feed_generation_count": 7,
+            "text_prompt": "protected-platform-prompt",
+            "publication_rule_slots": [],
+        },
+    )
+    with factory() as db:
+        version = db.get(Team, team_id).version
+
+    missing_csrf = client.post(
+        f"/rules/{team_id}/recommended-preset",
+        data={"expected_team_version": version, "mode": "append_missing"},
+    )
+    assert missing_csrf.status_code == 422
+
+    replace_without_confirmation = client.post(
+        f"/rules/{team_id}/recommended-preset",
+        data={
+            "csrf_token": session_csrf(client),
+            "expected_team_version": version,
+            "mode": "replace",
+        },
+    )
+    assert replace_without_confirmation.status_code == 422
+
+    applied = client.post(
+        f"/rules/{team_id}/recommended-preset",
+        data={
+            "csrf_token": session_csrf(client),
+            "expected_team_version": version,
+            "mode": "append_missing",
+        },
+        follow_redirects=False,
+    )
+    assert applied.status_code == 303
+    with factory() as db:
+        team = db.get(Team, team_id)
+        assert team.rules["announcement_feed_generation_count"] == 7
+        assert team.rules["text_prompt"] == "protected-platform-prompt"
+        assert len(team.rules["publication_rule_slots"]) == 8
+        assert db.scalar(
+            select(AuditLog.id).where(
+                AuditLog.action == "automation_preset.applied",
+                AuditLog.entity_id == team_id,
+            )
+        )
+
+
+def test_schedule_preview_is_read_only_and_uses_configured_rules(browser):
+    client, factory = browser
+    team_id = create_automation_team(factory, suffix="preview")
+    with factory() as db:
+        version = db.get(Team, team_id).version
+    applied = client.post(
+        f"/rules/{team_id}/recommended-preset",
+        data={
+            "csrf_token": session_csrf(client),
+            "expected_team_version": version,
+            "mode": "append_missing",
+        },
+        follow_redirects=False,
+    )
+    assert applied.status_code == 303
+
+    with factory() as db:
+        before = {
+            "team_version": db.get(Team, team_id).version,
+            "posts": len(list(db.scalars(select(Post)))),
+            "generation_jobs": len(list(db.scalars(select(GenerationJob)))),
+            "publication_jobs": len(list(db.scalars(select(PublicationJob)))),
+        }
+    response = client.post(
+        f"/rules/{team_id}/schedule-preview",
+        data={
+            "csrf_token": session_csrf(client),
+            "kickoff_local": "2026-08-09T15:00",
+            "result_local": "2026-08-09T17:07",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["weekday"] == "Sonntag"
+    assert any(event["when"] == "Freitag, 07.08.2026 · 18:00 Uhr" for event in payload["events"])
+    with factory() as db:
+        after = {
+            "team_version": db.get(Team, team_id).version,
+            "posts": len(list(db.scalars(select(Post)))),
+            "generation_jobs": len(list(db.scalars(select(GenerationJob)))),
+            "publication_jobs": len(list(db.scalars(select(PublicationJob)))),
+        }
+    assert after == before
+
+
+def test_rules_reject_unsafe_result_poll_and_unconfirmed_automatic_approval(browser):
+    client, factory = browser
+    legacy_times = {"6": "18:00"}
+    legacy_targets = {str(day): str(day) for day in range(7)}
+    team_id = create_automation_team(
+        factory,
+        suffix="validation",
+        rules={
+            "announcement_weekday_times": legacy_times,
+            "announcement_weekday_targets": legacy_targets,
+            "result_poll_interval_minutes": 15,
+        },
+    )
+    with factory() as db:
+        version = db.get(Team, team_id).version
+
+    unsafe_poll = client.post(
+        f"/rules/{team_id}/defaults",
+        data={
+            "csrf_token": session_csrf(client),
+            "expected_team_version": version,
+            "preserve_legacy_weekday_settings": "true",
+            "late_approval": "manual",
+            "result_wait_minutes": 0,
+            "result_poll_interval_minutes": 9,
+        },
+    )
+    assert unsafe_poll.status_code == 422
+    assert "frühestens alle 10 Minuten" in unsafe_poll.text
+
+    automatic_without_ack = client.post(
+        f"/rules/{team_id}/defaults",
+        data={
+            "csrf_token": session_csrf(client),
+            "expected_team_version": version,
+            "preserve_legacy_weekday_settings": "true",
+            "late_approval": "manual",
+            "result_wait_minutes": 0,
+            "result_poll_interval_minutes": 10,
+            "auto_approve_announcements": "true",
+        },
+    )
+    assert automatic_without_ack.status_code == 422
+    assert "ausdrücklich bestätigt" in automatic_without_ack.text
+
+    safe_save = client.post(
+        f"/rules/{team_id}/defaults",
+        data={
+            "csrf_token": session_csrf(client),
+            "expected_team_version": version,
+            "preserve_legacy_weekday_settings": "true",
+            "late_approval": "manual",
+            "result_wait_minutes": 0,
+            "result_poll_interval_minutes": 10,
+        },
+        follow_redirects=False,
+    )
+    assert safe_save.status_code == 303
+    with factory() as db:
+        rules = db.get(Team, team_id).rules
+        assert rules["result_poll_interval_minutes"] == 10
+        assert rules["announcement_weekday_times"] == legacy_times
+        assert rules["announcement_weekday_targets"] == legacy_targets
+
+
+def test_editor_can_view_but_cannot_change_automatic_post_rules(browser):
+    client, factory = browser
+    team_id = create_automation_team(factory, suffix="editor")
+    with factory() as db:
+        club_id = db.get(Team, team_id).club_id
+        editor = User(
+            email="automation-editor@test.invalid",
+            password_hash=hash_password("Editor-Secure-Password"),
+            role=Role.EDITOR,
+            all_teams=True,
+            club_id=club_id,
+            active=True,
+        )
+        db.add(editor)
+        db.commit()
+        version = db.get(Team, team_id).version
+
+    client.post("/logout")
+    login_page = client.get("/login")
+    login_csrf = re.search(
+        r'name="csrf_token" value="([^"]+)', login_page.text
+    ).group(1)
+    logged_in = client.post(
+        "/login",
+        data={
+            "email": "automation-editor@test.invalid",
+            "password": "Editor-Secure-Password",
+            "csrf_token": login_csrf,
+        },
+        follow_redirects=False,
+    )
+    assert logged_in.status_code == 303
+
+    page = client.get(f"/rules?team_id={team_id}")
+    assert page.status_code == 200
+    assert "Automatische Beiträge" in page.text
+    assert "Grundeinstellung übernehmen" not in page.text
+    forbidden = client.post(
+        f"/rules/{team_id}/recommended-preset",
+        data={
+            "csrf_token": session_csrf(client),
+            "expected_team_version": version,
+            "mode": "append_missing",
+        },
+    )
+    assert forbidden.status_code == 403

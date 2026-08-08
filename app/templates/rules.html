@@ -1,364 +1,175 @@
 {% extends 'base.html' %}
 {% block content %}
-<h1>Veröffentlichungsregeln und Story-Zeitpunkte</h1>
-<p>Lege getrennt fest, welche Ausgaben erzeugt werden und wann Feed- und Story-Inhalte veröffentlicht werden.</p>
-<form method="get">
-  <label>Mannschaft
-    <select name="team_id" onchange="this.form.submit()">
+{% set weekday_options=[('0','Montag'),('1','Dienstag'),('2','Mittwoch'),('3','Donnerstag'),('4','Freitag'),('5','Samstag'),('6','Sonntag')] %}
+<div class="automation-heading">
+  <div>
+    <p class="eyebrow">Vereinszentrale</p>
+    <h1>Automatische Beiträge</h1>
+    <p>Lege verständlich fest, welche Inhalte automatisch vorbereitet werden und wann sie nach deiner Prüfung veröffentlicht werden.</p>
+  </div>
+  {% if selected and can_manage_automation %}<button type="button" class="button secondary" data-open-preview>Zeitplanung testen</button>{% endif %}
+</div>
+
+<section class="automation-guide" aria-labelledby="automation-guide-title">
+  <h2 id="automation-guide-title">So funktioniert die Automatik</h2>
+  <ol>
+    <li><strong>Spiele abrufen</strong><span>Die Vereinszentrale hält den Spielplan über FUSSBALL.DE aktuell.</span></li>
+    <li><strong>Inhalte vorbereiten</strong><span>Vor dem Spiel werden Feed- und Story-Varianten erstellt.</span></li>
+    <li><strong>Prüfen</strong><span>Standardmäßig siehst du jeden fertigen Beitrag vor der Veröffentlichung.</span></li>
+    <li><strong>Zeit planen</strong><span>Du bestimmst Termine nur für die für euch relevanten Spieltage.</span></li>
+    <li><strong>Veröffentlichen</strong><span>Nur freigegebene und technisch geprüfte Inhalte gehen an Instagram.</span></li>
+  </ol>
+</section>
+
+<section class="automation-explainer">
+  <article><strong>Feed-Beitrag</strong><p>Bleibt dauerhaft im Instagram-Profil sichtbar. Mehrere Mannschaftsbilder können als gemeinsamer Beitrag zum Durchblättern veröffentlicht werden.</p></article>
+  <article><strong>Story</strong><p>Ist 24 Stunden sichtbar. Mehrere Story-Varianten können zu unterschiedlichen Zeiten vor oder nach dem Spiel erscheinen.</p></article>
+  <article><strong>Variante</strong><p>Eine alternative Gestaltung desselben Inhalts. Bereits erstellte Varianten kannst du wechseln, ohne eine neue KI-Generierung auszulösen.</p></article>
+</section>
+
+<section class="team-automation-selector">
+  <h2>Für welche Mannschaft gelten die Einstellungen?</h2>
+  <p>Jede Mannschaft besitzt ihre eigene Automatik. Es werden ausschließlich Mannschaften deines Vereins angezeigt.</p>
+  <form method="get">
+    <label for="team_id">Mannschaft</label>
+    <select id="team_id" name="team_id" onchange="this.form.submit()">
       {% for t in teams %}<option value="{{t.id}}" {% if selected and t.id==selected.id %}selected{% endif %}>{{t.display_name}}</option>{% endfor %}
     </select>
-  </label>
-</form>
+  </form>
+</section>
 
 {% if selected %}
-{% if teams|length > 1 %}
-<details class="rule-copy-panel">
-  <summary>Regeln einer anderen Mannschaft übernehmen</summary>
-  <form method="post" action="/rules/{{selected.id}}/copy-from" onsubmit="return confirm('Die aktuellen Regeln und Veröffentlichungstermine dieser Mannschaft wirklich durch die gewählte Konfiguration ersetzen?');">
-    <input type="hidden" name="csrf_token" value="{{csrf}}">
-    <input type="hidden" name="target_version" value="{{selected.version}}">
-    <label>Quellmannschaft
-      <select name="source_team_id" required>
-        {% for source_team in teams if source_team.id != selected.id %}
-        <option value="{{source_team.id}}">{{source_team.display_name}}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <button class="secondary">Regeln nach Bestätigung kopieren</button>
-    <small>Spielzeiten, Erstellungszahlen und Veröffentlichungstermine werden kopiert. Die Instagram-Seite der Zielmannschaft bleibt unverändert.</small>
+{% if not can_manage_automation %}<div class="notice">Du kannst die Automatik ansehen. Änderungen sind Vereinsadministratoren vorbehalten.</div>{% endif %}
+
+{% if teams|length > 1 and can_manage_automation %}
+<details class="automation-panel rule-copy-panel">
+  <summary>Einstellungen einer anderen Mannschaft übernehmen</summary>
+  <p>Quelle: gewählte Mannschaft · Ziel: <strong>{{selected.display_name}}</strong>. Wähle genau, welche Bereiche übernommen werden. Vorhandene Regeln werden niemals unbemerkt überschrieben.</p>
+  <form method="post" action="/rules/{{selected.id}}/copy-from" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="target_version" value="{{selected.version}}">
+    <label>Quellmannschaft<select name="source_team_id" required>{% for source_team in teams if source_team.id != selected.id %}<option value="{{source_team.id}}">{{source_team.display_name}}</option>{% endfor %}</select></label>
+    <fieldset><legend>Zu übernehmende Bereiche</legend><label class="checkbox-label"><input type="checkbox" name="copy_settings" value="true" checked> Erstellung und Freigabe</label><label class="checkbox-label"><input type="checkbox" name="copy_schedule" value="true" checked> Veröffentlichungszeiten</label></fieldset>
+    <fieldset><legend>Umgang mit vorhandenen Werten</legend><label><input type="radio" name="copy_mode" value="append_missing" checked> Nur fehlende Einstellungen ergänzen</label><label><input type="radio" name="copy_mode" value="replace"> Vorhandene Einstellungen ersetzen</label><label class="replace-confirm" hidden><input type="checkbox" name="confirm_replace" value="true"> Ich bestätige, dass die ausgewählten Zielbereiche ersetzt werden.</label></fieldset>
+    <button>Auswahl übernehmen</button>
   </form>
 </details>
 {% endif %}
-{% set weekday_names=['monday','tuesday','wednesday','thursday','friday','saturday','sunday'] %}
-{% set weekday_options=[('0','Montag'),('1','Dienstag'),('2','Mittwoch'),('3','Donnerstag'),('4','Freitag'),('5','Samstag'),('6','Sonntag')] %}
-{% set announcement_times=selected.rules.get('announcement_weekday_times',{}) %}
-{% set result_times=selected.rules.get('result_weekday_times',{}) %}
-{% set reminder_times=selected.rules.get('reminder_weekday_times',{}) %}
-{% set announcement_targets=selected.rules.get('announcement_weekday_targets',{}) %}
-{% set result_targets=selected.rules.get('result_weekday_targets',{}) %}
-{% set reminder_targets=selected.rules.get('reminder_weekday_targets',{}) %}
 
-<form method="post" action="/rules/{{selected.id}}/defaults" id="publishing-rules-form">
-  <input type="hidden" name="csrf_token" value="{{csrf}}">
-  <input type="hidden" name="feed_before_minutes" value="{{selected.rules.get('feed_before_minutes',1440)}}">
-  <input type="hidden" name="generation_lead_minutes" value="{{selected.rules.get('generation_lead_minutes',120)}}">
-
-  <section>
-    <h2>1. Spielankündigungen</h2>
-    <div class="gridform">
-      <label><input type="checkbox" name="announcement_enabled" value="true" {% if selected.rules.get('announcement_enabled') %}checked{% endif %}> Spielankündigungen erzeugen</label>
-      <p><strong>Veröffentlichung:</strong> Die konkreten Feed- und Story-Termine werden unten als einzelne Veröffentlichungsregeln verwaltet.</p>
-      <input type="hidden" name="announcement_timing_mode" value="{{selected.rules.get('announcement_timing_mode','relative')}}">
+<section class="automation-panel recommended-preset">
+  <div class="section-heading"><div><p class="eyebrow">Noch keine Regeln eingerichtet?</p><h2>{{recommended_preset.title}}</h2><p>{{recommended_preset.description}}</p><small>Version {{recommended_preset.version}} · zentral geprüft</small></div><span class="safe-badge">Manuelle Freigabe</span></div>
+  <details>
+    <summary>Grundeinstellung ansehen</summary>
+    <div class="preset-summary">
+      <ul><li>{{recommended_preset.values.announcement_feed_generation_count}} Feed- und {{recommended_preset.values.announcement_story_generation_count}} Story-Varianten für Spielankündigungen</li><li>Standardauswahl: {{recommended_preset.values.announcement_feed_publish_count}} Feed und {{recommended_preset.values.announcement_story_publish_count}} Storys</li><li>Ergebnis: {{recommended_preset.values.result_feed_generation_count}} Feed und {{recommended_preset.values.result_story_generation_count}} Story nach bestätigter Erkennung</li><li>FUSSBALL.DE alle {{recommended_preset.values.sync_interval_hours}} Stunden, Ergebnisse alle {{recommended_preset.values.result_poll_interval_minutes}} Minuten</li><li>Andere Wochentage: automatische Erstellung mit manueller Planung</li></ul>
+      <div class="preset-cards">{% for card in recommended_preset_cards %}<article><strong>{% if card.weekday is none %}Unabhängig vom Wochentag{% else %}Spiel am {{card.label}}{% endif %}</strong>{% for slot in card.slots %}<span>{{slot.summary}} · {% if slot.media_kind=='feed' %}Feed-Beitrag{% else %}Story{% endif %} · Variante {{slot.variant_number}}</span>{% endfor %}</article>{% endfor %}</div>
     </div>
-
-    <div class="gridform generation-selection">
-      <label>Feed-Varianten standardmäßig auswählen
-        <input type="number" name="announcement_feed_publish_count" min="0" max="10" value="{{selected.rules.get('announcement_feed_publish_count',selected.rules.get('announcement_feed_output_count',1))}}">
-      </label>
-      <label>Story-Varianten standardmäßig auswählen
-        <input type="number" name="announcement_story_publish_count" min="0" max="10" value="{{selected.rules.get('announcement_story_publish_count',selected.rules.get('announcement_story_output_count',story_output_defaults.get('announcement',1)))}}">
-      </label>
-    </div>
-
-    <div id="announcement-relative" class="gridform timing-panel" hidden>
-      <label>Richtung zum Anpfiff
-        <select name="announcement_offset_direction">
-          <option value="before" {% if selected.rules.get('announcement_offset_direction','before')=='before' %}selected{% endif %}>vor dem Anpfiff</option>
-          <option value="after" {% if selected.rules.get('announcement_offset_direction')=='after' %}selected{% endif %}>nach dem Anpfiff</option>
-        </select>
-      </label>
-      <label>Abstand in Minuten<input type="number" name="announcement_offset_minutes" min="0" max="43200" value="{{selected.rules.get('announcement_offset_minutes',selected.rules.get('feed_before_minutes',1440))}}"></label>
-    </div>
-
-    <div id="announcement-weekday" class="timing-panel" hidden>
-      <h3>Feed-Termin nach Wochentag des Spiels</h3>
-      <div class="schedule-grid">
-      {% for key,label in weekday_options %}
-        <fieldset>
-          <legend>Spiel am {{label}}</legend>
-          <label>Veröffentlichen am
-            <select name="announcement_target_{{weekday_names[key|int]}}">
-              {% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if announcement_targets.get(key,key)==target_key %}selected{% endif %}>{{target_label}}</option>{% endfor %}
-            </select>
-          </label>
-          <label>Uhrzeit<input type="time" name="announcement_{{weekday_names[key|int]}}" value="{{announcement_times.get(key,'')}}"></label>
-        </fieldset>
-      {% endfor %}
-      </div>
-      <p><small>Der Zieltag wird vor oder spätestens am Spieltag gewählt. Beispiel: Spiel Sonntag → Veröffentlichung Freitag 18:00 Uhr.</small></p>
-    </div>
-
-    <div class="gridform">
-      <label>Alternative Feed-Gestaltungen erzeugen
-        <input type="number" name="announcement_feed_generation_count" min="0" max="10" value="{{selected.rules.get('announcement_feed_generation_count',selected.rules.get('announcement_feed_output_count',1))}}">
-        <small>Diese Zahl bestimmt nur die verfügbaren Alternativen. Karussellpositionen entstehen getrennt davon aus den beteiligten Spielen.</small>
-      </label>
-      <label>Alternative Story-Gestaltungen erzeugen
-        <input type="number" name="announcement_story_generation_count" min="0" max="10" value="{{selected.rules.get('announcement_story_generation_count',selected.rules.get('announcement_story_output_count',story_output_defaults.get('announcement',1)))}}">
-        <small>Jeder Story-Zeitpunkt wählt unten eine dieser Ausgaben aus.</small>
-      </label>
-      <label>Verspätete Freigabe
-        <select name="late_approval">{% for v,n in [('publish_now','Sofort veröffentlichen'),('manual','Manuelle Entscheidung'),('skip','Überspringen'),('next_story','Nächste Story')] %}<option value="{{v}}" {% if selected.rules.get('late_approval')==v %}selected{% endif %}>{{n}}</option>{% endfor %}</select>
-      </label>
-      <label><input type="checkbox" name="auto_approve_announcements" value="true" {% if selected.rules.get('auto_approve_announcements') %}checked{% endif %}> Automatisch erzeugte Ankündigungen freigeben</label>
-    </div>
-  </section>
-
-  <section>
-    <h2>2. Erinnerungsbeitrag</h2>
-    <p>Der Erinnerungs-Feed ist ein zusätzlicher, eigenständiger Beitrag kurz vor dem Spiel. Er ist nicht die erste oder zweite Story.</p>
-    <div class="gridform">
-      <label><input type="checkbox" name="reminder_enabled" value="true" {% if selected.rules.get('reminder_enabled') %}checked{% endif %}> Separaten Erinnerungsbeitrag automatisch erzeugen</label>
-      <p><strong>Veröffentlichung:</strong> Lege unten beliebig viele Feed- und Story-Termine an.</p>
-      <input type="hidden" name="reminder_timing_mode" value="{{selected.rules.get('reminder_timing_mode','relative')}}">
-    </div>
-    <div class="gridform generation-selection">
-      <label>Feed-Varianten erzeugen<input type="number" name="reminder_feed_generation_count" min="0" max="10" value="{{selected.rules.get('reminder_feed_generation_count',selected.rules.get('reminder_feed_output_count',1))}}"></label>
-      <label>Feed-Varianten standardmäßig auswählen<input type="number" name="reminder_feed_publish_count" min="0" max="10" value="{{selected.rules.get('reminder_feed_publish_count',selected.rules.get('reminder_feed_output_count',1))}}"></label>
-      <label>Story-Varianten erzeugen<input type="number" name="reminder_story_generation_count" min="0" max="10" value="{{selected.rules.get('reminder_story_generation_count',selected.rules.get('reminder_story_output_count',story_output_defaults.get('reminder',1)))}}"></label>
-      <label>Story-Varianten standardmäßig auswählen<input type="number" name="reminder_story_publish_count" min="0" max="10" value="{{selected.rules.get('reminder_story_publish_count',selected.rules.get('reminder_story_output_count',story_output_defaults.get('reminder',1)))}}"></label>
-    </div>
-    <div id="reminder-relative" class="timing-panel gridform" hidden>
-      <label>Feed-Veröffentlichung vor Anpfiff (Minuten)<input type="number" name="reminder_feed_before_minutes" min="0" max="10080" value="{{selected.rules.get('reminder_feed_before_minutes',360)}}"></label>
-    </div>
-    <div id="reminder-weekday" class="timing-panel" hidden>
-      <h3>Feed-Termin nach Wochentag des Spiels</h3>
-      <div class="schedule-grid">
-      {% for key,label in weekday_options %}
-        <fieldset><legend>Spiel am {{label}}</legend>
-          <label>Veröffentlichen am<select name="reminder_target_{{weekday_names[key|int]}}">{% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if reminder_targets.get(key,key)==target_key %}selected{% endif %}>{{target_label}}</option>{% endfor %}</select></label>
-          <label>Uhrzeit<input type="time" name="reminder_{{weekday_names[key|int]}}" value="{{reminder_times.get(key,'')}}"></label>
-        </fieldset>
-      {% endfor %}
-      </div>
-    </div>
-    <div class="gridform">
-      <label>Feed-Bilder für Erinnerung<input type="number" name="reminder_feed_output_count" min="0" max="10" value="{{selected.rules.get('reminder_feed_output_count',1)}}"></label>
-      <label>Story-Ausgaben für Erinnerung<input type="number" name="reminder_story_output_count" min="0" max="10" value="{{selected.rules.get('reminder_story_output_count',story_output_defaults.get('reminder',1))}}"></label>
-    </div>
-  </section>
-
-  <section>
-    <h2>3. Ergebnismeldungen</h2>
-    <div class="gridform">
-      <label><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Ergebnismeldungen erzeugen</label>
-      <p><strong>Veröffentlichung:</strong> „Direkt nach Ergebnis“, Verzögerungen und feste Termine werden unten je Slot festgelegt.</p>
-      <input type="hidden" name="result_timing_mode" value="{{selected.rules.get('result_timing_mode','result_detected')}}">
-    </div>
-
-    <div class="gridform generation-selection">
-      <label>Feed-Varianten erzeugen<input type="number" name="result_feed_generation_count" min="0" max="10" value="{{selected.rules.get('result_feed_generation_count',selected.rules.get('result_feed_output_count',1))}}"></label>
-      <label>Feed-Varianten standardmäßig auswählen<input type="number" name="result_feed_publish_count" min="0" max="10" value="{{selected.rules.get('result_feed_publish_count',selected.rules.get('result_feed_output_count',1))}}"></label>
-      <label>Story-Varianten erzeugen<input type="number" name="result_story_generation_count" min="0" max="10" value="{{selected.rules.get('result_story_generation_count',selected.rules.get('result_story_output_count',story_output_defaults.get('result',1)))}}"></label>
-      <label>Story-Varianten standardmäßig auswählen<input type="number" name="result_story_publish_count" min="0" max="10" value="{{selected.rules.get('result_story_publish_count',selected.rules.get('result_story_output_count',story_output_defaults.get('result',1)))}}"></label>
-    </div>
-    <div id="result-relative" class="gridform timing-panel" hidden>
-      <label>Richtung zum Anpfiff
-        <select name="result_offset_direction"><option value="before" {% if selected.rules.get('result_offset_direction')=='before' %}selected{% endif %}>vor dem Anpfiff</option><option value="after" {% if selected.rules.get('result_offset_direction','after')=='after' %}selected{% endif %}>nach dem Anpfiff</option></select>
-      </label>
-      <label>Abstand in Minuten<input type="number" name="result_offset_minutes" min="0" max="43200" value="{{selected.rules.get('result_offset_minutes',120)}}"></label>
-    </div>
-
-    <div id="result-weekday" class="timing-panel" hidden>
-      <h3>Feed-Termin nach Wochentag des Spiels</h3>
-      <div class="schedule-grid">
-      {% for key,label in weekday_options %}
-        <fieldset>
-          <legend>Spiel am {{label}}</legend>
-          <label>Veröffentlichen am
-            <select name="result_target_{{weekday_names[key|int]}}">
-              {% for target_key,target_label in weekday_options %}<option value="{{target_key}}" {% if result_targets.get(key,key)==target_key %}selected{% endif %}>{{target_label}}</option>{% endfor %}
-            </select>
-          </label>
-          <label>Uhrzeit<input type="time" name="result_{{weekday_names[key|int]}}" value="{{result_times.get(key,'')}}"></label>
-        </fieldset>
-      {% endfor %}
-      </div>
-      <p><small>Der Zieltag wird am oder nach dem Spieltag gewählt. Ergebnisse werden niemals vor ihrer bestätigten Erkennung veröffentlicht.</small></p>
-    </div>
-
-    <div class="gridform">
-      <label id="result-minimum-wait">Mindestwartezeit nach Erkennung (Minuten)<input type="number" name="result_wait_minutes" min="0" value="{{selected.rules.get('result_wait_minutes',0)}}"><small>Gilt nur bei relativem oder festem Zeitplan; „Sofort“ bleibt tatsächlich sofort.</small></label>
-      <label>Feed-Bilder pro Ergebnis<input type="number" name="result_feed_output_count" min="0" max="10" value="{{selected.rules.get('result_feed_output_count',1)}}"></label>
-      <label>Story-Ausgaben pro Ergebnis<input type="number" name="result_story_output_count" min="0" max="10" value="{{selected.rules.get('result_story_output_count',story_output_defaults.get('result',1))}}"></label>
-      <label><input type="checkbox" name="auto_approve_results" value="true" {% if selected.rules.get('auto_approve_results') %}checked{% endif %}> Automatisch erzeugte Ergebnisbeiträge freigeben</label>
-    </div>
-  </section>
-
-  <section>
-    <h2>4. FUSSBALL.DE-Automatik und Vereinsbündelung</h2>
-    <div class="gridform">
-      <label><input type="checkbox" name="allow_provisional_games" value="true" {% if selected.rules.get('allow_provisional_games') %}checked{% endif %}> Vorläufige FUSSBALL.DE-Spielpläne für Ankündigungen zulassen</label>
-      <label><input type="checkbox" name="automatic_sync_enabled" value="true" {% if selected.rules.get('automatic_sync_enabled') %}checked{% endif %}> Spielplan automatisch abrufen</label>
-      <label>Normaler Abruf alle<input type="number" name="sync_interval_hours" min="1" max="168" value="{{selected.rules.get('sync_interval_hours',24)}}"> Stunden</label>
-      <label>Am Spieltag Ergebnis prüfen alle<input type="number" name="result_poll_interval_minutes" min="5" max="120" value="{{selected.rules.get('result_poll_interval_minutes',15)}}"> Minuten</label>
-      <label><input type="checkbox" name="automatic_generation_enabled" value="true" {% if selected.rules.get('automatic_generation_enabled') %}checked{% endif %}> Beiträge und Storys automatisch erzeugen</label>
-      <label>Automatisch erzeugen<input type="number" name="generation_lead_days" min="0" max="30" value="{{selected.rules.get('generation_lead_days',4)}}"> Tage vor dem Spiel</label>
-      <label>Feed-Bündelung am gemeinsamen Spieltag
-        <select name="club_matchday_feed_mode">
-          <option value="separate" {% if selected.rules.get('club_matchday_feed_mode','separate')=='separate' %}selected{% endif %}>Feed-Beiträge getrennt</option>
-          <option value="announcements" {% if selected.rules.get('club_matchday_feed_mode')=='announcements' %}selected{% endif %}>Ankündigungen als gemeinsames Karussell</option>
-          <option value="announcements_and_results" {% if selected.rules.get('club_matchday_feed_mode')=='announcements_and_results' %}selected{% endif %}>Ankündigungen und Ergebnisse als gemeinsame Karussells</option>
-        </select>
-        <small>Eine Vereinsbündelung verwendet genau ein Feed-Bild pro Spiel. Storys bleiben pro Spiel getrennt.</small>
-      </label>
-      <label>Erstes Bild im Vereinskarussell
-        <select name="club_matchday_primary_team_id">
-          <option value="">Automatisch: 1. Mannschaft zuerst</option>
-          {% for carousel_team in carousel_teams %}
-          <option value="{{carousel_team.id}}" {% if selected.rules.get('club_matchday_primary_team_id')==carousel_team.id %}selected{% endif %}>{{carousel_team.display_name}}</option>
-          {% endfor %}
-        </select>
-        <small>Ohne Auswahl wird die 1. Mannschaft vor der 2. Mannschaft einsortiert. Eine ausdrücklich gewählte Mannschaft steht immer vorne; die weiteren Spielbilder folgen chronologisch.</small>
-      </label>
-    </div>
-    <p class="warning">Automatische Freigaben können bei aktivierter Instagram-Automatik ohne weitere manuelle Prüfung veröffentlicht werden. Fehlende Medien, Logos, Rechte oder Sicherheitsprüfungen blockieren weiterhin.</p>
-  </section>
-
-  <section>
-    <h2>5. Vereinsstil</h2>
-    <div class="gridform">
-      <label>Stilrichtung für diese Mannschaft<textarea name="style_direction" rows="4" placeholder="z. B. emotional, modern, dynamische Flutlichtatmosphäre">{{selected.rules.get('style_direction','')}}</textarea></label>
-    </div>
-    <p>Hier werden ausschließlich geprüfte, strukturierte Vereinsvorgaben gepflegt. Die technische Generierungslogik wird serverseitig geschützt verwaltet.</p>
-  </section>
-
-  <button>Alle Regeln speichern</button>
-</form>
-
-<section id="publication-rules" class="publication-rule-manager">
-  <h2>Veröffentlichungspläne</h2>
-  <p>Jede Karte gilt nur für den angegebenen Spielwochentag. Nicht angelegte Tage bleiben bewusst ohne Termin; die Inhalte werden trotzdem erzeugt und müssen dann manuell geplant werden.</p>
-
-  {% if publication_rule_cards %}
-  <div class="weekday-rule-grid">
-    {% for card in publication_rule_cards %}
-    <article class="weekday-rule-card">
-      <header>
-        <div><strong>{% if card.weekday is none %}Allgemeine Regeln{% else %}Spiel am {{card.label}}{% endif %}</strong><small>{{card.slots|length}} Veröffentlichung{% if card.slots|length != 1 %}en{% endif %}</small></div>
-      </header>
-      <ol class="rule-timeline">
-        {% for slot in card.slots %}
-        <li>
-          <span class="timeline-dot" aria-hidden="true"></span>
-          <div>
-            <strong>{{slot.summary}}</strong>
-            <small>
-              {% if slot.post_type=='announcement' %}Ankündigung{% elif slot.post_type=='reminder' %}Erinnerung{% else %}Ergebnis{% endif %}
-              · {% if slot.media_kind=='feed' %}Feed{% else %}Story{% endif %}
-              · Variante {{slot.variant_number}}
-            </small>
-            <span>{{slot.label}}</span>
-            <details>
-              <summary>Regel bearbeiten</summary>
-              <form method="post" action="/rules/{{selected.id}}/publication-slots" class="gridform publication-slot-form">
-                <input type="hidden" name="csrf_token" value="{{csrf}}">
-                <input type="hidden" name="expected_team_version" value="{{selected.version}}">
-                <input type="hidden" name="slot_key" value="{{slot.slot_key}}">
-                <label>Bezeichnung<input name="label" maxlength="160" value="{{slot.label}}" required></label>
-                <label>Inhalt<select name="post_type"><option value="announcement" {% if slot.post_type=='announcement' %}selected{% endif %}>Spielankündigung</option><option value="reminder" {% if slot.post_type=='reminder' %}selected{% endif %}>Erinnerung</option><option value="result" {% if slot.post_type=='result' %}selected{% endif %}>Ergebnis</option></select></label>
-                <label>Format<select name="media_kind"><option value="feed" {% if slot.media_kind=='feed' %}selected{% endif %}>Feed</option><option value="story" {% if slot.media_kind=='story' %}selected{% endif %}>Story</option></select></label>
-                <label>Verwendete Variante<input type="number" name="variant_number" min="1" max="10" value="{{slot.variant_number}}" required></label>
-                <label>Gilt für Spiel am<select name="match_weekday"><option value="">Alle Spieltage</option>{% for key,label in weekday_options %}<option value="{{key}}" {% if slot.match_weekday == key|int %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
-                <label>Zeitmodell<select name="timing_model" class="slot-timing-model"><option value="weekday_fixed" {% if slot.timing_model=='weekday_fixed' %}selected{% endif %}>Kalenderbasiert</option><option value="relative" {% if slot.timing_model=='relative' %}selected{% endif %}>Relativ zum Bezugspunkt</option><option value="result_detected" {% if slot.timing_model=='result_detected' %}selected{% endif %}>Nach bestätigtem Ergebnis</option><option value="manual" {% if slot.timing_model=='manual' %}selected{% endif %}>Manuelle Planung</option></select></label>
-                <div class="slot-calendar-fields gridform full-span">
-                  <label>Veröffentlichen am<select name="target_weekday"><option value="">Bitte wählen</option>{% for key,label in weekday_options %}<option value="{{key}}" {% if slot.target_weekday == key|int %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
-                  <label>Uhrzeit<input type="time" name="local_time" value="{{slot.local_time or ''}}"></label>
-                </div>
-                <div class="slot-relative-fields gridform full-span">
-                  <label>Bezug<select name="reference"><option value="kickoff" {% if slot.reference=='kickoff' %}selected{% endif %}>Anpfiff</option><option value="planned_end" {% if slot.reference=='planned_end' %}selected{% endif %}>Geplantes Spielende</option><option value="result_detected" {% if slot.reference=='result_detected' %}selected{% endif %}>Bestätigtes Ergebnis</option><option value="approval" {% if slot.reference=='approval' %}selected{% endif %}>Freigabe</option></select></label>
-                  <label>Richtung<select name="direction"><option value="before" {% if slot.direction=='before' %}selected{% endif %}>vorher</option><option value="after" {% if slot.direction=='after' %}selected{% endif %}>nachher</option></select></label>
-                  <label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" max="43200" value="{{slot.offset_minutes or 0}}"></label>
-                </div>
-                <label>Zielseite<select name="instagram_page_id"><option value="">Mannschaftsstandard</option>{% for p in pages %}<option value="{{p.id}}" {% if slot.instagram_page_id==p.id %}selected{% endif %}>{{p.display_name}}</option>{% endfor %}</select></label>
-                <label>Sortierung<input type="number" name="sort_order" value="{{slot.sort_order or 0}}"></label>
-                <label><input type="checkbox" name="reuse_media" value="true" {% if slot.reuse_media %}checked{% endif %}> Dieselbe Datei darf in mehreren Slots verwendet werden</label>
-                <label class="full-span">Optionale technische Fallbackvorlage<input name="template" value="{{slot.template or ''}}" maxlength="100"></label>
-                <button>Änderungen speichern</button>
-              </form>
-              <form method="post" action="/rules/{{selected.id}}/publication-slots/{{slot.slot_key}}/delete" onsubmit="return confirm('Diese Veröffentlichungsregel wirklich löschen? Bereits erzeugte oder veröffentlichte Inhalte bleiben unverändert.');">
-                <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}"><button class="danger">Regel löschen</button>
-              </form>
-            </details>
-          </div>
-        </li>
-        {% endfor %}
-        {% if card.weekday is not none %}<li class="match-marker"><span class="timeline-dot"></span><strong>SPIEL · {{card.label}}</strong></li>{% endif %}
-      </ol>
-      {% if card.weekday is not none %}
-      <details>
-        <summary>Auf anderen Wochentag kopieren</summary>
-        <form method="post" action="/rules/{{selected.id}}/publication-weekdays/copy" class="gridform" onsubmit="return confirm('Die angezeigten {{card.slots|length}} Regeln wirklich kopieren? Bestehende Zielregeln werden nur bei gesetzter Auswahl ersetzt.');">
-          <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}"><input type="hidden" name="source_weekday" value="{{card.weekday}}">
-          <label>Zielwochentag<select name="target_weekday">{% for key,label in weekday_options if key|int != card.weekday %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label>
-          <label><input type="checkbox" name="replace_existing" value="true"> Bestehende Regeln des Zieltags nach Bestätigung ersetzen</label>
-          <button class="secondary">{{card.slots|length}} Regeln kopieren</button>
-        </form>
-      </details>
-      {% endif %}
-    </article>
-    {% endfor %}
-  </div>
-  {% else %}<div class="notice">Noch keine Veröffentlichungstermine hinterlegt. Beiträge werden erzeugt, erhalten aber den Status „Manuelle Planung erforderlich“.</div>{% endif %}
-
-  <details class="add-rule-panel" open>
-    <summary>Veröffentlichungsregel hinzufügen</summary>
-    <form method="post" action="/rules/{{selected.id}}/publication-slots" class="gridform publication-slot-form">
+    {% if can_manage_automation %}<form method="post" action="/rules/{{selected.id}}/recommended-preset" class="preset-apply-form">
       <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}">
-      <label>Bezeichnung<input name="label" maxlength="160" placeholder="z. B. Story am Vorabend" required></label>
-      <label>Inhalt<select name="post_type"><option value="announcement">Spielankündigung</option><option value="reminder">Erinnerung</option><option value="result">Ergebnis</option></select></label>
-      <label>Format<select name="media_kind"><option value="feed">Feed</option><option value="story">Story</option></select></label>
-      <label>Verwendete Variante<input type="number" name="variant_number" min="1" max="10" value="1" required><small>Eine bereits erzeugte Alternative; die Auswahl selbst verursacht keine KI-Kosten.</small></label>
-      <label>Gilt für Spiel am<select name="match_weekday" required><option value="">Bitte wählen</option>{% for key,label in weekday_options %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label>
-      <label>Zeitmodell<select name="timing_model" class="slot-timing-model"><option value="weekday_fixed">Kalenderbasiert</option><option value="relative">Relativ zum Bezugspunkt</option><option value="result_detected">Nach bestätigtem Ergebnis</option><option value="manual">Manuelle Planung</option></select></label>
-      <div class="slot-calendar-fields gridform full-span"><label>Veröffentlichen am<select name="target_weekday"><option value="">Bitte wählen</option>{% for key,label in weekday_options %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label><label>Uhrzeit<input type="time" name="local_time"></label></div>
-      <div class="slot-relative-fields gridform full-span"><label>Bezug<select name="reference"><option value="kickoff">Anpfiff</option><option value="planned_end">Geplantes Spielende</option><option value="result_detected">Bestätigtes Ergebnis</option><option value="approval">Freigabe</option></select></label><label>Richtung<select name="direction"><option value="before">vorher</option><option value="after">nachher</option></select></label><label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" max="43200" value="0"></label></div>
-      <label>Zielseite<select name="instagram_page_id"><option value="">Mannschaftsstandard</option>{% for p in pages %}<option value="{{p.id}}">{{p.display_name}}</option>{% endfor %}</select></label>
-      <label>Sortierung<input type="number" name="sort_order" value="0"></label>
-      <label><input type="checkbox" name="reuse_media" value="true"> Dieselbe Datei darf in mehreren Slots verwendet werden</label>
-      <label class="full-span">Optionale technische Fallbackvorlage<input name="template" maxlength="100"></label>
-      <button>Regel hinzufügen</button>
-    </form>
+      <label><input type="radio" name="mode" value="append_missing" checked> Nur fehlende Regeln ergänzen <small>Deine bestehenden Regeln bleiben unverändert.</small></label>
+      <label><input type="radio" name="mode" value="replace"> Bestehende Regeln ersetzen <small>Eigene Zeitpläne werden durch die sichtbare Grundeinstellung ersetzt.</small></label>
+      <label class="replace-confirm" hidden><input type="checkbox" name="confirm_replace" value="true"> Ich möchte die bestehenden Regeln wirklich ersetzen.</label>
+      <div class="button-row"><button>Grundeinstellung übernehmen</button><button type="button" class="secondary" data-open-preview>Zeitplanung vorher testen</button><button type="button" class="secondary" onclick="this.closest('details').removeAttribute('open')">Abbrechen</button></div>
+    </form>{% endif %}
   </details>
 </section>
 
-<style>
-  .timing-panel[hidden] { display: none !important; }
-  .schedule-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: .75rem; }
-  .schedule-grid fieldset { margin: 0; }
-  .full-span { grid-column: 1 / -1; }
-  #publishing-rules-form > section { margin-top: 1rem; }
-  .weekday-rule-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:1rem; }
-  .weekday-rule-card { border:1px solid #d9e0ec; border-radius:.75rem; padding:1rem; background:#fff; }
-  .weekday-rule-card header div { display:flex; justify-content:space-between; gap:.75rem; align-items:baseline; }
-  .weekday-rule-card small { color:#526079; }
-  .rule-timeline { list-style:none; padding:0 0 0 1.1rem; border-left:2px solid #cad5e7; }
-  .rule-timeline li { position:relative; margin:0 0 1rem; padding-left:.8rem; }
-  .timeline-dot { position:absolute; width:.7rem; height:.7rem; border-radius:50%; background:#2456db; left:-1.53rem; top:.35rem; }
-  .match-marker .timeline-dot { background:#172b58; }
-  .rule-timeline li > div { display:grid; gap:.18rem; }
-  .publication-slot-form .slot-calendar-fields[hidden],
-  .publication-slot-form .slot-relative-fields[hidden] { display:none !important; }
-  .add-rule-panel { margin-top:1rem; }
-</style>
+<section id="current-automation" class="automation-panel current-automation">
+  <h2>Deine aktuelle Automatik</h2>
+  <div class="automation-summary-grid">
+    <article><h3>Spielankündigungen</h3><strong>{% if selected.rules.get('announcement_enabled') %}✓ Automatische Erstellung{% else %}Nicht aktiv{% endif %}</strong><p>Erstellt: {{current_automation_summary.announcement}}</p><p>Verwendet: {{current_automation_summary.announcement_selected}}</p><p>Freigabe: {% if selected.rules.get('auto_approve_announcements') %}<span class="warning-badge">Automatisch</span>{% else %}manuelle Prüfung{% endif %}</p></article>
+    <article><h3>Ergebnismeldungen</h3><strong>{% if selected.rules.get('result_enabled') %}✓ Automatische Erstellung{% else %}Nicht aktiv{% endif %}</strong><p>Erstellt: {{current_automation_summary.result}}</p><p>Verwendet: {{current_automation_summary.result_selected}}</p><p>Freigabe: {% if selected.rules.get('auto_approve_results') %}<span class="warning-badge">Automatisch</span>{% else %}manuelle Prüfung{% endif %}</p></article>
+    <article><h3>FUSSBALL.DE</h3><strong>{% if selected.rules.get('automatic_sync_enabled') %}✓ Automatische Aktualisierung{% else %}Nicht aktiv{% endif %}</strong><p>Spielplan: alle {{selected.rules.get('sync_interval_hours',24)}} Stunden</p><p>Ergebnisse: alle {{selected.rules.get('result_poll_interval_minutes',15)}} Minuten</p></article>
+    <article><h3>Zeitplanung</h3><strong>{% if current_automation_summary.configured_weekdays %}{{current_automation_summary.configured_weekdays|length}} Spieltage eingerichtet{% else %}Manuelle Planung{% endif %}</strong><p>Nicht eingerichtete Wochentage werden nach der Erstellung manuell geplant.</p><button type="button" class="secondary" data-open-preview>Zeitplanung testen</button></article>
+  </div>
+</section>
+
+{% if can_manage_automation %}
+<form method="post" action="/rules/{{selected.id}}/defaults" id="publishing-rules-form" class="automation-settings-form">
+  <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}">
+  <input type="hidden" name="preserve_legacy_weekday_settings" value="true">
+  <input type="hidden" name="feed_before_minutes" value="{{selected.rules.get('feed_before_minutes',1440)}}"><input type="hidden" name="generation_lead_minutes" value="{{selected.rules.get('generation_lead_minutes',120)}}">
+  <input type="hidden" name="announcement_timing_mode" value="{{selected.rules.get('announcement_timing_mode','relative')}}"><input type="hidden" name="reminder_timing_mode" value="{{selected.rules.get('reminder_timing_mode','relative')}}"><input type="hidden" name="result_timing_mode" value="{{selected.rules.get('result_timing_mode','result_detected')}}">
+  <input type="hidden" name="announcement_feed_output_count" data-mirror="announcement_feed_generation_count"><input type="hidden" name="announcement_story_output_count" data-mirror="announcement_story_generation_count"><input type="hidden" name="reminder_feed_output_count" data-mirror="reminder_feed_generation_count"><input type="hidden" name="reminder_story_output_count" data-mirror="reminder_story_generation_count"><input type="hidden" name="result_feed_output_count" data-mirror="result_feed_generation_count"><input type="hidden" name="result_story_output_count" data-mirror="result_story_generation_count">
+
+  <section class="automation-panel automation-content-section" data-section="announcement">
+    <div class="section-heading"><div><p class="step-number">1</p><h2>Spielankündigungen</h2><p>Die Spielankündigung informiert vor dem Spiel über Gegner, Datum, Uhrzeit und Spielort.</p></div><label class="switch-label"><input type="checkbox" name="announcement_enabled" value="true" {% if selected.rules.get('announcement_enabled') %}checked{% endif %}> Automatisch erstellen</label></div>
+    <h3>Wie viele Entwürfe sollen erstellt werden?</h3><p>Du kannst mehrere unterschiedliche Grafiken erstellen lassen und später die beste auswählen. Bereits erstellte Varianten kannst du ohne neue KI-Generierung wechseln.</p>
+    <div class="variant-grid">
+      <label>Feed-Varianten erstellen<input type="number" name="announcement_feed_generation_count" min="0" max="10" value="{{selected.rules.get('announcement_feed_generation_count',selected.rules.get('announcement_feed_output_count',1))}}"></label>
+      <label>Davon standardmäßig verwenden<input type="number" name="announcement_feed_publish_count" min="0" max="10" value="{{selected.rules.get('announcement_feed_publish_count',selected.rules.get('announcement_feed_output_count',1))}}"></label>
+      <label>Story-Varianten erstellen<input type="number" name="announcement_story_generation_count" min="0" max="10" value="{{selected.rules.get('announcement_story_generation_count',selected.rules.get('announcement_story_output_count',1))}}"></label>
+      <label>Davon standardmäßig verwenden<input type="number" name="announcement_story_publish_count" min="0" max="10" value="{{selected.rules.get('announcement_story_publish_count',selected.rules.get('announcement_story_output_count',1))}}"></label>
+    </div><p class="variant-live-summary" aria-live="polite"></p>
+    <details class="advanced-settings"><summary>Erweiterte Einstellungen</summary>
+      <h3>Prüfung vor der Veröffentlichung</h3>
+      <label class="approval-option"><input type="radio" name="auto_approve_announcements" value="false" {% if not selected.rules.get('auto_approve_announcements') %}checked{% endif %}><span><strong>Vor Veröffentlichung manuell prüfen</strong><small>Der fertige Beitrag wird erst nach deiner Freigabe veröffentlicht.</small></span></label>
+      <label class="approval-option approval-option-danger"><input type="radio" name="auto_approve_announcements" value="true" {% if selected.rules.get('auto_approve_announcements') %}checked{% endif %}><span><strong>Automatisch freigeben</strong><small>Der Beitrag kann ohne vorherige Sichtprüfung veröffentlicht werden.</small></span></label>
+      <div class="auto-approval-confirm" {% if not selected.rules.get('auto_approve_announcements') %}hidden{% endif %}><p class="warning">Technische Prüfungen bleiben aktiv, können aber nicht beurteilen, ob dir eine KI-Grafik gestalterisch gefällt.</p>{% if not selected.rules.get('auto_approve_announcements') %}<label><input type="checkbox" name="auto_approve_announcements_acknowledged" value="true"> Mir ist bewusst, dass Beiträge ohne Sichtprüfung veröffentlicht werden können.</label>{% endif %}</div>
+      <h3>Was passiert, wenn der geplante Zeitpunkt schon vorbei ist?</h3><label><select name="late_approval">{% for v,n in [('manual','Manuell entscheiden'),('publish_now','Nach Freigabe sofort veröffentlichen'),('next_story','Nächsten geplanten Zeitpunkt verwenden'),('skip','Veröffentlichung überspringen')] %}<option value="{{v}}" {% if selected.rules.get('late_approval','manual')==v %}selected{% endif %}>{{n}}</option>{% endfor %}</select><small>Diese Regel greift erst, wenn der geplante Zeitpunkt bereits vergangen ist.</small></label>
+      <input type="hidden" name="announcement_offset_direction" value="{{selected.rules.get('announcement_offset_direction','before')}}"><input type="hidden" name="announcement_offset_minutes" value="{{selected.rules.get('announcement_offset_minutes',1440)}}">
+    </details>
+  </section>
+
+  <section class="automation-panel automation-content-section" data-section="reminder">
+    <div class="section-heading"><div><p class="step-number">2</p><h2>Zusätzliche Spielerinnerung</h2><p>Optional kannst du kurz vor dem Spiel einen weiteren Feed-Beitrag oder zusätzliche Storys veröffentlichen.</p></div><label class="switch-label"><input type="checkbox" name="reminder_enabled" value="true" {% if selected.rules.get('reminder_enabled') %}checked{% endif %}> Spielerinnerung verwenden</label></div>
+    <div class="variant-grid collapsible-content" {% if not selected.rules.get('reminder_enabled') %}hidden{% endif %}>
+      <label>Feed-Varianten erstellen<input type="number" name="reminder_feed_generation_count" min="0" max="10" value="{{selected.rules.get('reminder_feed_generation_count',selected.rules.get('reminder_feed_output_count',1))}}"></label><label>Davon verwenden<input type="number" name="reminder_feed_publish_count" min="0" max="10" value="{{selected.rules.get('reminder_feed_publish_count',selected.rules.get('reminder_feed_output_count',1))}}"></label><label>Story-Varianten erstellen<input type="number" name="reminder_story_generation_count" min="0" max="10" value="{{selected.rules.get('reminder_story_generation_count',selected.rules.get('reminder_story_output_count',1))}}"></label><label>Davon verwenden<input type="number" name="reminder_story_publish_count" min="0" max="10" value="{{selected.rules.get('reminder_story_publish_count',selected.rules.get('reminder_story_output_count',1))}}"></label>
+      <input type="hidden" name="reminder_feed_before_minutes" value="{{selected.rules.get('reminder_feed_before_minutes',360)}}">
+    </div><p class="variant-live-summary" aria-live="polite"></p>
+  </section>
+
+  <section class="automation-panel automation-content-section" data-section="result">
+    <div class="section-heading"><div><p class="step-number">3</p><h2>Ergebnismeldungen</h2><p>Sobald ein Endergebnis von FUSSBALL.DE erkannt und bestätigt wurde, kann automatisch ein Ergebnisbeitrag erstellt werden. Die Veröffentlichung erfolgt direkt oder nach der eingestellten Wartezeit.</p></div><label class="switch-label"><input type="checkbox" name="result_enabled" value="true" {% if selected.rules.get('result_enabled') %}checked{% endif %}> Automatisch erstellen</label></div>
+    <div class="variant-grid"><label>Feed-Varianten erstellen<input type="number" name="result_feed_generation_count" min="0" max="10" value="{{selected.rules.get('result_feed_generation_count',selected.rules.get('result_feed_output_count',1))}}"></label><label>Davon verwenden<input type="number" name="result_feed_publish_count" min="0" max="10" value="{{selected.rules.get('result_feed_publish_count',selected.rules.get('result_feed_output_count',1))}}"></label><label>Story-Varianten erstellen<input type="number" name="result_story_generation_count" min="0" max="10" value="{{selected.rules.get('result_story_generation_count',selected.rules.get('result_story_output_count',1))}}"></label><label>Davon verwenden<input type="number" name="result_story_publish_count" min="0" max="10" value="{{selected.rules.get('result_story_publish_count',selected.rules.get('result_story_output_count',1))}}"></label></div><p class="variant-live-summary" aria-live="polite"></p>
+    <details class="advanced-settings"><summary>Erweiterte Einstellungen</summary><label>Zusätzliche Wartezeit nach bestätigtem Ergebnis<input type="number" name="result_wait_minutes" min="0" max="1440" value="{{selected.rules.get('result_wait_minutes',0)}}"><small>Bei „direkt nach Ergebnis“ wird keine zusätzliche Wartezeit angewendet.</small></label><input type="hidden" name="result_offset_direction" value="{{selected.rules.get('result_offset_direction','after')}}"><input type="hidden" name="result_offset_minutes" value="{{selected.rules.get('result_offset_minutes',120)}}">
+      <h3>Prüfung vor der Veröffentlichung</h3><label class="approval-option"><input type="radio" name="auto_approve_results" value="false" {% if not selected.rules.get('auto_approve_results') %}checked{% endif %}><span><strong>Vor Veröffentlichung manuell prüfen</strong><small>Die Ergebnismeldung wartet im Dashboard auf deine Freigabe.</small></span></label><label class="approval-option approval-option-danger"><input type="radio" name="auto_approve_results" value="true" {% if selected.rules.get('auto_approve_results') %}checked{% endif %}><span><strong>Automatisch freigeben</strong><small>Die Ergebnismeldung kann ohne Sichtprüfung veröffentlicht werden.</small></span></label><div class="auto-approval-confirm" {% if not selected.rules.get('auto_approve_results') %}hidden{% endif %}><p class="warning">Automatische Freigabe umgeht niemals Medien-, Vereins-, Spiel- oder Instagram-Sicherheitsprüfungen.</p>{% if not selected.rules.get('auto_approve_results') %}<label><input type="checkbox" name="auto_approve_results_acknowledged" value="true"> Mir ist bewusst, dass Beiträge ohne Sichtprüfung veröffentlicht werden können.</label>{% endif %}</div>
+    </details>
+  </section>
+
+  <section class="automation-panel fussball-settings">
+    <div class="section-heading"><div><p class="step-number">4</p><h2>Spiele automatisch von FUSSBALL.DE übernehmen</h2><p>Die Vereinszentrale prüft regelmäßig FUSSBALL.DE auf neue Spiele, Terminänderungen und Ergebnisse.</p></div></div>
+    <div class="gridform"><label class="checkbox-label"><input type="checkbox" name="automatic_sync_enabled" value="true" {% if selected.rules.get('automatic_sync_enabled') %}checked{% endif %}> Spielplan automatisch aktualisieren</label><label class="checkbox-label"><input type="checkbox" name="automatic_generation_enabled" value="true" {% if selected.rules.get('automatic_generation_enabled') %}checked{% endif %}> Beiträge automatisch vorbereiten</label><label class="checkbox-label"><input type="checkbox" name="allow_provisional_games" value="true" {% if selected.rules.get('allow_provisional_games') %}checked{% endif %}> Vorläufige Spielpläne für Ankündigungen verwenden</label><label>Spielplan abrufen alle<input type="number" name="sync_interval_hours" min="1" max="168" value="{{selected.rules.get('sync_interval_hours',24)}}"> Stunden</label><label class="{% if invalid_result_poll %}invalid-field{% endif %}">Am Spieltag Ergebnisse prüfen alle<input type="number" name="result_poll_interval_minutes" min="10" max="120" required value="{{selected.rules.get('result_poll_interval_minutes',15)}}"> Minuten<small>Mindestens 10 Minuten, empfohlen sind 15 Minuten.</small>{% if invalid_result_poll %}<strong>Der gespeicherte Altwert ist ungültig. Bitte wähle mindestens 10 Minuten.</strong>{% endif %}</label><label>Inhalte vorbereiten<input type="number" name="generation_lead_days" min="0" max="30" value="{{selected.rules.get('generation_lead_days',4)}}"> Tage vor dem Spiel</label></div>
+  </section>
+
+  <section class="automation-panel matchday-grouping">
+    <div class="section-heading"><div><p class="step-number">5</p><h2>Gemeinsame Feed-Beiträge am Spieltag</h2><p>Ein Instagram-Karussell ist ein Feed-Beitrag mit mehreren Bildern zum Durchblättern. Pro Spiel wird genau ein Feed-Bild verwendet; Storys bleiben immer getrennt.</p></div></div>
+    <label>Wie sollen Mannschaften desselben Vereins zusammengefasst werden?<select name="club_matchday_feed_mode"><option value="separate" {% if selected.rules.get('club_matchday_feed_mode','separate')=='separate' %}selected{% endif %}>Beiträge getrennt veröffentlichen</option><option value="announcements" {% if selected.rules.get('club_matchday_feed_mode')=='announcements' %}selected{% endif %}>Spielankündigungen als gemeinsamen Feed-Beitrag</option><option value="announcements_and_results" {% if selected.rules.get('club_matchday_feed_mode')=='announcements_and_results' %}selected{% endif %}>Spielankündigungen und Ergebnisse als gemeinsame Feed-Beiträge</option></select></label><label>Welches Mannschaftsbild soll zuerst erscheinen?<select name="club_matchday_primary_team_id"><option value="">Automatisch nach Mannschaftsreihenfolge</option>{% for carousel_team in carousel_teams %}<option value="{{carousel_team.id}}" {% if selected.rules.get('club_matchday_primary_team_id')==carousel_team.id %}selected{% endif %}>{{carousel_team.display_name}}</option>{% endfor %}</select><small>Die Reihenfolge kann später beim fertigen Beitrag noch geändert werden.</small></label>
+  </section>
+
+  <section class="branding-link-note"><strong>Erscheinungsbild getrennt verwalten</strong><p>Farben, Schriftarten und das Erscheinungsbild deiner Beiträge verwaltest du ausschließlich unter Vereinsbranding.</p><a class="button secondary" href="/branding">Vereinsbranding öffnen</a></section>
+  <div class="sticky-save"><span id="rules-dirty" hidden>Du hast noch nicht gespeicherte Änderungen.</span><button type="reset" class="secondary">Verwerfen</button><button>Änderungen speichern</button></div>
+</form>
+{% endif %}
+
+<section id="publication-rules" class="automation-panel publication-rule-manager">
+  <div class="section-heading"><div><h2>Wann soll veröffentlicht werden?</h2><p>Du musst nicht für jeden Wochentag eine Regel anlegen. Ohne passende Regel werden Inhalte trotzdem erstellt und warten anschließend auf deine manuelle Zeitplanung.</p></div>{% if can_manage_automation %}<button type="button" class="secondary" data-open-add-rule>Neue Regel anlegen</button>{% endif %}</div>
+  {% if publication_rule_cards %}<div class="weekday-rule-grid">{% for card in publication_rule_cards %}<article class="weekday-rule-card"><header><div><strong>{% if card.weekday is none %}Regeln unabhängig vom Wochentag{% else %}Spiel am {{card.label}}{% endif %}</strong><small>{{card.slots|length}} Veröffentlichung{% if card.slots|length != 1 %}en{% endif %}</small></div></header><ol class="rule-timeline">{% for slot in card.slots %}<li><span class="timeline-dot" aria-hidden="true"></span><div><strong>{{slot.summary}}</strong><small>{% if slot.post_type=='announcement' %}Spielankündigung{% elif slot.post_type=='reminder' %}Spielerinnerung{% else %}Ergebnismeldung{% endif %} · {% if slot.media_kind=='feed' %}Feed-Beitrag{% else %}Story{% endif %} · Variante {{slot.variant_number}}</small>
+    {% if can_manage_automation %}<details><summary>Regel bearbeiten</summary><form method="post" action="/rules/{{selected.id}}/publication-slots" class="publication-slot-form guided-rule-form"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}"><input type="hidden" name="slot_key" value="{{slot.slot_key}}"><label>Inhalt<select name="post_type"><option value="announcement" {% if slot.post_type=='announcement' %}selected{% endif %}>Spielankündigung</option><option value="reminder" {% if slot.post_type=='reminder' %}selected{% endif %}>Spielerinnerung</option><option value="result" {% if slot.post_type=='result' %}selected{% endif %}>Ergebnismeldung</option></select></label><label>Format<select name="media_kind"><option value="feed" {% if slot.media_kind=='feed' %}selected{% endif %}>Feed-Beitrag</option><option value="story" {% if slot.media_kind=='story' %}selected{% endif %}>Story</option></select></label><label>Spieltag<select name="match_weekday"><option value="">Unabhängig vom Wochentag</option>{% for key,label in weekday_options %}<option value="{{key}}" {% if slot.match_weekday == key|int %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label><label>Wann?<select name="timing_model" class="slot-timing-model"><option value="weekday_fixed" {% if slot.timing_model=='weekday_fixed' %}selected{% endif %}>Bestimmter Wochentag und Uhrzeit</option><option value="relative" {% if slot.timing_model=='relative' %}selected{% endif %}>Zeit vor oder nach dem Anpfiff</option><option value="result_detected" {% if slot.timing_model=='result_detected' %}selected{% endif %}>Nach bestätigtem Ergebnis</option><option value="manual" {% if slot.timing_model=='manual' %}selected{% endif %}>Manuelle Planung</option></select></label><div class="slot-calendar-fields"><label>Veröffentlichen am<select name="target_weekday"><option value="">Bitte wählen</option>{% for key,label in weekday_options %}<option value="{{key}}" {% if slot.target_weekday == key|int %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label><label>Uhrzeit<input type="time" name="local_time" value="{{slot.local_time or ''}}"></label></div><div class="slot-relative-fields"><label>Bezug<select name="reference"><option value="kickoff" {% if slot.reference=='kickoff' %}selected{% endif %}>Anpfiff</option><option value="planned_end" {% if slot.reference=='planned_end' %}selected{% endif %}>Geplantes Spielende</option><option value="result_detected" {% if slot.reference=='result_detected' %}selected{% endif %}>Bestätigtes Ergebnis</option><option value="approval" {% if slot.reference=='approval' %}selected{% endif %}>Freigabe</option></select></label><label>Richtung<select name="direction"><option value="before" {% if slot.direction=='before' %}selected{% endif %}>vorher</option><option value="after" {% if slot.direction=='after' %}selected{% endif %}>nachher</option></select></label><label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" max="43200" value="{{slot.offset_minutes or 0}}"></label></div><label>Variante<input type="number" name="variant_number" min="1" max="10" value="{{slot.variant_number}}"></label><p class="live-rule-summary"></p><details class="advanced-settings"><summary>Erweiterte Einstellungen</summary><label>Eigener interner Name (optional)<input name="label" maxlength="160" value="{{slot.label}}"></label><label><input type="checkbox" class="page-override-toggle" {% if slot.instagram_page_id %}checked{% endif %}> Andere Instagram-Seite verwenden</label><label class="page-override" {% if not slot.instagram_page_id %}hidden{% endif %}>Instagram-Seite<select name="instagram_page_id"><option value="">Mannschaftsstandard</option>{% for p in pages %}<option value="{{p.id}}" {% if slot.instagram_page_id==p.id %}selected{% endif %}>{{p.display_name}} (@{{p.username}})</option>{% endfor %}</select></label><label>Sortierung<input type="number" name="sort_order" value="{{slot.sort_order or 0}}"></label><label><input type="checkbox" name="reuse_media" value="true" {% if slot.reuse_media %}checked{% endif %}> Bereits erstellte Datei wiederverwenden</label><label>Technische Fallbackvorlage<input name="template" maxlength="100" value="{{slot.template or ''}}"></label></details><button>Regel speichern</button></form></details><form method="post" action="/rules/{{selected.id}}/publication-slots/{{slot.slot_key}}/delete" onsubmit="return confirm('Diese Veröffentlichungsregel wirklich löschen?');"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}"><button class="danger">Regel löschen</button></form>{% endif %}</div></li>{% endfor %}<li class="match-marker"><span class="timeline-dot"></span><div><strong>Spiel · {{card.label}}</strong></div></li></ol>{% if card.weekday is not none %}<div class="card-actions"><button type="button" class="secondary card-preview-button" data-preview-weekday="{{card.weekday}}">Test anzeigen</button>{% if can_manage_automation %}<details><summary>Regeln dieses Tages kopieren</summary><form method="post" action="/rules/{{selected.id}}/publication-weekdays/copy"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}"><input type="hidden" name="source_weekday" value="{{card.weekday}}"><label>Ziel-Spieltag<select name="target_weekday" required>{% for key,label in weekday_options if key|int != card.weekday %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label><label class="checkbox-label"><input type="checkbox" name="replace_existing" value="true"> Bereits vorhandene Regeln am Zieltag ausdrücklich ersetzen</label><button>Regeln kopieren</button></form></details>{% endif %}</div>{% endif %}</article>{% endfor %}</div>{% else %}<div class="notice">Noch keine Veröffentlichungszeiten hinterlegt. Inhalte werden erstellt und erhalten den Status „Manuelle Planung erforderlich“.</div>{% endif %}
+
+  {% if can_manage_automation %}<details id="add-rule-panel" class="add-rule-panel"><summary>Veröffentlichungsregel hinzufügen</summary><form method="post" action="/rules/{{selected.id}}/publication-slots" class="guided-rule-form publication-slot-form"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="expected_team_version" value="{{selected.version}}"><fieldset><legend>1 · Was möchtest du veröffentlichen?</legend><label><input type="radio" name="media_kind" value="feed" checked> Feed-Beitrag</label><label><input type="radio" name="media_kind" value="story"> Story</label></fieldset><fieldset><legend>2 · Zu welchem Inhalt?</legend><label><input type="radio" name="post_type" value="announcement" checked> Spielankündigung</label><label><input type="radio" name="post_type" value="reminder"> Spielerinnerung</label><label><input type="radio" name="post_type" value="result"> Ergebnismeldung</label></fieldset><label>3 · Für welchen Spieltag?<select name="match_weekday"><option value="">Unabhängig vom Wochentag</option>{% for key,label in weekday_options %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label><label>4 · Wann soll veröffentlicht werden?<select name="timing_model" class="slot-timing-model"><option value="weekday_fixed">Bestimmter Wochentag und Uhrzeit</option><option value="relative">Zeit vor oder nach dem Anpfiff</option><option value="result_detected">Direkt oder später nach dem Ergebnis</option><option value="manual">Manuelle Planung</option></select></label><div class="slot-calendar-fields"><label>Veröffentlichen am<select name="target_weekday"><option value="">Bitte wählen</option>{% for key,label in weekday_options %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label><label>Uhrzeit<input type="time" name="local_time"></label></div><div class="slot-relative-fields"><label>Bezug<select name="reference"><option value="kickoff">Anpfiff</option><option value="planned_end">Geplantes Spielende</option><option value="result_detected">Bestätigtes Ergebnis</option><option value="approval">Freigabe</option></select></label><label>Richtung<select name="direction"><option value="before">vorher</option><option value="after">nachher</option></select></label><label>Abstand in Minuten<input type="number" name="offset_minutes" min="0" max="43200" value="0"></label></div><label>5 · Welche Variante verwenden?<input type="number" name="variant_number" min="1" max="10" value="1"><small>Die Variante kann später beim fertigen Beitrag geändert werden.</small></label><div><strong>6 · Vorschau</strong><p class="live-rule-summary">Vervollständige die Regel, um eine Zusammenfassung zu sehen.</p></div><details class="advanced-settings"><summary>Erweiterte Einstellungen</summary><label>Eigener interner Name (optional)<input name="label" maxlength="160" placeholder="Wird sonst automatisch erzeugt"></label><label><input type="checkbox" class="page-override-toggle"> Andere Instagram-Seite verwenden</label><label class="page-override" hidden>Instagram-Seite<select name="instagram_page_id"><option value="">Mannschaftsstandard{% for p in pages if p.id==selected.instagram_page_id %} (@{{p.username}}){% endfor %}</option>{% for p in pages %}<option value="{{p.id}}">{{p.display_name}} (@{{p.username}})</option>{% endfor %}</select></label><label>Sortierung<input type="number" name="sort_order" value="0"></label><label><input type="checkbox" name="reuse_media" value="true"> Bereits erstellte Datei wiederverwenden</label><label>Technische Fallbackvorlage<input name="template" maxlength="100"></label></details><button>Regel speichern</button></form></details>{% endif %}
+</section>
+
+{% if can_manage_automation %}<dialog id="schedule-preview-dialog" class="schedule-preview-dialog"><form method="dialog" class="dialog-close"><button aria-label="Schließen">×</button></form><h2>Zeitplanung testen</h2><p>Dieser Test erzeugt keinen Beitrag, verbraucht kein KI-Kontingent und verändert keine Daten.</p><form id="schedule-preview-form" action="/rules/{{selected.id}}/schedule-preview"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Spieltag und Anstoß<input type="datetime-local" name="kickoff_local" required></label><label>Beispielhafter Ergebniszeitpunkt (optional)<input type="datetime-local" name="result_local"></label><label>Spielort<select name="side"><option value="home">Heimspiel</option><option value="away">Auswärtsspiel</option></select></label><button>Automatik anzeigen</button></form><div id="schedule-preview-result" aria-live="polite"></div></dialog>{% endif %}
+
 <script>
 (() => {
-  const refreshSlotForm = (form) => {
-    const mode = form.querySelector('.slot-timing-model')?.value || 'manual';
-    const calendar = form.querySelector('.slot-calendar-fields');
-    const relative = form.querySelector('.slot-relative-fields');
-    if (calendar) calendar.hidden = mode !== 'weekday_fixed';
-    if (relative) relative.hidden = !['relative', 'result_detected'].includes(mode);
-  };
-  document.querySelectorAll('.publication-slot-form').forEach(form => {
-    const mode = form.querySelector('.slot-timing-model');
-    mode?.addEventListener('change', () => refreshSlotForm(form));
-    refreshSlotForm(form);
-  });
-  document.querySelectorAll('input[name$="_output_count"]').forEach(input => {
-    const legacyLabel = input.closest('label');
-    if (legacyLabel) legacyLabel.hidden = true;
-  });
+  const weekdays=['Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag','Sonntag'];
+  const form=document.getElementById('publishing-rules-form');
+  const dirty=document.getElementById('rules-dirty');
+  const syncMirrors=()=>document.querySelectorAll('[data-mirror]').forEach(target=>{const source=document.querySelector(`[name="${target.dataset.mirror}"]`);if(source)target.value=source.value;});
+  const updateVariantSummary=section=>{const type=section.dataset.section;const fg=section.querySelector(`[name="${type}_feed_generation_count"]`);const fp=section.querySelector(`[name="${type}_feed_publish_count"]`);const sg=section.querySelector(`[name="${type}_story_generation_count"]`);const sp=section.querySelector(`[name="${type}_story_publish_count"]`);const out=section.querySelector('.variant-live-summary');if(!(out&&fg&&fp&&sg&&sp))return;fp.setCustomValidity(Number(fp.value)>Number(fg.value)?`Es können nicht ${fp.value} Feed-Varianten verwendet werden, wenn nur ${fg.value} erstellt werden.`:'');sp.setCustomValidity(Number(sp.value)>Number(sg.value)?`Es können nicht ${sp.value} Story-Varianten verwendet werden, wenn nur ${sg.value} erstellt werden.`:'');out.textContent=`Die KI erstellt ${fg.value} Feed- und ${sg.value} Story-Varianten. Standardmäßig werden ${fp.value} Feed und ${sp.value} Storys eingeplant. Die übrigen Varianten bleiben als Alternativen verfügbar.`;};
+  const updateProgressiveSections=()=>{document.querySelectorAll('.automation-content-section').forEach(section=>{const switchInput=section.querySelector('.switch-label input');const content=section.querySelector('.collapsible-content');if(content&&switchInput)content.hidden=!switchInput.checked;});};
+  document.querySelectorAll('.automation-content-section').forEach(section=>{section.querySelectorAll('input').forEach(input=>input.addEventListener('input',()=>updateVariantSummary(section)));updateVariantSummary(section);});
+  form?.addEventListener('input',()=>{dirty.hidden=false;syncMirrors();updateProgressiveSections();});form?.addEventListener('change',()=>{dirty.hidden=false;syncMirrors();updateProgressiveSections();});form?.addEventListener('reset',()=>setTimeout(()=>{dirty.hidden=true;document.querySelectorAll('.automation-content-section').forEach(updateVariantSummary);syncMirrors();updateProgressiveSections();},0));form?.addEventListener('submit',()=>{syncMirrors();dirty.hidden=true;});syncMirrors();updateProgressiveSections();
+  window.addEventListener('beforeunload',event=>{if(dirty&&!dirty.hidden){event.preventDefault();event.returnValue='';}});
+  document.querySelectorAll('[name="copy_mode"],[name="mode"]').forEach(input=>input.addEventListener('change',()=>{const parent=input.closest('form');const confirm=parent?.querySelector('.replace-confirm');if(confirm)confirm.hidden=parent.querySelector('input[value="replace"]:checked')===null;}));
+  document.querySelectorAll('input[type="radio"][name^="auto_approve_"]').forEach(input=>input.addEventListener('change',()=>{const details=input.closest('details');const box=details?.querySelector('.auto-approval-confirm');if(!box)return;const active=details.querySelector('input[value="true"]:checked')!==null;box.hidden=!active;const acknowledgement=box.querySelector('input[type="checkbox"]');if(acknowledgement)acknowledgement.required=active;}));
+  const refreshSlot=form=>{const mode=form.querySelector('.slot-timing-model')?.value||'manual';const calendar=form.querySelector('.slot-calendar-fields');const relative=form.querySelector('.slot-relative-fields');if(calendar)calendar.hidden=mode!=='weekday_fixed';if(relative)relative.hidden=!['relative','result_detected'].includes(mode);const summary=form.querySelector('.live-rule-summary');const medium=form.querySelector('[name="media_kind"]:checked')?.value||form.querySelector('[name="media_kind"]')?.value;const post=form.querySelector('[name="post_type"]:checked')?.value||form.querySelector('[name="post_type"]')?.value;const day=form.querySelector('[name="match_weekday"]')?.value;const target=form.querySelector('[name="target_weekday"]')?.value;const time=form.querySelector('[name="local_time"]')?.value;if(summary){let text=`${medium==='story'?'Diese Story':'Dieser Feed-Beitrag'} zur ${post==='result'?'Ergebnismeldung':post==='reminder'?'Spielerinnerung':'Spielankündigung'}`;if(mode==='weekday_fixed'&&day!==''&&target!==''&&time)text+=` wird bei einem ${weekdays[Number(day)]}sspiel am ${weekdays[Number(target)]} um ${time} Uhr veröffentlicht.`;else if(mode==='result_detected')text+=' wird nach dem bestätigten Endergebnis veröffentlicht.';else if(mode==='manual')text+=' wird nach der Erstellung manuell geplant.';else text+=' wird relativ zum gewählten Bezugspunkt geplant.';summary.textContent=text;}};
+  document.querySelectorAll('.publication-slot-form').forEach(slot=>{slot.addEventListener('input',()=>refreshSlot(slot));slot.addEventListener('change',()=>refreshSlot(slot));refreshSlot(slot);const toggle=slot.querySelector('.page-override-toggle');toggle?.addEventListener('change',()=>{slot.querySelector('.page-override').hidden=!toggle.checked;});});
+  document.querySelector('[data-open-add-rule]')?.addEventListener('click',()=>{const panel=document.getElementById('add-rule-panel');panel.open=true;panel.scrollIntoView({behavior:'smooth'});});
+  const dialog=document.getElementById('schedule-preview-dialog');const previewForm=document.getElementById('schedule-preview-form');const result=document.getElementById('schedule-preview-result');const setExample=weekday=>{if(!previewForm)return;const date=new Date();let delta=(Number(weekday)-((date.getDay()+6)%7)+7)%7;if(delta===0)delta=7;date.setDate(date.getDate()+delta);date.setHours(15,0,0,0);const local=new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);previewForm.elements.kickoff_local.value=local;};document.querySelectorAll('[data-open-preview]').forEach(button=>button.addEventListener('click',()=>{setExample(6);dialog?.showModal();}));document.querySelectorAll('[data-preview-weekday]').forEach(button=>button.addEventListener('click',()=>{setExample(button.dataset.previewWeekday);dialog?.showModal();}));
+  const escapeHtml=value=>String(value??'').replace(/[&<>'"]/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]));
+  previewForm?.addEventListener('submit',async event=>{event.preventDefault();result.innerHTML='<p>Berechnung läuft …</p>';const response=await fetch(previewForm.action,{method:'POST',body:new FormData(previewForm),credentials:'same-origin'});if(!response.ok){const data=await response.json().catch(()=>({detail:'Die Vorschau konnte nicht berechnet werden.'}));result.innerHTML=`<p class="error">${escapeHtml(data.detail)}</p>`;return;}const data=await response.json();const warnings=data.warnings.map(text=>`<li>${escapeHtml(text)}</li>`).join('');const events=data.events.map(item=>`<article><time>${escapeHtml(item.when)}</time><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.description)}</p></article>`).join('');result.innerHTML=`<h3>So würde die Automatik arbeiten</h3>${warnings?`<div class="preview-warnings"><strong>Bitte prüfen</strong><ul>${warnings}</ul></div>`:''}<div class="preview-timeline">${events}</div>`;});
 })();
 </script>
 {% endif %}
