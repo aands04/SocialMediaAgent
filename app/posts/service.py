@@ -8,7 +8,12 @@ from PIL import Image
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.branding.service import STANDARD_FONTS, branding_form_state
+from app.branding.compiler import (
+    SPONSOR_POSITION_LABELS,
+    applicable_sponsors,
+    team_display_name,
+)
+from app.branding.service import STANDARD_FONTS, branding_form_state, branding_snapshot
 from app.config import get_settings
 from app.games.identity import resolve_team_side, team_aliases
 from app.logos.service import LogoCompositor, LogoValidationError, frozen_logo_set
@@ -31,7 +36,11 @@ from app.models import (
     Team,
 )
 from app.posts.rules import calculate_publication_time, resolve_publication_slots
-from app.prompts.service import resolve_prompt
+from app.prompts.service import (
+    matchday_bundle_prompt,
+    prompt_for_variant,
+    resolve_prompt,
+)
 from app.rendering.service import Renderer, builtin_template
 from app.textgen.service import GeneratedText, TextGenerator
 
@@ -363,6 +372,91 @@ def _normalize_design_snapshot(value: object) -> dict:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _facts_for_media(facts: dict, media_kind: str) -> dict:
+    by_media = facts.get("sponsor_references_by_media") or {}
+    return {
+        **facts,
+        "sponsor_references": list(by_media.get(media_kind) or []),
+    }
+
+
+def _sponsor_snapshot(facts: dict) -> dict[str, list[dict]]:
+    result: dict[str, list[dict]] = {}
+    for media_kind, references in (facts.get("sponsor_references_by_media") or {}).items():
+        result[media_kind] = [
+            {key: value for key, value in item.items() if key != "path"}
+            for item in references
+        ]
+    return result
+
+
+def _resolve_sponsor_references(
+    db: Session,
+    *,
+    snapshot: dict,
+    team: Team,
+    game: Game,
+    post_type: str,
+    media_kind: str,
+    kickoff: datetime,
+) -> list[dict]:
+    references: list[dict] = []
+    seen: set[str] = set()
+    for sponsor in applicable_sponsors(
+        snapshot,
+        team_id=team.id,
+        post_type=post_type,
+        media_kind=media_kind,
+        at=kickoff,
+    ):
+        media_id = str(sponsor.get("media_asset_id") or "").strip()
+        if not media_id:
+            if sponsor.get("required"):
+                raise ValueError(
+                    f"Für den Pflichtsponsor {sponsor.get('name')} ist kein Logo hinterlegt"
+                )
+            continue
+        if media_id in seen:
+            continue
+        asset = db.scalar(
+            select(MediaAsset).where(
+                MediaAsset.id == media_id,
+                MediaAsset.club_id == team.club_id,
+            )
+        )
+        if (
+            asset is None
+            or not asset.active
+            or not asset.available
+            or asset.mime_type not in {"image/jpeg", "image/png", "image/webp"}
+        ):
+            raise ValueError(
+                f"Das hinterlegte Sponsorenlogo {sponsor.get('name')} ist nicht verfügbar"
+            )
+        placement = str(sponsor.get("placement") or "auto")
+        references.append(
+            {
+                "name": str(sponsor.get("name") or asset.filename),
+                "media_asset_id": asset.id,
+                "path": _media_path(asset),
+                "mime_type": asset.mime_type,
+                "size": asset.size,
+                "checksum": asset.checksum,
+                "placement": placement,
+                "placement_instruction": (
+                    SPONSOR_POSITION_LABELS.get(
+                        placement, "An einer zur Gesamtkomposition passenden Stelle integrieren."
+                    ).capitalize()
+                    + "; die genaue Position frei aus der Gesamtkomposition bestimmen."
+                ),
+                "instagram_mention": sponsor.get("instagram_mention") or "",
+                "required": bool(sponsor.get("required")),
+            }
+        )
+        seen.add(media_id)
+    return references
+
+
 def _render_metadata(renderer: Renderer, path: str) -> dict:
     metadata = renderer.metadata_for(path) if hasattr(renderer, "metadata_for") else {}
     return {**(metadata or {}), "path": path}
@@ -405,6 +499,8 @@ def _facts(
         (branding.image_settings if branding else {}) or {},
         (branding.text_settings if branding else {}) or {},
     )
+    snapshot = branding_snapshot(db, team.club_id)
+    snapshot = {**snapshot, "image": image_settings, "text": text_settings}
     home_venue_display = (
         str(text_settings.get("home_venue_short") or "").strip()
         or str(text_settings.get("home_venue") or "").strip()
@@ -417,11 +513,25 @@ def _facts(
     secondary_family = STANDARD_FONTS.get(
         secondary_standard_key, STANDARD_FONTS["system"]
     )["family"]
+    display_name, display_short = team_display_name(snapshot, team.id, team.display_name)
+    sponsor_references_by_media = {
+        media_kind: _resolve_sponsor_references(
+            db,
+            snapshot=snapshot,
+            team=team,
+            game=game,
+            post_type=post_type,
+            media_kind=media_kind,
+            kickoff=kickoff,
+        )
+        for media_kind in ("feed", "story")
+    }
     facts = {
         "club_id": team.club_id,
         "home_team": game.home_team,
         "away_team": game.away_team,
         "own_team": team.display_name,
+        "own_team_display": display_name,
         "own_team_aliases": list(aliases),
         "kickoff": kickoff.isoformat(),
         "venue": game.venue,
@@ -429,12 +539,19 @@ def _facts(
         "pitch": game.pitch,
         "competition": game.competition,
         "post_type": post_type,
-        "hashtags": team.hashtags,
-        "primary_color": team.colors.get("primary"),
-        "secondary_color": team.colors.get("secondary"),
+        "hashtags": text_settings.get("hashtags") or team.hashtags,
+        "primary_color": image_settings.get("primary_color") or team.colors.get("primary"),
+        "secondary_color": image_settings.get("secondary_color")
+        or team.colors.get("secondary"),
         "style_direction": team.rules.get("style_direction"),
-        "team_short": team.short_name,
-        "side_label": "Heimspiel" if side == "home" else "Auswärtsspiel",
+        "team_short": display_short or team.short_name,
+        "home_label": text_settings.get("home_label") or "Heimspiel",
+        "away_label": text_settings.get("away_label") or "Auswärtsspiel",
+        "side_label": (
+            text_settings.get("home_label") or "Heimspiel"
+            if side == "home"
+            else text_settings.get("away_label") or "Auswärtsspiel"
+        ),
         "player_image": _media_path(asset),
         "team_logo": _upload_path(team_logo.get("path")),
         "opponent_logo": _upload_path(opponent_logo.get("path"))
@@ -445,6 +562,7 @@ def _facts(
         "secondary_font_asset": secondary_font,
         "primary_font_family": primary_family,
         "secondary_font_family": secondary_family,
+        "sponsor_references_by_media": sponsor_references_by_media,
     }
     if post_type == "result" and game.result_confirmed:
         facts["score"] = f"{game.home_score}:{game.away_score}"
@@ -487,6 +605,7 @@ def create_post(
         raise ValueError("Für eine KI-Grafik ist ein unverbrauchtes Spielerbild erforderlich")
     feed_design = _design(db, team.feed_template, post_type, "feed")
     facts = _facts(db, game, team, asset, post_type, logos)
+    feed_facts = _facts_for_media(facts, "feed")
     feed_prompt = None
     text_prompt = None
     if getattr(renderer, "is_ai", False):
@@ -494,16 +613,20 @@ def create_post(
             f"image_prompt_feed_{post_type}",
             team.rules.get("image_prompt_feed", "default-image-feed"),
         )
-        feed_prompt = resolve_prompt(db, feed_prompt_name, "image", post_type, "feed", facts)
+        feed_prompt = resolve_prompt(
+            db, feed_prompt_name, "image", post_type, "feed", feed_facts
+        )
     if text_prompt_override is not None:
         text_prompt = text_prompt_override
-        facts = {**facts, "text_prompt": text_prompt}
+        facts = {**feed_facts, "text_prompt": text_prompt}
     elif getattr(generator, "is_ai", False):
         text_prompt_name = team.rules.get(
             f"text_prompt_{post_type}", team.rules.get("text_prompt", f"default-text-{post_type}")
         )
-        text_prompt = resolve_prompt(db, text_prompt_name, "text", post_type, "none", facts)
-        facts = {**facts, "text_prompt": text_prompt}
+        text_prompt = resolve_prompt(
+            db, text_prompt_name, "text", post_type, "none", feed_facts
+        )
+        facts = {**feed_facts, "text_prompt": text_prompt}
     primary_font = facts["primary_font_asset"]
     secondary_font = facts["secondary_font_asset"]
     post = Post(
@@ -527,6 +650,7 @@ def create_post(
             },
             "stories": [],
             "logos": logos,
+            "sponsors": _sponsor_snapshot(facts),
             "media": {},
             "fonts": {
                 "primary": primary_font
@@ -607,6 +731,7 @@ def create_post(
     )
     feed_paths = []
     for output_index in range(1, feed_output_count + 1):
+        output_prompt = prompt_for_variant(feed_prompt, output_index, feed_output_count)
         relative = (
             f"{post.id}/feed-variant-{output_index}-v1.png"
             if structured_feed_variants
@@ -622,9 +747,9 @@ def create_post(
                     "feed",
                     relative,
                     {
-                        **facts,
+                        **_facts_for_media(facts, "feed"),
                         "template": feed_design,
-                        "image_prompt": feed_prompt,
+                        "image_prompt": output_prompt,
                         "feed_output_index": output_index,
                         "feed_output_count": feed_output_count,
                     },
@@ -816,11 +941,23 @@ def create_post(
                     team.rules.get("image_prompt_story", "default-image-story"),
                 )
             story_prompt = (
-                resolve_prompt(db, story_prompt_name, "image", post_type, "story", facts)
+                resolve_prompt(
+                    db,
+                    story_prompt_name,
+                    "image",
+                    post_type,
+                    "story",
+                    _facts_for_media(facts, "story"),
+                )
                 if getattr(renderer, "is_ai", False)
                 else None
             )
-            render_context = {**facts, "template": story_design, "story_output_index": media_slot}
+            story_prompt = prompt_for_variant(story_prompt, media_slot, story_output_count)
+            render_context = {
+                **_facts_for_media(facts, "story"),
+                "template": story_design,
+                "story_output_index": media_slot,
+            }
             if story_prompt:
                 render_context["image_prompt"] = story_prompt
             path = str(
@@ -917,11 +1054,23 @@ def create_post(
                 team_rules.get("image_prompt_story", "default-image-story"),
             )
         story_prompt = (
-            resolve_prompt(db, story_prompt_name, "image", post_type, "story", facts)
+            resolve_prompt(
+                db,
+                story_prompt_name,
+                "image",
+                post_type,
+                "story",
+                _facts_for_media(facts, "story"),
+            )
             if getattr(renderer, "is_ai", False)
             else None
         )
-        render_context = {**facts, "template": story_design, "story_output_index": media_slot}
+        story_prompt = prompt_for_variant(story_prompt, media_slot, story_output_count)
+        render_context = {
+            **_facts_for_media(facts, "story"),
+            "template": story_design,
+            "story_output_index": media_slot,
+        }
         if story_prompt:
             render_context["image_prompt"] = story_prompt
         path = str(
@@ -1081,7 +1230,29 @@ def create_matchday_bundle_posts(
         raise ValueError("Ein gemeinsamer Spieltagsauftrag benötigt mindestens zwei Spiele")
     primary = games[0]
     primary_team = teams[primary.team_id]
-    base_facts = _facts(db, primary, primary_team, None, post_type, logo_snapshots[primary.id])
+    bundle_facts = {
+        game.id: _facts(
+            db,
+            game,
+            teams[game.team_id],
+            None,
+            post_type,
+            logo_snapshots[game.id],
+        )
+        for game in games
+    }
+    base_facts = bundle_facts[primary.id]
+    combined_sponsors = []
+    seen_sponsors: set[str] = set()
+    for game in games:
+        for sponsor in _facts_for_media(bundle_facts[game.id], "feed").get(
+            "sponsor_references", []
+        ):
+            identity = str(sponsor.get("media_asset_id") or sponsor.get("name") or "")
+            if identity and identity not in seen_sponsors:
+                combined_sponsors.append(sponsor)
+                seen_sponsors.add(identity)
+    base_facts = {**base_facts, "sponsor_references": combined_sponsors}
     local_games = []
     for index, game in enumerate(games, start=1):
         kickoff = _aware_utc(game.kickoff).astimezone(BERLIN)
@@ -1102,7 +1273,7 @@ def create_matchday_bundle_posts(
                 "score": score,
             }
         )
-    lines = []
+    match_lines = []
     for item in local_games:
         line = (
             f"{item['position']}. {item['home_team']} gegen {item['away_team']}; "
@@ -1114,8 +1285,8 @@ def create_matchday_bundle_posts(
             line += f"; Spielort: {item['venue']}"
         if item["score"]:
             line += f"; bestätigtes Ergebnis: {item['score']}"
-        lines.append(line)
-    match_list = "\n".join(lines)
+        match_lines.append(line)
+    match_list = "\n".join(match_lines)
     shared_prompt = None
     if getattr(generator, "is_ai", False):
         prompt_name = primary_team.rules.get(
@@ -1123,25 +1294,14 @@ def create_matchday_bundle_posts(
             primary_team.rules.get("text_prompt", f"default-text-{post_type}"),
         )
         shared_prompt = resolve_prompt(
-            db, prompt_name, "text", post_type, "none", base_facts
+            db,
+            prompt_name,
+            "text",
+            post_type,
+            "none",
+            base_facts,
         )
-        shared_prompt = replace(
-            shared_prompt,
-            rendered=(
-                shared_prompt.rendered
-                + "\n\nVERBINDLICHER GEMEINSAMER KARUSSELL-AUFTRAG:\n"
-                + "Erstelle genau einen lebendigen, zusammenhängenden Social-Media-Begleittext "
-                + "im Stil der oben festgelegten Vereins- und Textvorgaben. Der Text muss sich "
-                + "gleichwertig auf alle folgenden Spiele und Mannschaften beziehen. Lasse kein "
-                + "Spiel weg und vermische keine Spielorte, Uhrzeiten oder Ergebnisse. Formuliere "
-                + "keine bloße nüchterne Aneinanderreihung der Fakten. Einleitung, Übergänge und "
-                + "Schluss müssen den gemeinsamen Spieltag erkennbar verbinden. Bevorzuge keine "
-                + "Mannschaft, insbesondere nicht die Mannschaft des ersten aufgelisteten Spiels. "
-                + "Eine Handlungsaufforderung muss allen beteiligten Mannschaften gelten oder jede "
-                + "Mannschaft ausdrücklich gleichwertig nennen. Erfinde keine zusätzlichen Fakten.\n"
-                + match_list
-            ),
-        )
+        shared_prompt = matchday_bundle_prompt(shared_prompt, local_games)
         shared_text = generator.generate(
             {
                 **base_facts,
@@ -1297,7 +1457,14 @@ def rerender_post(
             team.rules.get("image_prompt_feed", "default-image-feed"),
         )
         feed_prompt = (
-            resolve_prompt(db, feed_prompt_name, "image", post.post_type, "feed", facts)
+            resolve_prompt(
+                db,
+                feed_prompt_name,
+                "image",
+                post.post_type,
+                "feed",
+                _facts_for_media(facts, "feed"),
+            )
             if getattr(renderer, "is_ai", False)
             else None
         )
@@ -1358,9 +1525,11 @@ def rerender_post(
                         "feed",
                         relative,
                         {
-                            **facts,
+                            **_facts_for_media(facts, "feed"),
                             "template": feed_design,
-                            "image_prompt": feed_prompt,
+                            "image_prompt": prompt_for_variant(
+                                feed_prompt, output_index, feed_output_count
+                            ),
                             "feed_output_index": output_index,
                             "feed_output_count": feed_output_count,
                         },
@@ -1469,11 +1638,21 @@ def rerender_post(
                 team.rules.get("image_prompt_story", "default-image-story"),
             )
         story_prompt = (
-            resolve_prompt(db, story_prompt_name, "image", post.post_type, "story", facts)
+            resolve_prompt(
+                db,
+                story_prompt_name,
+                "image",
+                post.post_type,
+                "story",
+                _facts_for_media(facts, "story"),
+            )
             if getattr(renderer, "is_ai", False)
             else None
         )
         story_prompt = _revision_prompt(story_prompt, revision_instruction)
+        story_prompt = prompt_for_variant(
+            story_prompt, variant_number, max(story_candidates or {1: {}})
+        )
         slot = db.scalar(
             select(GeneratedMediaSlot)
             .where(
@@ -1506,7 +1685,7 @@ def rerender_post(
                 "story",
                 f"{post.id}/story-slot-{variant_number}-v{next_version}.png",
                 {
-                    **facts,
+                    **_facts_for_media(facts, "story"),
                     "template": design,
                     "image_prompt": story_prompt,
                     "story_output_index": variant_number,
@@ -1588,6 +1767,7 @@ def rerender_post(
             story_candidates[number] for number in sorted(story_candidates)
         ],
         "logos": logos,
+        "sponsors": _sponsor_snapshot(facts),
         "media": media_snapshot,
         "player_asset": {"id": asset.id, "filename": asset.filename, "checksum": asset.checksum}
         if asset

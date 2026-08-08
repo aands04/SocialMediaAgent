@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.branding.service import branding_snapshot, prompt_data_block
+from app.branding.compiler import compile_branding_instructions
+from app.branding.service import branding_snapshot
 from app.models import (
     Club,
     Game,
@@ -77,8 +78,12 @@ def _render(db: Session, template: PromptTemplate, facts: dict) -> str:
         template.prompt_body,
         prompt_context(facts, template.media_kind, template.style_direction),
     )
-    rendered += "\n\n" + prompt_data_block(
-        branding_snapshot(db, facts["club_id"]), template.prompt_kind
+    rendered += "\n\n" + compile_branding_instructions(
+        branding_snapshot(db, facts["club_id"]),
+        template.prompt_kind,
+        post_type=template.post_type,
+        media_kind=template.media_kind,
+        facts=facts,
     )
     if template.prompt_kind == "image":
         return image_safety_prefix(facts) + "\n" + rendered

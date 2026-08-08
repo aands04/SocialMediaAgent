@@ -2,6 +2,10 @@ from pathlib import Path
 
 import pytest
 
+from app.branding.compiler import (
+    applicable_sponsors,
+    compile_branding_instructions,
+)
 from app.branding.service import (
     STANDARD_FONTS,
     BrandingValidationError,
@@ -72,6 +76,106 @@ def test_standard_fonts_are_controlled_and_available_to_branding():
         {"primary_standard_font": "dejavu-sans"}, {}
     )
     assert image["primary_standard_font"] == "dejavu-sans"
+
+
+def test_effective_branding_compiler_emits_semantic_rules_without_raw_json():
+    image, text = branding_form_state(
+        {
+            "primary_color": "#123456",
+            "secondary_color": "#FEDCBA",
+            "graphic_style": "dynamic",
+            "background_style": "stadium",
+            "logo_placement": "top-left",
+            "player_position": "center-right",
+            "primary_standard_font": "dejavu-sans",
+        },
+        {
+            "tone": "emotional",
+            "address_style": "ihr",
+            "text_length": "medium",
+            "emoji_usage": "sparse",
+            "cta_type": "attend",
+            "hashtags": ["#Beispiel"],
+        },
+    )
+    snapshot = {
+        "club_id": "club-1",
+        "club_name": "Beispielverein",
+        "club_short_name": "BV",
+        "image": image,
+        "text": text,
+    }
+
+    image_rules = compile_branding_instructions(
+        snapshot,
+        "image",
+        post_type="announcement",
+        media_kind="feed",
+        facts={},
+    )
+    text_rules = compile_branding_instructions(
+        snapshot,
+        "text",
+        post_type="announcement",
+        media_kind="none",
+        facts={},
+    )
+
+    assert "Primärfarbe #123456" in image_rules
+    assert "dynamisch und bewegungsbetont" in image_rules
+    assert "Stadion- oder Flutlichtatmosphäre" in image_rules
+    assert "keine feste Koordinate" in image_rules
+    assert "DejaVu Sans" in image_rules
+    assert "Tonalität: emotional und vereinsnah" in text_rules
+    assert "Besuch des Spiels" in text_rules
+    assert '"primary_color"' not in image_rules
+    assert '"tone"' not in text_rules
+
+
+def test_sponsor_selection_respects_output_team_type_and_period():
+    snapshot = {
+        "text": {
+            "sponsors": [
+                {
+                    "name": "Aktiv",
+                    "media_asset_id": "media-1",
+                    "use_feed": True,
+                    "use_story": False,
+                    "use_announcement": True,
+                    "use_result": False,
+                    "team_ids": ["team-1"],
+                    "valid_from": "2026-01-01",
+                    "valid_until": "2026-12-31",
+                    "placement": "auto",
+                },
+                {
+                    "name": "Andere Mannschaft",
+                    "media_asset_id": "media-2",
+                    "team_ids": ["team-2"],
+                },
+            ]
+        }
+    }
+
+    selected = applicable_sponsors(
+        snapshot,
+        team_id="team-1",
+        post_type="announcement",
+        media_kind="feed",
+        at="2026-08-09T13:00:00+00:00",
+    )
+
+    assert [item["name"] for item in selected] == ["Aktiv"]
+    assert (
+        applicable_sponsors(
+            snapshot,
+            team_id="team-1",
+            post_type="announcement",
+            media_kind="story",
+            at="2026-08-09",
+        )
+        == []
+    )
 
 
 def test_active_team_requires_display_name_and_custom_cta_requires_text():

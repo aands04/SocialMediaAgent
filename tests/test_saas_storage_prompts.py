@@ -78,11 +78,14 @@ def test_prompt_snapshot_hides_body_and_contains_branding_reference(db):
     prompt = resolve_prompt(
         db, "protected-text", "text", "announcement", "none", _facts(club_id)
     )
-    assert '"tone":"emotional"' in prompt.rendered
+    assert "Tonalität: emotional und vereinsnah" in prompt.rendered
+    assert "VEREINSKONFIGURATION" not in prompt.rendered
+    assert '"tone"' not in prompt.rendered
     assert prompt.branding["image"]["primary_color"] == "#123456"
     snapshot = prompt.snapshot()
     assert snapshot["template_id"] == template.id
     assert snapshot["branding"]["club_id"] == club_id
+    assert snapshot["branding_compiler_version"] == "effective-branding-v1"
     assert "body" not in snapshot and "rendered" not in snapshot
     assert len(snapshot["template_checksum"]) == 64
     assert branding_snapshot(db, club_id)["text"]["tone"] == "emotional"

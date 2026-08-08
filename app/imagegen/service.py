@@ -9,7 +9,7 @@ from PIL import Image, ImageOps
 
 from app.rendering.service import Renderer, RenderValidationError
 
-LOGO_REFERENCE_VERSION = "verified-logo-ai-references-v1"
+LOGO_REFERENCE_VERSION = "verified-media-ai-references-v2"
 
 REFERENCE_IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
@@ -126,8 +126,29 @@ class AIImageRenderer:
             20 * 1024 * 1024,
         )
 
+    def _sponsor_reference(self, item: dict) -> Path:
+        path = Renderer._safe_file(
+            item.get("path"),
+            (self.media_root, self.upload_root),
+            Renderer.image_types,
+            20 * 1024 * 1024,
+        )
+        if path is None:
+            raise ImageGenerationError(
+                f"Das verifizierte Sponsorenlogo {item.get('name') or ''} ist nicht verfügbar"
+            )
+        expected = str(item.get("checksum") or "").lower()
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if not expected or actual != expected:
+            raise ImageGenerationError(
+                f"Die Prüfsumme des Sponsorenlogos {item.get('name') or ''} stimmt nicht mehr"
+            )
+        return path
+
     @staticmethod
-    def _reference_metadata(data: dict, opponent_present: bool) -> dict:
+    def _reference_metadata(
+        data: dict, opponent_present: bool, sponsors: list[dict]
+    ) -> dict:
         logos = data.get("logos") if isinstance(data.get("logos"), dict) else {}
         team = logos.get("team") if isinstance(logos.get("team"), dict) else {}
         opponent = logos.get("opponent") if isinstance(logos.get("opponent"), dict) else {}
@@ -151,11 +172,24 @@ class AIImageRenderer:
                     "checksum": opponent.get("checksum"),
                 }
             )
+        for sponsor in sponsors:
+            references.append(
+                {
+                    "position": len(references) + 1,
+                    "role": "sponsor_logo",
+                    "media_asset_id": sponsor.get("media_asset_id"),
+                    "name": sponsor.get("name"),
+                    "checksum": sponsor.get("checksum"),
+                    "placement": sponsor.get("placement"),
+                }
+            )
         return {
             "mode": "ai-reference",
             "version": LOGO_REFERENCE_VERSION,
             "reference_order": references,
             "opponent_text_fallback": not opponent_present,
+            "sponsor_count": len(sponsors),
+            "fixed_logo_positions": False,
             "manual_logo_review_required": True,
         }
 
@@ -176,10 +210,19 @@ class AIImageRenderer:
                 "Für eine KI-Grafik ist ein verifiziertes Mannschaftslogo erforderlich"
             )
         opponent_logo = self._logo_reference(data.get("opponent_logo"))
+        sponsor_items = [
+            dict(item)
+            for item in (data.get("sponsor_references") or [])
+            if isinstance(item, dict)
+        ]
+        sponsor_paths = [self._sponsor_reference(item) for item in sponsor_items]
         references = [player, team_logo]
         if opponent_logo:
             references.append(opponent_logo)
-        integration = self._reference_metadata(data, opponent_logo is not None)
+        references.extend(sponsor_paths)
+        integration = self._reference_metadata(
+            data, opponent_logo is not None, sponsor_items
+        )
         requested_out = (self.root / target).resolve()
         out = requested_out
         generation_job_id = data.get("_generation_job_id")

@@ -227,16 +227,20 @@ def club_branding(
         raise HTTPException(404)
     config = db.get(ClubBrandingConfiguration, club.id)
     teams = db.scalars(
-        select(Team).where(Team.archived_at.is_(None)).order_by(Team.display_name)
+        select(Team)
+        .where(Team.club_id == club.id, Team.archived_at.is_(None))
+        .order_by(Team.display_name)
     ).all()
     fonts = db.scalars(
         select(FontAsset).where(
+            FontAsset.club_id == club.id,
             FontAsset.active.is_(True),
             FontAsset.archived_at.is_(None),
         ).order_by(FontAsset.name)
     ).all()
     logos = db.scalars(
         select(LogoAsset).where(
+            LogoAsset.club_id == club.id,
             LogoAsset.logo_type == "team",
             LogoAsset.active.is_(True),
             LogoAsset.archived_at.is_(None),
@@ -244,6 +248,7 @@ def club_branding(
     ).all()
     media_assets = db.scalars(
         select(MediaAsset).where(
+            MediaAsset.club_id == club.id,
             MediaAsset.active.is_(True),
             MediaAsset.available.is_(True),
         ).order_by(MediaAsset.filename)
@@ -552,6 +557,7 @@ def update_club_branding(
         valid_media_ids = set(
             db.scalars(
                 select(MediaAsset.id).where(
+                    MediaAsset.club_id == club.id,
                     MediaAsset.id.in_(sponsor_media_ids),
                     MediaAsset.active.is_(True),
                     MediaAsset.available.is_(True),
