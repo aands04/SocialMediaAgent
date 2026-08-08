@@ -42,6 +42,10 @@ services:
         target: /run/secrets/smtp_password
         read_only: true
       - type: bind
+        source: ${META_WEBHOOK_VERIFY_TOKEN_FILE_HOST:-/dev/null}
+        target: /run/secrets/meta_webhook_verify_token
+        read_only: true
+      - type: bind
         source: ${MEDIA_HOST_ROOT:?MEDIA_HOST_ROOT fehlt}
         target: /app/external-media
         read_only: true

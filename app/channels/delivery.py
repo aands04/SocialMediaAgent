@@ -257,9 +257,13 @@ def _assert_gates(
             ]
         )
     if connection.channel_type == "facebook":
-        checks.append((settings.facebook_channel_enabled, "Facebook ist deaktiviert"))
+        checks.append(
+            (settings.facebook_channel_enabled, "Facebook ist plattformweit pausiert")
+        )
     if connection.channel_type == "whatsapp":
-        checks.append((settings.whatsapp_channel_enabled, "WhatsApp ist deaktiviert"))
+        checks.append(
+            (settings.whatsapp_channel_enabled, "WhatsApp ist plattformweit pausiert")
+        )
     for ok, message in checks:
         if not ok:
             raise ChannelDeliveryError(message)

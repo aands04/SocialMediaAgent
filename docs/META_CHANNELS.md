@@ -119,14 +119,29 @@ Mindestens relevant:
 META_GRAPH_VERSION=v23.0
 META_FACEBOOK_OAUTH_REDIRECT_URI=https://meta.example.org/public/meta/channels/oauth/callback
 META_WHATSAPP_CONFIGURATION_ID=
-FACEBOOK_CHANNEL_ENABLED=false
-WHATSAPP_CHANNEL_ENABLED=false
+FACEBOOK_CHANNEL_ENABLED=true
+WHATSAPP_CHANNEL_ENABLED=true
+META_WEBHOOK_VERIFY_TOKEN_FILE_HOST=/etc/social-media-agent/production-secrets/meta_webhook_verify_token
 ```
+
+Facebook und WhatsApp sind im regulären Plattformbetrieb standardmäßig verfügbar. Ein
+Vereinsadministrator richtet die Verbindungen seines eigenen Vereins selbst ein; eine
+zusätzliche Freigabe durch einen PlatformAdmin ist nicht erforderlich. Die beiden
+`*_CHANNEL_ENABLED`-Schalter bleiben als betriebliche, plattformweite Pause erhalten und
+dürfen nicht als Freigabeworkflow für einzelne Vereine verwendet werden. OAuth, App-Review,
+WhatsApp Configuration ID, Webhook und Secrets müssen einmalig auf Plattformebene technisch
+bereitgestellt sein.
 
 `META_APP_ID`, `META_APP_SECRET`, `META_TOKEN_ENCRYPTION_KEY` und
 `META_WEBHOOK_VERIFY_TOKEN` werden ausschließlich als Secrets injiziert. Eigene optionale
 Facebook-App-Werte (`META_FACEBOOK_APP_ID`, `META_FACEBOOK_APP_SECRET`) sind möglich, wenn eine
 separate Meta-App verwendet wird.
+
+Das Webhook-Verifizierungssecret wird im Compose-Betrieb über
+`META_WEBHOOK_VERIFY_TOKEN_FILE_HOST` read-only nach
+`/run/secrets/meta_webhook_verify_token` eingebunden. Solange WhatsApp noch nicht eingerichtet
+ist, darf der Hostpfad `/dev/null` bleiben. Vereinsadministratoren erhalten weder Zugriff auf
+diese Datei noch auf ihren Inhalt.
 
 Öffentlich dürfen ausschließlich diese Pfade erreichbar sein:
 
@@ -149,8 +164,9 @@ TLS-Proxy muss dieselbe Allowlist verwenden.
    bereitstellen.
 6. Webhook-URL und Verify Token bei Meta eintragen; `whatsapp_business_account` abonnieren.
 7. WhatsApp-Vorlagen für Spielankündigung und Ergebnis in Meta anlegen und genehmigen lassen.
-8. Zunächst in Meta-Test testen. Feature Flags einzeln aktivieren und erst danach die
-   Automatik mit ausdrücklicher Bestätigung freigeben.
+8. Zunächst in Meta-Test testen. Die Kanäle sind für Vereinsadministratoren standardmäßig
+   sichtbar; Publishing und Versand bleiben je Verbindung deaktiviert, bis der
+   Vereinsadministrator sie nach erfolgreicher Prüfung ausdrücklich einschaltet.
 
 ## Bekannte Grenzen dieser Ausbaustufe
 

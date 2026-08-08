@@ -12,12 +12,14 @@ from sqlalchemy import select
 from app.channels.api import (
     FACEBOOK_REQUIRED_SCOPES,
     WHATSAPP_REQUIRED_SCOPES,
+    ChannelApiError,
     MetaToken,
 )
 from app.channels.capabilities import capability_keys, status_label
 from app.channels.delivery import _deliver_one, _whatsapp_components
 from app.channels.jobs import ensure_approved_channel_jobs
 from app.channels.oauth import (
+    assert_channel_enabled,
     complete_facebook_selection,
     complete_whatsapp_onboarding,
     prepare_facebook_selection,
@@ -58,6 +60,33 @@ def channel_settings() -> Settings:
         ),
         meta_token_encryption_key=Fernet.generate_key().decode("ascii"),
     )
+
+
+def test_facebook_and_whatsapp_are_available_by_default():
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        meta_production_enabled=True,
+    )
+
+    assert settings.facebook_channel_enabled is True
+    assert settings.whatsapp_channel_enabled is True
+    assert_channel_enabled(settings, "facebook")
+    assert_channel_enabled(settings, "whatsapp")
+
+
+@pytest.mark.parametrize("channel_type", ["facebook", "whatsapp"])
+def test_platform_wide_channel_pause_remains_an_explicit_emergency_gate(channel_type):
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        meta_production_enabled=True,
+        facebook_channel_enabled=channel_type != "facebook",
+        whatsapp_channel_enabled=channel_type != "whatsapp",
+    )
+
+    with pytest.raises(ChannelApiError, match="plattformweit vorübergehend pausiert"):
+        assert_channel_enabled(settings, channel_type)
 
 
 def admin_user(db) -> User:

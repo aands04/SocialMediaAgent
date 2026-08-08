@@ -610,12 +610,15 @@ def test_instagram_meta_test_dashboard_is_explicit_and_blocks_mock_connect(
 ):
     client, factory = browser
     import app.admin_routes as admin_routes
+    import app.channels.routes as channel_routes
 
     monkeypatch.setattr(admin_routes.settings, "environment", "meta-test")
     monkeypatch.setattr(admin_routes.settings, "publisher_mode", "instagram")
     monkeypatch.setitem(
         admin_routes.templates.env.globals, "environment", "meta-test"
     )
+    monkeypatch.setattr(channel_routes.settings, "facebook_channel_enabled", True)
+    monkeypatch.setattr(channel_routes.settings, "whatsapp_channel_enabled", True)
     with factory() as db:
         page = InstagramPage(
             internal_name="meta-dashboard",
@@ -652,6 +655,16 @@ def test_instagram_meta_test_dashboard_is_explicit_and_blocks_mock_connect(
     assert "Social-Media-Kanäle" in response.text
     assert "Automatische Veröffentlichungen sind derzeit pausiert" in response.text
     assert "Technische Details" in response.text
+    assert "Facebook verbinden" in response.text
+    assert "WhatsApp einrichten" in response.text
+    assert "Der PlatformAdmin muss" not in response.text
+    facebook_setup = client.get("/channels/facebook/setup")
+    assert facebook_setup.status_code == 200
+    assert "Mit Meta verbinden" in facebook_setup.text
+    assert "durch den PlatformAdmin" not in facebook_setup.text
+    whatsapp_setup = client.get("/channels/whatsapp/setup")
+    assert whatsapp_setup.status_code == 200
+    assert "durch den PlatformAdmin" not in whatsapp_setup.text
     token = session_csrf(client)
     blocked = client.post(
         f"/instagram/{page_id}/state",
