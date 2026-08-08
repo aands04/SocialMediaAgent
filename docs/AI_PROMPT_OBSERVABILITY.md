@@ -16,6 +16,18 @@ bleiben tenantgebundene `FontAsset`-Referenzen.
 
 ## Versionierte Plattformvorlagen
 
+Der effektive Provider-Prompt besteht aus Fakten- und Sicherheitsregeln, der
+versionierten Plattformvorlage sowie einem serverseitig semantisch kompilierten
+Brandingblock. Vereinsbenutzer sehen weder die Vorlage noch den finalen Prompt.
+Der Compiler verwendet ausschließlich validierte Auswahlwerte und strukturierte
+Listen; er überträgt keinen rohen Branding-JSON-Block. Die Brandingwerte haben
+bei rein stilistischen Konflikten Vorrang vor allgemeineren Vorlagenangaben.
+
+Für Bildvarianten werden nachvollziehbar unterschiedliche
+Kompositionsrichtungen ergänzt. Ein gemeinsamer Spieltagsbeitrag erhält einen
+einzigen Textauftrag mit den vollständigen Fakten aller enthaltenen Spiele und
+ohne Bevorzugung einer Mannschaft.
+
 Nur ein `PlatformAdmin` kann `/prompts` aufrufen. Dort stehen sowohl die
 eingebauten Kombinationen aus Ankündigung, Erinnerung oder Ergebnis und
 Text, Feed oder Story als auch gespeicherte Versionen zur Auswahl.
@@ -52,6 +64,12 @@ einem breiteren SaaS-Betrieb ist eine zur Support- und Datenschutzfrist
 passende Retention festzulegen.
 
 ## Fehler- und Wiederaufnahmeregeln
+
+Verifizierte Sponsorenmedien erscheinen im finalen Bildprompt als nummerierte
+Referenzbilder nach Spieler-, Mannschafts- und optionalem Gegnerlogo. Die
+Promptmetadaten speichern Rollen, Medien-ID und Prüfsumme, nicht jedoch einen
+lokalen Dateipfad. Es gibt keine festen Logo-Koordinaten und keinen lokalen
+Compositor-Schritt für neue KI-Ausgaben.
 
 Ein Prompt wird vor dem externen Aufruf mit Status `dispatched` gespeichert.
 Nach eindeutiger Antwort folgt `completed`, bei einem technischen Fehler

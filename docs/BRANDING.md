@@ -87,6 +87,24 @@ zu prüfen.
 
 ## Sponsoren und Spielstätten
 
+Bei einer KI-Erzeugung werden die validierten Brandingwerte nicht als roher
+JSON-Block versandt. Ein serverseitiger Compiler übersetzt sie in eindeutige
+Gestaltungs- und Textregeln. Diese aktuellen Vereinsregeln haben bei
+stilistischen Widersprüchen Vorrang vor allgemeineren Angaben einer älteren
+Promptvorlage. Das gilt unter anderem für Farben, Stil, Bildwirkung,
+Hintergrund, Textausrichtung, Spielerfokus, Textmenge, Schriften, Tonalität,
+Anrede, Länge, Emojis, Hashtags und Handlungsaufforderungen.
+
+Ein für Ausgabeart, Beitragstyp, Mannschaft und Gültigkeitszeitraum
+konfiguriertes Sponsorenmedium wird als eigenes Referenzbild an das Bildmodell
+übergeben. Seine Datei wird unmittelbar vor dem Modellaufruf gegen die
+eingefrorene SHA-256-Prüfsumme geprüft. Vereins-, Gegner- und Sponsorenlogos
+werden ohne starre Koordinaten, reservierte Logoflächen oder nachträgliche
+Overlays in die Gesamtkomposition eingebunden. Die auswählbare Platzierung ist
+nur eine ungefähre gestalterische Präferenz. Da ein generatives Modell keine
+pixelgenaue Wiedergabe garantieren kann, bleibt die Freigabe eine visuelle
+Prüfung und keine manuelle Nachbearbeitungsstufe.
+
 Das aktuelle Datenmodell besitzt noch keine eigenständige Sponsoren- oder
 Spielstättenbibliothek. Spielstätten werden tenant-sicher aus vorhandenen
 Heimspielen abgeleitet. Sponsoren werden als strukturierte, wiederholbare Liste

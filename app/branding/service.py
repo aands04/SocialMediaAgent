@@ -50,7 +50,7 @@ TONES = {"factual", "emotional", "motivating", "casual", "professional", "tradit
 TEXT_LENGTHS = {"short", "medium", "detailed"}
 EMOJI_USAGE = {"none", "sparse", "normal", "frequent"}
 CTA_TYPES = {"support", "share", "comment", "attend", "none", "custom"}
-SPONSOR_PLACEMENTS = {"top", "bottom", "left", "right", "footer"}
+SPONSOR_PLACEMENTS = {"auto", "top", "bottom", "left", "right", "footer"}
 
 # Browser- und Chromium-taugliche Standardschriften. Vereinsbenutzer wählen
 # ausschließlich einen stabilen Schlüssel; die serverseitig kontrollierte
@@ -420,7 +420,7 @@ def _validate_sponsors(value: Any) -> list[dict]:
             raise BrandingValidationError("Sponsor benötigt einen Namen")
         mention = normalize_mentions([entry.get("instagram_mention") or ""])
         placement = _validate_choice(
-            "Sponsorplatzierung", entry.get("placement") or "footer", SPONSOR_PLACEMENTS, True
+            "Sponsorplatzierung", entry.get("placement") or "auto", SPONSOR_PLACEMENTS, True
         )
         valid_from = _validate_text("valid_from", str(entry.get("valid_from") or ""))
         valid_until = _validate_text("valid_until", str(entry.get("valid_until") or ""))

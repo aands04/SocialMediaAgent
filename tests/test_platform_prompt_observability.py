@@ -253,7 +253,7 @@ def test_builtin_prompt_can_be_opened_and_saved_as_controlled_draft(db):
         )
         editor_html = editor.body.decode("utf-8")
         assert "Bild · Ergebnis · Story" in editor_html
-        assert "eingebaute Version 2 bleibt unverändert" in editor_html
+        assert "eingebaute Version 3 bleibt unverändert" in editor_html
         assert 'name="builtin_prompt_key" value="image:result:story"' in editor_html
 
         response = admin_routes.create_prompt(

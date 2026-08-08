@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
@@ -5,7 +6,7 @@ import pytest
 from PIL import Image
 
 from app.config import Settings
-from app.imagegen.service import AIImageRenderer, ImageProvider
+from app.imagegen.service import AIImageRenderer, ImageGenerationError, ImageProvider
 from app.logos.service import store_logo
 from app.models import (
     ClubBrandingConfiguration,
@@ -59,7 +60,7 @@ def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     assert "Referenzbild 2" in prompt.rendered
     assert "kein drittes Referenzbild" in prompt.rendered
     assert "oben links und oben rechts" not in prompt.rendered
-    assert prompt.policy_version == "verified-logo-ai-references-v1"
+    assert prompt.policy_version == "verified-media-ai-references-v2"
     assert "{{" not in prompt.rendered
 
 
@@ -254,6 +255,98 @@ def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
         for item in metadata["logo_integration"]["reference_order"]
     ] == ["player", "team_logo", "opponent_logo"]
     assert "ai_base_path" not in metadata
+
+
+def test_ai_renderer_passes_verified_sponsor_as_compositional_reference(tmp_path):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    media.mkdir()
+    uploads.mkdir()
+    player = media / "player.jpg"
+    team_logo = uploads / "team-logo.png"
+    sponsor_logo = uploads / "sponsor-logo.png"
+    Image.new("RGB", (600, 900), "blue").save(player)
+    Image.new("RGBA", (200, 200), (255, 255, 255, 255)).save(team_logo)
+    Image.new("RGBA", (300, 120), (20, 180, 60, 255)).save(sponsor_logo)
+    sponsor_checksum = hashlib.sha256(sponsor_logo.read_bytes()).hexdigest()
+    provider = FakeImageProvider()
+    renderer = AIImageRenderer(tmp_path / "out", media, uploads, provider)
+    sponsor = {
+        "name": "Beispielsponsor",
+        "media_asset_id": "sponsor-1",
+        "path": str(sponsor_logo),
+        "checksum": sponsor_checksum,
+        "placement": "right",
+        "placement_instruction": (
+            "Bevorzugt im rechten Bildbereich; die genaue Position frei bestimmen."
+        ),
+    }
+    prompt_facts = facts(
+        team_logo=str(team_logo),
+        opponent_logo=None,
+        sponsor_references=[sponsor],
+    )
+    prompt = builtin_prompt("image", "announcement", "feed", prompt_facts)
+
+    output = renderer.render(
+        "feed",
+        "post/sponsor-feed.png",
+        {
+            **prompt_facts,
+            "player_image": str(player),
+            "logos": {"team": {"id": "team-1", "checksum": "a" * 64}},
+            "image_prompt": prompt,
+        },
+    )
+
+    assert provider.calls[0]["references"] == [
+        player.resolve(),
+        team_logo.resolve(),
+        sponsor_logo.resolve(),
+    ]
+    assert "Referenzbild 3 ist das verifizierte Originallogo von Beispielsponsor" in prompt.rendered
+    assert "keine starren Koordinaten" in prompt.rendered
+    integration = renderer.metadata_for(output)["logo_integration"]
+    assert integration["sponsor_count"] == 1
+    assert integration["fixed_logo_positions"] is False
+    assert [item["role"] for item in integration["reference_order"]] == [
+        "player",
+        "team_logo",
+        "sponsor_logo",
+    ]
+
+
+def test_ai_renderer_rejects_modified_sponsor_reference(tmp_path):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    media.mkdir()
+    uploads.mkdir()
+    player = media / "player.jpg"
+    team_logo = uploads / "team-logo.png"
+    sponsor_logo = uploads / "sponsor-logo.png"
+    Image.new("RGB", (600, 900), "blue").save(player)
+    Image.new("RGBA", (200, 200), "white").save(team_logo)
+    Image.new("RGBA", (200, 100), "green").save(sponsor_logo)
+    renderer = AIImageRenderer(tmp_path / "out", media, uploads, FakeImageProvider())
+    prompt = builtin_prompt("image", "announcement", "feed", facts())
+
+    with pytest.raises(ImageGenerationError, match="Prüfsumme des Sponsorenlogos"):
+        renderer.render(
+            "feed",
+            "post/invalid-sponsor.png",
+            {
+                "player_image": str(player),
+                "team_logo": str(team_logo),
+                "sponsor_references": [
+                    {
+                        "name": "Verändert",
+                        "path": str(sponsor_logo),
+                        "checksum": "0" * 64,
+                    }
+                ],
+                "image_prompt": prompt,
+            },
+        )
 
 
 def test_ai_renderer_reuses_only_output_from_same_generation_job(tmp_path):
@@ -495,10 +588,10 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     )
     assert post.design_snapshot["mode"]["image"] == "openai"
     assert post.design_snapshot["prompts"]["feed"]["name"] == "default-image-feed"
-    assert post.design_snapshot["prompts"]["feed"]["version"] == 2
+    assert post.design_snapshot["prompts"]["feed"]["version"] == 3
     assert (
         post.design_snapshot["prompts"]["feed"]["policy_version"]
-        == "verified-logo-ai-references-v1"
+        == "verified-media-ai-references-v2"
     )
     prompt_snapshot = post.design_snapshot["prompts"]["feed"]
     assert "rendered" not in prompt_snapshot
@@ -533,5 +626,5 @@ def test_openai_text_generator_uses_resolved_prompt_without_live_request():
     generator.client = type("Client", (), {"responses": Responses()})()
     result = generator.generate({"text_prompt": prompt})
     assert result.text == "Kopierbarer Testtext"
-    assert result.prompt_version == "default-text-announcement:v1"
+    assert result.prompt_version == "default-text-announcement:v2"
     assert result.tokens == 42

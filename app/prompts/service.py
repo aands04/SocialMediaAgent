@@ -9,7 +9,11 @@ from jinja2.sandbox import SandboxedEnvironment
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.branding.service import branding_snapshot, prompt_data_block
+from app.branding.compiler import (
+    BRANDING_COMPILER_VERSION,
+    compile_branding_instructions,
+)
+from app.branding.service import branding_snapshot
 from app.config import get_settings
 from app.games.identity import TeamIdentityError, resolve_team_side
 from app.models import ClubPromptOverride, PromptStatus, PromptTemplate
@@ -39,6 +43,7 @@ ALLOWED_PLACEHOLDERS = {
     "output_height",
     "score",
     "hashtags",
+    "own_team_display",
 }
 
 DEFAULT_STYLE = (
@@ -47,7 +52,7 @@ DEFAULT_STYLE = (
     "Ausgabe soll eine eigenständige Komposition erhalten"
 )
 
-IMAGE_POLICY_VERSION = "verified-logo-ai-references-v1"
+IMAGE_POLICY_VERSION = "verified-media-ai-references-v2"
 
 IMAGE_SAFETY_PREFIX = """VERBINDLICHE DATEN- UND MEDIENREGELN:
 - Verwende ausschließlich die nachfolgend angegebenen Spieldaten.
@@ -60,9 +65,12 @@ IMAGE_SAFETY_PREFIX = """VERBINDLICHE DATEN- UND MEDIENREGELN:
   Gesamtkomposition ein. Form, Farben, Schriftzüge und Emblembestandteile
   müssen dem Referenzbild entsprechen; nicht neu zeichnen oder umgestalten.
 {opponent_logo_rule}
+{sponsor_logo_rules}
+- Die genaue Position aller Motive und Logos entsteht aus der Gesamtkomposition.
+  Verwende keine starren Koordinaten, reservierten Eckflächen oder festen Logo-Boxen.
 - Erzeuge, zeichne oder rekonstruiere keine weiteren Vereinswappen, Logos,
   Embleme, Marken, Sponsorenzeichen oder grafischen Wappen-Platzhalter.
-- Füge keine zusätzlichen Sponsorenlogos oder fiktiven Marken hinzu.
+- Füge ausschließlich die ausdrücklich als Referenz bereitgestellten Logos ein.
 - Stelle jeden angegebenen Text buchstaben- und zahlengenau dar.
 - Keine vollständige Anschrift, keine Spiel-ID, Staffel-ID oder Schiedsrichterdaten.
 """
@@ -75,14 +83,16 @@ TEXT_SAFETY_PREFIX = """VERBINDLICHE FAKTENREGELN:
 - Gib ausschließlich den direkt kopierbaren deutschen Begleittext aus.
 """
 
-DEFAULT_IMAGE_PROMPT = """Erstelle eine eigenständige, hochwertige Sportgrafik für
+IMAGE_PROMPT_BASE = """Erstelle eine eigenständige, hochwertige Sportgrafik für
 Instagram im Format {{ output_kind }} ({{ output_width }} × {{ output_height }} Pixel).
 Sie gehört zu einem zusammenhängenden Feed-/Story-Paar, darf aber keine bloß
 gestreckte oder beschnittene Kopie des anderen Formats sein.
 
-Nutze den bereitgestellten einzelnen Spieler als dominantes Hauptmotiv. Erzeuge
-eine dynamische, glaubwürdige Komposition für einen Amateurfußballverein mit
-Licht, Tiefe, Schatten, Kontrast und dezenten Fußball- oder Stadionelementen.
+Nutze den bereitgestellten Spieler entsprechend den nachfolgenden verbindlichen
+Branding-Vorgaben. Erzeuge eine glaubwürdige Komposition für einen
+Amateurfußballverein mit Licht, Tiefe, Schatten, Kontrast und passenden
+Fußball- oder Stadionelementen. Die nachfolgenden Branding-Vorgaben bestimmen
+insbesondere Spielerfokus, Dynamik, Hintergrund und Textmenge.
 Binde das verifizierte Logo der eigenen Mannschaft deutlich sichtbar und
 harmonisch in die Komposition ein. Falls ein verifiziertes Gegnerlogo als
 Referenz vorhanden ist, integriere es kleiner, aber klar erkennbar. Die Logos
@@ -102,11 +112,21 @@ Stelle diese Angaben klar, mobil lesbar und hierarchisch dar:
 Kennzeichnung: {{ home_away }}. Verwende höchstens zwei gut lesbare
 Schriftstile. Halte im Story-Format deutliche Sicherheitsabstände oben und unten.
 Falls kein Gegnerlogo bereitgestellt ist, verwende dort ausschließlich eine
-neutrale typografische Lösung. Bewahre die Originalfarben des Trikots."""
+neutrale typografische Lösung. Bewahre die Originalfarben des Trikots.
+{content_direction}
+{format_direction}"""
 
-DEFAULT_TEXT_PROMPT = """Verfasse einen kurzen deutschen Instagram-Begleittext
-für einen Amateurfußballverein. Der Ton ist sachlich, vereinsnah, einladend und
-natürlich. Verwende ausschließlich diese Fakten:
+IMAGE_CONTENT_DIRECTIONS = {
+    "announcement": "Zeige Vorfreude und den bevorstehenden Spieltermin; erfinde keinen Spielverlauf.",
+    "reminder": "Vermittle, dass das Spiel unmittelbar bevorsteht; Datum und Uhrzeit müssen besonders schnell erfassbar sein.",
+    "result": "Rücke das bestätigte Ergebnis und die beiden Mannschaften in den Mittelpunkt; leite daraus keinen erfundenen Spielverlauf ab.",
+}
+IMAGE_FORMAT_DIRECTIONS = {
+    "feed": "Gestalte eine ausgewogene Feed-Komposition mit klarer Informationshierarchie für 4:5.",
+    "story": "Gestalte eine eigenständige vertikale Story-Komposition für 9:16 mit sicheren Bereichen für die Instagram-Oberfläche.",
+}
+
+TEXT_FACTS = """Verwende ausschließlich diese Fakten:
 
 Wettbewerb: {{ competition }}
 Spielpaarung: {{ home_team }} gegen {{ away_team }}
@@ -116,10 +136,48 @@ Spielart: {{ home_away }}
 Spielort: {{ venue_display }}
 {% if score %}Bestätigtes Ergebnis: {{ score }}{% endif %}
 Hashtags: {{ hashtags }}
+"""
 
-Rufe die Zuschauer knapp zur Unterstützung von {{ own_team }} auf. Erfinde
-keinen Spielverlauf, keine Torschützen, Zitate, Zuschauerzahlen oder sonstigen
-Fakten. Gib ausschließlich den direkt kopierbaren Begleittext aus."""
+DEFAULT_TEXT_PROMPTS = {
+    "announcement": """Verfasse einen deutschen Instagram-Begleittext für eine Spielankündigung.
+{facts}
+Baue Vorfreude auf die Begegnung auf. Tonalität, Länge, Anrede, Emojis,
+Hashtags und Handlungsaufforderung werden durch die nachfolgenden verbindlichen
+Vereinstextregeln festgelegt. Gib ausschließlich den direkt kopierbaren Text aus.""".format(facts=TEXT_FACTS),
+    "reminder": """Verfasse einen deutschen Instagram-Begleittext für eine Spielerinnerung.
+{facts}
+Mache den nahen Termin schnell erfassbar und vermeide eine Wiederholung derselben
+Informationen. Tonalität, Länge, Anrede, Emojis, Hashtags und
+Handlungsaufforderung werden durch die nachfolgenden verbindlichen
+Vereinstextregeln festgelegt. Gib ausschließlich den direkt kopierbaren Text aus.""".format(facts=TEXT_FACTS),
+    "result": """Verfasse einen deutschen Instagram-Begleittext für eine Ergebnismeldung.
+{facts}
+Nenne das bestätigte Ergebnis klar. Werte es nicht als Sieg, Niederlage oder
+Unentschieden, sofern dies nicht zweifelsfrei aus den angegebenen Mannschaften
+und dem Ergebnis folgt. Erfinde keinen Spielverlauf. Tonalität, Länge, Anrede,
+Emojis, Hashtags und Handlungsaufforderung werden durch die nachfolgenden
+verbindlichen Vereinstextregeln festgelegt. Gib ausschließlich den direkt
+kopierbaren Text aus.""".format(facts=TEXT_FACTS),
+}
+
+
+def default_image_prompt(post_type: str, media_kind: str) -> str:
+    return IMAGE_PROMPT_BASE.replace(
+        "{content_direction}",
+        IMAGE_CONTENT_DIRECTIONS.get(post_type, IMAGE_CONTENT_DIRECTIONS["announcement"]),
+    ).replace(
+        "{format_direction}",
+        IMAGE_FORMAT_DIRECTIONS.get(media_kind, IMAGE_FORMAT_DIRECTIONS["feed"]),
+    )
+
+
+def default_text_prompt(post_type: str) -> str:
+    return DEFAULT_TEXT_PROMPTS.get(post_type, DEFAULT_TEXT_PROMPTS["announcement"])
+
+
+# Compatibility exports used by the existing PlatformAdmin editor.
+DEFAULT_IMAGE_PROMPT = default_image_prompt("announcement", "feed")
+DEFAULT_TEXT_PROMPT = default_text_prompt("announcement")
 
 
 def builtin_prompt_catalog() -> dict[str, dict]:
@@ -145,11 +203,11 @@ def builtin_prompt_catalog() -> dict[str, dict]:
             "prompt_kind": "text",
             "post_type": post_type,
             "media_kind": "none",
-            "prompt_body": DEFAULT_TEXT_PROMPT,
+            "prompt_body": default_text_prompt(post_type),
             "style_direction": None,
             "model": settings.openai_model,
             "quality": "default",
-            "version": 1,
+            "version": 2,
             "builtin": True,
             "id": "",
         }
@@ -162,11 +220,11 @@ def builtin_prompt_catalog() -> dict[str, dict]:
                 "prompt_kind": "image",
                 "post_type": post_type,
                 "media_kind": media_kind,
-                "prompt_body": DEFAULT_IMAGE_PROMPT,
+                "prompt_body": default_image_prompt(post_type, media_kind),
                 "style_direction": None,
                 "model": settings.openai_image_model,
                 "quality": settings.openai_image_quality,
-                "version": 2,
+                "version": 3,
                 "builtin": True,
                 "id": "",
             }
@@ -191,6 +249,7 @@ class ResolvedPrompt:
     override_version: int | None = None
     override_checksum: str | None = None
     branding: dict | None = None
+    branding_compiler_version: str | None = None
 
     def snapshot(self) -> dict:
         # Prompt bodies are platform intellectual property. A post only needs an
@@ -214,6 +273,7 @@ class ResolvedPrompt:
             "override_version": self.override_version,
             "override_checksum": self.override_checksum,
             "branding": self.branding or {},
+            "branding_compiler_version": self.branding_compiler_version,
         }
 
 
@@ -327,16 +387,24 @@ def prompt_context(
     local = kickoff.astimezone(ZoneInfo("Europe/Berlin"))
     sizes = {"feed": (1080, 1350), "story": (1080, 1920), "none": (0, 0)}
     width, height = sizes.get(media_kind, (0, 0))
+    own_display = str(facts.get("own_team_display") or own).strip() or own
+    home_display = own_display if is_home else facts.get("home_team")
+    away_display = facts.get("away_team") if is_home else own_display
     return {
         "competition": competition,
-        "home_team": facts.get("home_team"),
-        "away_team": facts.get("away_team"),
-        "own_team": own,
+        "home_team": home_display,
+        "away_team": away_display,
+        "own_team": own_display,
+        "own_team_display": own_display,
         "opponent": opponent,
         "weekday": WEEKDAYS_DE[local.weekday()],
         "date_de": local.strftime("%d.%m.%Y"),
         "time_de": local.strftime("%H:%M"),
-        "home_away": "Heimspiel" if is_home else "Auswärtsspiel",
+        "home_away": (
+            str(facts.get("home_label") or "Heimspiel")
+            if is_home
+            else str(facts.get("away_label") or "Auswärtsspiel")
+        ),
         "venue_display": venue_display(facts),
         "pitch_type": facts.get("pitch") or "",
         "primary_color": facts.get("primary_color") or "#172554",
@@ -359,6 +427,7 @@ def render_body(body: str, context: dict) -> str:
 
 
 def image_safety_prefix(facts: dict) -> str:
+    next_reference = 3
     if facts.get("opponent_logo"):
         opponent_logo_rule = (
             "- Referenzbild 3 ist das verifizierte Originalwappen des Gegners. "
@@ -366,6 +435,7 @@ def image_safety_prefix(facts: dict) -> str:
             "erkennbar. Form, Farben, Schriftzüge und Emblembestandteile müssen "
             "dem Referenzbild entsprechen; nicht neu zeichnen oder umgestalten."
         )
+        next_reference = 4
     else:
         opponent_logo_rule = (
             "- Es gibt kein verifiziertes Gegnerlogo und deshalb kein drittes "
@@ -373,7 +443,26 @@ def image_safety_prefix(facts: dict) -> str:
             "ausgeschriebenen Namen in einer neutralen typografischen Lösung dar. "
             "Erfinde dafür kein Wappen, Emblem oder Logo."
         )
-    return IMAGE_SAFETY_PREFIX.format(opponent_logo_rule=opponent_logo_rule)
+    sponsor_lines = []
+    for index, sponsor in enumerate(facts.get("sponsor_references") or [], start=next_reference):
+        placement = str(sponsor.get("placement_instruction") or "").strip()
+        sponsor_lines.append(
+            f"- Referenzbild {index} ist das verifizierte Originallogo von "
+            f"{sponsor.get('name')}. Integriere es als natürlichen Bestandteil "
+            "der Gesamtkomposition. Form, Farben, Proportionen und Schriftzüge "
+            "müssen der Referenz entsprechen; nicht neu zeichnen, umfärben, "
+            "vereinfachen oder umgestalten. "
+            + (placement if placement else "Die konkrete Position ergibt sich aus dem Layout.")
+        )
+    sponsor_logo_rules = (
+        "\n".join(sponsor_lines)
+        if sponsor_lines
+        else "- Es wurde kein verifiziertes Sponsorenlogo bereitgestellt. Erfinde kein Sponsorenzeichen."
+    )
+    return IMAGE_SAFETY_PREFIX.format(
+        opponent_logo_rule=opponent_logo_rule,
+        sponsor_logo_rules=sponsor_logo_rules,
+    )
 
 
 def builtin_prompt(
@@ -382,7 +471,11 @@ def builtin_prompt(
     settings = get_settings()
     image = prompt_kind == "image"
     name = f"default-image-{media_kind}" if image else f"default-text-{post_type}"
-    body = DEFAULT_IMAGE_PROMPT if image else DEFAULT_TEXT_PROMPT
+    body = (
+        default_image_prompt(post_type, media_kind)
+        if image
+        else default_text_prompt(post_type)
+    )
     context = prompt_context(facts, media_kind)
     rendered = render_body(body, context)
     if image:
@@ -391,7 +484,7 @@ def builtin_prompt(
         rendered = TEXT_SAFETY_PREFIX + "\n" + rendered
     return ResolvedPrompt(
         name=name,
-        version=2 if image else 1,
+        version=3 if image else 2,
         prompt_kind=prompt_kind,
         post_type=post_type,
         media_kind=media_kind,
@@ -439,8 +532,15 @@ def resolve_prompt(
             resolved,
             rendered=resolved.rendered
             + "\n\n"
-            + prompt_data_block(branding, prompt_kind),
+            + compile_branding_instructions(
+                branding,
+                prompt_kind,
+                post_type=post_type,
+                media_kind=media_kind,
+                facts=facts,
+            ),
             branding=branding,
+            branding_compiler_version=BRANDING_COMPILER_VERSION,
         )
     context = prompt_context(facts, media_kind, item.style_direction)
     rendered = render_body(item.prompt_body, context)
@@ -470,7 +570,15 @@ def resolve_prompt(
         )
     protected_parts = [rendered]
     if branding:
-        protected_parts.append(prompt_data_block(branding, prompt_kind))
+        protected_parts.append(
+            compile_branding_instructions(
+                branding,
+                prompt_kind,
+                post_type=post_type,
+                media_kind=media_kind,
+                facts=facts,
+            )
+        )
     if override:
         protected_parts.append(
             "GESCHÜTZTE VEREINSANPASSUNG DES PLATFORMADMINS:\n"
@@ -507,6 +615,75 @@ def resolve_prompt(
         override_version=override.version if override else None,
         override_checksum=override.checksum if override else None,
         branding=branding,
+        branding_compiler_version=(BRANDING_COMPILER_VERSION if branding else None),
+    )
+
+
+VARIANT_DIRECTIONS = (
+    "Nutze eine klare, ausgewogene Hauptkomposition mit sofort erfassbarer Informationshierarchie.",
+    "Nutze eine eigenständige, emotionalere Perspektive mit stärkerem Fokus auf Spieler und Bewegung.",
+    "Nutze eine eigenständige, atmosphärische Perspektive mit stärkerem Fokus auf Licht, Tiefe und Spielumfeld.",
+    "Nutze eine eigenständige, reduzierte Perspektive mit besonders klarer Typografie und ruhiger Fläche.",
+)
+
+
+def prompt_for_variant(prompt: ResolvedPrompt | None, index: int, count: int) -> ResolvedPrompt | None:
+    """Return an explicit, deterministic composition brief for one output variant."""
+
+    if prompt is None:
+        return None
+    safe_index = max(1, int(index or 1))
+    safe_count = max(safe_index, int(count or 1))
+    direction = VARIANT_DIRECTIONS[(safe_index - 1) % len(VARIANT_DIRECTIONS)]
+    return replace(
+        prompt,
+        rendered=(
+            prompt.rendered
+            + f"\n\nVERBINDLICHE VARIANTE {safe_index} VON {safe_count}:\n"
+            + direction
+            + " Keine starre Platzierung aus einer anderen Variante übernehmen."
+        ),
+    )
+
+
+def matchday_bundle_prompt(
+    prompt: ResolvedPrompt,
+    games: list[dict],
+) -> ResolvedPrompt:
+    """Convert a single-game text prompt into an equal-weight matchday brief.
+
+    The explicit list is the sole factual match source for the bundle section;
+    the model is told not to privilege the game used to resolve the template.
+    """
+
+    lines = []
+    for position, item in enumerate(games, start=1):
+        line = (
+            f"{position}. {item['home_team']} gegen {item['away_team']}; "
+            f"{item['date']}, {item['time']} Uhr"
+        )
+        if item.get("competition"):
+            line += f"; Wettbewerb: {item['competition']}"
+        if item.get("venue"):
+            line += f"; Spielort: {item['venue']}"
+        if item.get("score"):
+            line += f"; bestätigtes Ergebnis: {item['score']}"
+        lines.append(line)
+    return replace(
+        prompt,
+        rendered=(
+            prompt.rendered
+            + "\n\nVERBINDLICHER GEMEINSAMER SPIELTAGS-AUFTRAG:\n"
+            + "Erstelle genau einen zusammenhängenden Begleittext für alle nachfolgend "
+            + "aufgeführten Spiele. Die vollständige Liste ist für diesen Auftrag die "
+            + "maßgebliche Faktenquelle. Behandle alle Mannschaften gleichwertig. "
+            + "Bevorzuge keine Mannschaft und insbesondere nicht das Spiel, dessen "
+            + "Daten zum Laden der Vorlage verwendet "
+            + "wurden. Lasse kein Spiel weg, vermische keine Spielorte, Uhrzeiten oder "
+            + "Ergebnisse und formuliere keine bloße Faktenliste. Eine Handlungsaufforderung "
+            + "muss allen beteiligten Mannschaften gelten.\n"
+            + "\n".join(lines)
+        ),
     )
 
 
