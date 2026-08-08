@@ -7,11 +7,20 @@ import structlog
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.channels.api import ChannelApiError, MetaGraphClient
 from app.config import Settings
 from app.meta.api import MetaApiClient
 from app.meta.oauth import check_connection
 from app.meta.publishing import assert_automatic_scheduler_environment
-from app.models import Club, ClubStatus, InstagramConnection, InstagramPage
+from app.meta.security import TokenCipher
+from app.models import (
+    AuditLog,
+    Club,
+    ClubStatus,
+    InstagramConnection,
+    InstagramPage,
+    SocialChannelConnection,
+)
 from app.tenancy.state import system_scope, tenant_scope
 
 log = structlog.get_logger()
@@ -80,11 +89,54 @@ def _claim_due_connections(
     return claimed
 
 
+def _claim_due_channel_connections(
+    db: Session,
+    settings: Settings,
+    now: datetime,
+) -> list[tuple[str, str]]:
+    due_before = now - timedelta(seconds=settings.meta_connection_check_interval_seconds)
+    enabled_types = []
+    if settings.facebook_channel_enabled:
+        enabled_types.append("facebook")
+    if settings.whatsapp_channel_enabled:
+        enabled_types.append("whatsapp")
+    if not enabled_types:
+        return []
+    query = (
+        select(SocialChannelConnection)
+        .join(Club, Club.id == SocialChannelConnection.club_id)
+        .where(
+            Club.status.in_([ClubStatus.ACTIVE, ClubStatus.TRIAL]),
+            SocialChannelConnection.channel_type.in_(enabled_types),
+            SocialChannelConnection.active.is_(True),
+            SocialChannelConnection.encrypted_token.is_not(None),
+            SocialChannelConnection.disconnected_at.is_(None),
+            or_(
+                SocialChannelConnection.last_check_at.is_(None),
+                SocialChannelConnection.last_check_at <= due_before,
+            ),
+        )
+        .order_by(SocialChannelConnection.last_check_at.asc())
+        .limit(settings.meta_scheduler_batch_size)
+    )
+    if db.get_bind().dialect.name == "postgresql":
+        query = query.with_for_update(skip_locked=True, of=SocialChannelConnection)
+    rows = list(db.scalars(query))
+    for item in rows:
+        # This timestamp is the claim and the recorded attempt time. A worker
+        # restart therefore cannot trigger an immediate duplicate API call.
+        item.last_check_at = now
+    if rows:
+        db.commit()
+    return [(item.id, item.club_id) for item in rows]
+
+
 def run_automatic_connection_check_cycle(
     db: Session,
     settings: Settings,
     *,
     api: MetaApiClient | None = None,
+    channel_api: MetaGraphClient | None = None,
     now: datetime | None = None,
 ) -> AutomaticConnectionCheckCycle:
     """Revalidate active Instagram connections at most once per interval.
@@ -97,9 +149,12 @@ def run_automatic_connection_check_cycle(
     now = _utc(now or datetime.now(timezone.utc))
     with system_scope("Fällige Instagram-Verbindungsprüfungen global beanspruchen"):
         candidates = _claim_due_connections(db, settings, now)
+        channel_candidates = _claim_due_channel_connections(db, settings, now)
 
-    result = AutomaticConnectionCheckCycle(claimed=len(candidates))
-    if not candidates:
+    result = AutomaticConnectionCheckCycle(
+        claimed=len(candidates) + len(channel_candidates)
+    )
+    if not candidates and not channel_candidates:
         return result
     api = api or MetaApiClient(settings)
 
@@ -119,6 +174,66 @@ def run_automatic_connection_check_cycle(
                 result.failed += 1
                 log.warning(
                     "automatic_meta_connection_check_failed",
+                    connection_id=connection_id,
+                    error_type=type(exc).__name__,
+                )
+    channel_api = channel_api or MetaGraphClient(settings)
+    for connection_id, club_id in channel_candidates:
+        with tenant_scope(club_id, "system:meta-channel-connection-check"):
+            connection = db.get(SocialChannelConnection, connection_id)
+            if connection is None:
+                continue
+            result.checked += 1
+            try:
+                token = TokenCipher(settings.meta_token_encryption_key).decrypt(
+                    connection.encrypted_token
+                )
+                if connection.channel_type == "facebook":
+                    channel_api.page_profile(
+                        page_id=connection.external_account_id or "",
+                        access_token=token,
+                    )
+                else:
+                    channel_api.whatsapp_phone(
+                        phone_number_id=connection.phone_number_id or "",
+                        access_token=token,
+                    )
+                connection.status = "connected"
+                connection.last_success_at = now
+                connection.last_error = None
+                result.succeeded += 1
+                db.add(
+                    AuditLog(
+                        user_id=None,
+                        action=f"channel.{connection.channel_type}.automatic_check_succeeded",
+                        entity_type="social_channel_connection",
+                        entity_id=connection.id,
+                        details={},
+                    )
+                )
+                db.commit()
+            except (ChannelApiError, ValueError) as exc:
+                db.rollback()
+                connection = db.get(SocialChannelConnection, connection_id)
+                if connection:
+                    connection.status = "check_required"
+                    connection.last_check_at = now
+                    connection.last_error = str(exc)[:500]
+                    db.add(
+                        AuditLog(
+                            user_id=None,
+                            action=(
+                                f"channel.{connection.channel_type}.automatic_check_failed"
+                            ),
+                            entity_type="social_channel_connection",
+                            entity_id=connection.id,
+                            details={"error_type": type(exc).__name__},
+                        )
+                    )
+                    db.commit()
+                result.failed += 1
+                log.warning(
+                    "automatic_channel_connection_check_failed",
                     connection_id=connection_id,
                     error_type=type(exc).__name__,
                 )

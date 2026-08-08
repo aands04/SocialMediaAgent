@@ -68,13 +68,13 @@ from app.models import (
     GeneratedMediaVersion,
     GenerationJob,
     GenerationJobStatus,
-    InstagramConnection,
     InstagramPage,
     JobStatus,
     LogoAsset,
     MediaAsset,
     MetaPublishingAttempt,
     Post,
+    PostChannelContent,
     PostStatus,
     PostTextVersion,
     PromptStatus,
@@ -85,10 +85,14 @@ from app.models import (
     PublicationRuleSlot,
     Role,
     SharedOpponentLogo,
+    SocialChannelConnection,
     StoryRule,
     Team,
+    TeamChannelAssignment,
     User,
     UserTeam,
+    WhatsAppMessageTemplate,
+    WhatsAppRecipient,
 )
 from app.platform.service import platform_audit
 from app.posts.automation import (
@@ -975,89 +979,23 @@ def team_logo_state(
 @router.get("/instagram", response_class=HTMLResponse)
 def instagram(request: Request, current=Depends(current_user), db: Session = Depends(get_db)):
     require(current, db, "view")
-    items = db.scalars(
-        select(InstagramPage)
-        .where(InstagramPage.archived_at.is_(None))
-        .order_by(InstagramPage.display_name)
-    ).all()
-    connections = {
-        connection.instagram_page_id: connection
-        for connection in db.scalars(select(InstagramConnection)).all()
-    }
-    attempt_summary = {}
-    for item in items:
-        connection = connections.get(item.id)
-        attempts = (
-            db.scalars(
-                select(MetaPublishingAttempt)
-                .where(MetaPublishingAttempt.connection_id == connection.id)
-                .order_by(MetaPublishingAttempt.created_at.desc())
-            ).all()
-            if connection
-            else []
-        )
-        attempt_summary[item.id] = {
-            "last_success": next(
-                (x for x in attempts if x.phase == "completed" and x.meta_media_id),
-                None,
-            ),
-            "last_failure": next((x for x in attempts if x.phase == "failed"), None),
-            "uncertain": sum(x.phase == "uncertain" for x in attempts),
-        }
-    return render(
-        request,
-        "instagram.html",
-        current,
-        items=items,
-        connections=connections,
-        attempt_summary=attempt_summary,
-        settings=settings,
-        title="Instagram-Seiten",
-    )
+    return RedirectResponse("/channels", 308)
 
 
 @router.post("/instagram")
 def create_instagram(
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
-    internal_name: str = Form(),
-    display_name: str = Form(),
-    username: str = Form(),
-    club: str = Form(),
-    account_id: str = Form(default=""),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
     check_csrf(request, csrf_token_value)
     require_admin(current)
-    try:
-        assert_resource_capacity(db, current.club_id, "instagram_pages")
-    except LimitExceeded as exc:
-        audit(
-            db,
-            current,
-            "instagram.limit_blocked",
-            "club",
-            current.club_id,
-            details={"reason": str(exc)},
-        )
-        db.commit()
-        raise HTTPException(409, str(exc)) from exc
-    item = InstagramPage(
-        internal_name=internal_name,
-        display_name=display_name,
-        username=username.lstrip("@"),
-        club=club,
-        account_id=account_id or None,
-        active=False,
-        publishing_enabled=False,
-        connection_status="unconfigured",
+    raise HTTPException(
+        410,
+        "Die manuelle Eingabe technischer Instagram-Daten wurde deaktiviert. "
+        "Bitte den Assistenten unter Social-Media-Kanäle verwenden.",
     )
-    db.add(item)
-    db.flush()
-    audit(db, current, "instagram.created", "instagram_page", item.id)
-    db.commit()
-    return redirect("/instagram", "Seite angelegt – sicher deaktiviert")
 
 
 @router.post("/instagram/{page_id}/state")
@@ -4178,6 +4116,82 @@ def post_detail(
         publication_summary = "Freigabe ausstehend"
     else:
         publication_summary = status_labels.get(item.status.value, item.status.value)
+    relevant_team_ids = {member.team_id for member in bundle_posts}
+    channel_plan = list(
+        db.execute(
+            select(TeamChannelAssignment, SocialChannelConnection)
+            .join(
+                SocialChannelConnection,
+                SocialChannelConnection.id
+                == TeamChannelAssignment.channel_connection_id,
+            )
+            .where(
+                TeamChannelAssignment.team_id.in_(relevant_team_ids),
+                TeamChannelAssignment.enabled.is_(True),
+                SocialChannelConnection.active.is_(True),
+                SocialChannelConnection.status == "connected",
+                SocialChannelConnection.channel_type.in_({"facebook", "whatsapp"}),
+            )
+            .order_by(
+                SocialChannelConnection.channel_type,
+                SocialChannelConnection.display_name,
+            )
+        )
+    )
+    planned_connections = []
+    seen_connections = set()
+    for assignment, connection in channel_plan:
+        enabled_for_post = (
+            assignment.result_enabled
+            if item.post_type == "result"
+            else assignment.announcement_enabled
+        )
+        if not enabled_for_post or connection.id in seen_connections:
+            continue
+        seen_connections.add(connection.id)
+        planned_connections.append(connection)
+    channel_previews = {}
+    for connection in planned_connections:
+        channel_content = db.scalar(
+            select(PostChannelContent).where(
+                PostChannelContent.post_id == item.id,
+                PostChannelContent.channel_connection_id == connection.id,
+            )
+        )
+        preview_text = channel_content.text if channel_content else (item.text or "")
+        if connection.channel_type == "facebook":
+            channel_previews[connection.id] = {
+                "text": preview_text or "Noch kein Begleittext vorhanden.",
+                "source": channel_content.source if channel_content else "derived",
+                "recipient_count": None,
+                "template": None,
+            }
+            continue
+        recipient_count = sum(
+            item.post_type in (recipient.preferred_message_types or [])
+            for recipient in db.scalars(
+                select(WhatsAppRecipient).where(
+                    WhatsAppRecipient.channel_connection_id == connection.id,
+                    WhatsAppRecipient.active.is_(True),
+                    WhatsAppRecipient.opt_in_status == "confirmed",
+                )
+            )
+        )
+        template = db.scalar(
+            select(WhatsAppMessageTemplate)
+            .where(
+                WhatsAppMessageTemplate.channel_connection_id == connection.id,
+                WhatsAppMessageTemplate.message_type.in_({item.post_type, "general"}),
+                WhatsAppMessageTemplate.status == "approved",
+            )
+            .order_by(WhatsAppMessageTemplate.message_type.desc())
+        )
+        channel_previews[connection.id] = {
+            "text": preview_text or "Noch kein Nachrichtentext vorhanden.",
+            "source": channel_content.source if channel_content else "derived",
+            "recipient_count": recipient_count,
+            "template": template,
+        }
     return render(
         request,
         "post_detail.html",
@@ -4232,6 +4246,8 @@ def post_detail(
         publication_summary=publication_summary,
         open_publication_count=open_count,
         published_publication_count=published_count,
+        planned_channel_connections=planned_connections,
+        channel_previews=channel_previews,
         now=now,
         title="Beitrag prüfen",
     )
@@ -4259,6 +4275,89 @@ def post_text(
     audit(db, current, "post.text_edited", "post", item.id, item.team_id)
     db.commit()
     return redirect(f"/posts/{item.id}")
+
+
+@router.post("/posts/{post_id}/channels/{connection_id}/text")
+def post_channel_text(
+    post_id: str,
+    connection_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    text_value: str = Form(alias="text"),
+    version: int = Form(),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    item = db.scalar(select(Post).where(Post.id == post_id).with_for_update())
+    connection = db.get(SocialChannelConnection, connection_id)
+    if not item or not connection:
+        raise HTTPException(404)
+    require(current, db, "edit_post", item.team_id)
+    if connection.channel_type not in {"facebook", "whatsapp"} or not connection.active:
+        raise HTTPException(422, "Dieser Zielkanal kann nicht bearbeitet werden")
+    if item.version != version:
+        raise HTTPException(
+            409,
+            "Der Beitrag wurde zwischenzeitlich geändert. Bitte Seite neu laden.",
+        )
+    normalized = text_value.strip()
+    if not normalized or len(normalized) > 5000:
+        raise HTTPException(422, "Der Kanaltext muss 1 bis 5000 Zeichen lang sein")
+    variant = db.scalar(
+        select(PostChannelContent).where(
+            PostChannelContent.post_id == item.id,
+            PostChannelContent.channel_connection_id == connection.id,
+        )
+    )
+    if variant is None:
+        variant = PostChannelContent(
+            post_id=item.id,
+            channel_connection_id=connection.id,
+            channel_type=connection.channel_type,
+            text=normalized,
+            source="manual",
+            updated_by=current.id,
+        )
+        db.add(variant)
+    else:
+        variant.text = normalized
+        variant.source = "manual"
+        variant.updated_by = current.id
+        variant.version += 1
+    item.version += 1
+    item.approved_version = None
+    item.approved_by = None
+    item.approved_at = None
+    if item.status in {
+        PostStatus.APPROVED,
+        PostStatus.SCHEDULED,
+        PostStatus.PARTIAL,
+    }:
+        item.status = PostStatus.REAPPROVAL
+    for job in db.scalars(
+        select(PublicationJob).where(
+            PublicationJob.post_id == item.id,
+            PublicationJob.status != JobStatus.PUBLISHED,
+        )
+    ):
+        job.status = JobStatus.UNAPPROVED
+        job.approval_status = "reapproval_required"
+        job.approved_post_version = None
+        if job.channel_connection_id == connection.id:
+            job.text_snapshot = normalized
+        job.error = "Kanaltext wurde geändert; erneute Freigabe erforderlich"
+    audit(
+        db,
+        current,
+        "post.channel_text_edited",
+        "post",
+        item.id,
+        item.team_id,
+        {"channel_type": connection.channel_type, "channel_connection_id": connection.id},
+    )
+    db.commit()
+    return redirect(f"/posts/{item.id}#channel-previews", "Kanaltext gespeichert")
 
 
 @router.get("/posts/{post_id}/versions/{version_id}")
@@ -4954,6 +5053,8 @@ def approve_post(
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
     job_ids: list[str] = Form(default=[]),
+    channel_connection_ids: list[str] = Form(default=[]),
+    channel_selection_submitted: bool = Form(default=False),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -4962,7 +5063,13 @@ def approve_post(
     if not item:
         raise HTTPException(404)
     try:
-        approve_matchday_bundle(db, item, current, job_ids or None)
+        approve_matchday_bundle(
+            db,
+            item,
+            current,
+            job_ids or None,
+            channel_connection_ids if channel_selection_submitted else None,
+        )
     except ApprovalError as e:
         raise HTTPException(422, str(e)) from e
     return redirect(f"/posts/{item.id}", "Beitrag ausdrücklich freigegeben")

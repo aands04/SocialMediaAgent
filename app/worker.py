@@ -6,6 +6,7 @@ from pathlib import Path
 import structlog
 from sqlalchemy import select
 
+from app.channels.delivery import ChannelDeliveryError, run_cross_channel_delivery_cycle
 from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.games.automatic import run_automatic_fussball_cycle
@@ -128,6 +129,7 @@ def run():
         loops += 1
         due_count = 0
         automatic_result = None
+        channel_result = None
         connection_check_result = None
         fussball_result = None
         with SessionLocal() as db:
@@ -209,6 +211,13 @@ def run():
                 except MetaPublishingError as exc:
                     db.rollback()
                     log.error("automatic_scheduler_blocked", error=str(exc))
+                try:
+                    channel_result = run_cross_channel_delivery_cycle(db, settings)
+                    due_count += channel_result.queued
+                    processed += channel_result.delivered
+                except (ChannelDeliveryError, ValueError) as exc:
+                    db.rollback()
+                    log.error("automatic_channel_scheduler_blocked", error=str(exc))
 
         payload = {
             "at": datetime.now(timezone.utc).isoformat(),
@@ -227,6 +236,9 @@ def run():
             "publisher": worker_mode,
             "automatic_cycle": (
                 automatic_result.__dict__ if automatic_result is not None else None
+            ),
+            "automatic_channel_cycle": (
+                channel_result.__dict__ if channel_result is not None else None
             ),
             "automatic_connection_checks": (
                 connection_check_result.__dict__

@@ -44,6 +44,8 @@ ALLOWED_PLACEHOLDERS = {
     "score",
     "hashtags",
     "own_team_display",
+    "channel_type",
+    "channel_name",
 }
 
 DEFAULT_STYLE = (
@@ -128,6 +130,7 @@ IMAGE_FORMAT_DIRECTIONS = {
 
 TEXT_FACTS = """Verwende ausschließlich diese Fakten:
 
+Zielkanal: {{ channel_name }}
 Wettbewerb: {{ competition }}
 Spielpaarung: {{ home_team }} gegen {{ away_team }}
 Datum: {{ weekday }}, {{ date_de }}
@@ -139,18 +142,18 @@ Hashtags: {{ hashtags }}
 """
 
 DEFAULT_TEXT_PROMPTS = {
-    "announcement": """Verfasse einen deutschen Instagram-Begleittext für eine Spielankündigung.
+    "announcement": """Verfasse einen deutschen Begleittext für {{ channel_name }} für eine Spielankündigung.
 {facts}
 Baue Vorfreude auf die Begegnung auf. Tonalität, Länge, Anrede, Emojis,
 Hashtags und Handlungsaufforderung werden durch die nachfolgenden verbindlichen
 Vereinstextregeln festgelegt. Gib ausschließlich den direkt kopierbaren Text aus.""".format(facts=TEXT_FACTS),
-    "reminder": """Verfasse einen deutschen Instagram-Begleittext für eine Spielerinnerung.
+    "reminder": """Verfasse einen deutschen Begleittext für {{ channel_name }} für eine Spielerinnerung.
 {facts}
 Mache den nahen Termin schnell erfassbar und vermeide eine Wiederholung derselben
 Informationen. Tonalität, Länge, Anrede, Emojis, Hashtags und
 Handlungsaufforderung werden durch die nachfolgenden verbindlichen
 Vereinstextregeln festgelegt. Gib ausschließlich den direkt kopierbaren Text aus.""".format(facts=TEXT_FACTS),
-    "result": """Verfasse einen deutschen Instagram-Begleittext für eine Ergebnismeldung.
+    "result": """Verfasse einen deutschen Begleittext für {{ channel_name }} für eine Ergebnismeldung.
 {facts}
 Nenne das bestätigte Ergebnis klar. Werte es nicht als Sieg, Niederlage oder
 Unentschieden, sofern dies nicht zweifelsfrei aus den angegebenen Mannschaften
@@ -207,7 +210,7 @@ def builtin_prompt_catalog() -> dict[str, dict]:
             "style_direction": None,
             "model": settings.openai_model,
             "quality": "default",
-            "version": 2,
+            "version": 3,
             "builtin": True,
             "id": "",
         }
@@ -388,6 +391,14 @@ def prompt_context(
     sizes = {"feed": (1080, 1350), "story": (1080, 1920), "none": (0, 0)}
     width, height = sizes.get(media_kind, (0, 0))
     own_display = str(facts.get("own_team_display") or own).strip() or own
+    channel_type = str(facts.get("channel_type") or "instagram").strip().lower()
+    channel_names = {
+        "instagram": "Instagram",
+        "facebook": "Facebook",
+        "whatsapp": "WhatsApp",
+    }
+    if channel_type not in channel_names:
+        raise PromptValidationError("Unbekannter Zielkanal für die Textgenerierung")
     home_display = own_display if is_home else facts.get("home_team")
     away_display = facts.get("away_team") if is_home else own_display
     return {
@@ -415,6 +426,8 @@ def prompt_context(
         "output_height": height,
         "score": facts.get("score") or "",
         "hashtags": " ".join(facts.get("hashtags") or []),
+        "channel_type": channel_type,
+        "channel_name": channel_names[channel_type],
     }
 
 
@@ -484,7 +497,7 @@ def builtin_prompt(
         rendered = TEXT_SAFETY_PREFIX + "\n" + rendered
     return ResolvedPrompt(
         name=name,
-        version=3 if image else 2,
+        version=3,
         prompt_kind=prompt_kind,
         post_type=post_type,
         media_kind=media_kind,

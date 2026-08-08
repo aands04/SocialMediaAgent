@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block content %}
+<p><a href="/channels">← Zur Kanalübersicht</a></p>
+<h1>{{ channel_label }} einrichten</h1>
+{% if channel_type == 'instagram' %}
+<section><h2>1. Voraussetzungen</h2><p>Für die automatische Veröffentlichung benötigst du ein professionelles Instagram-Konto, das die von der aktuell verwendeten offiziellen Meta-Schnittstelle geforderten Voraussetzungen erfüllt.</p></section>
+<section><h2>2. Bei Meta anmelden</h2><p>Du wirst zu Meta weitergeleitet. Dort meldest du dich direkt bei Meta an und erlaubst der Vereinszentrale den benötigten Zugriff.</p><p><strong>Dein Facebook- oder Instagram-Passwort wird nicht an die Vereinszentrale übertragen.</strong></p>
+<form method="post" action="/channels/instagram/connect">
+  <input type="hidden" name="csrf_token" value="{{ csrf }}">
+  <label>Bezeichnung in der Vereinszentrale <span class="field-help">Keine technische ID</span><input name="display_name" minlength="2" maxlength="120" placeholder="z. B. Instagram Hauptseite" required></label>
+  <button>Mit Meta verbinden</button>
+</form></section>
+<section><h2>3 bis 6. Konto bestätigen und aktivieren</h2><ol><li>Wähle beziehungsweise bestätige bei Meta das professionelle Konto deines Vereins.</li><li>Bestätige die benötigten Zugriffe.</li><li>Die Vereinszentrale prüft Kontotyp, Verbindung und Medienfunktionen.</li><li>Aktiviere danach Feed, Karussell und – falls verfügbar – Storys.</li></ol><p>Die Verbindung startet aus Sicherheitsgründen ohne automatische Veröffentlichung.</p></section>
+{% elif channel_type == 'facebook' %}
+<section><h2>1. Erklärung</h2><p>Verbinde die offizielle Facebook-Seite deines Vereins, damit freigegebene Beiträge automatisch dort veröffentlicht werden können.</p></section>
+<section><h2>2. Meta-Anmeldung</h2><p>Du meldest dich direkt bei Meta an. Die Vereinszentrale erhält niemals dein Passwort.</p>{% if facebook_available %}<form method="post" action="/channels/facebook/connect"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Mit Meta verbinden</button></form>{% else %}<p class="warning">Facebook ist technisch noch nicht durch den PlatformAdmin aktiviert.</p>{% endif %}</section>
+<section><h2>3 bis 6. Seite auswählen und prüfen</h2><p>Nach der Anmeldung werden ausschließlich Seiten angeboten, für die du Inhalte verwalten darfst. Die Verbindung wird ohne öffentliche Testveröffentlichung geprüft und startet sicher deaktiviert.</p></section>
+{% else %}
+<section><h2>1. Erklärung</h2><p>Mit WhatsApp kannst du Spielankündigungen und Ergebnisse direkt an Personen senden, die dem Empfang zugestimmt haben. WhatsApp-Nachrichten sind nicht öffentlich.</p></section>
+<section><h2>2. Voraussetzungen</h2><ul><li>Meta Business Einrichtung</li><li>WhatsApp Business Account</li><li>registrierte Telefonnummer</li><li>benötigte Berechtigungen</li><li>genehmigte Nachrichtenvorlagen für proaktive Nachrichten</li></ul></section>
+<section><h2>3. Offizielle Meta-Verbindung</h2>
+{% if whatsapp_available and whatsapp_configuration_id and meta_app_id %}
+<p>Der folgende Button startet das offizielle eingebettete WhatsApp-Onboarding von Meta. Es wird kein WhatsApp-Passwort gespeichert.</p>
+<button type="button" id="whatsapp-connect">Mit Meta verbinden</button>
+<form id="whatsapp-result" method="post" action="/channels/whatsapp/complete" hidden>
+  <input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="code"><input type="hidden" name="waba_id"><input type="hidden" name="phone_number_id">
+</form>
+<script>
+window.fbAsyncInit=function(){FB.init({appId:{{ meta_app_id | tojson }},cookie:false,xfbml:false,version:{{ meta_graph_version | tojson }}})};
+(function(d,s,id){if(d.getElementById(id))return;const js=d.createElement(s);js.id=id;js.src='https://connect.facebook.net/de_DE/sdk.js';d.head.appendChild(js)})(document,'script','facebook-jssdk');
+let onboarding={};window.addEventListener('message',event=>{if(!['https://www.facebook.com','https://web.facebook.com'].includes(event.origin))return;let data=event.data;try{if(typeof data==='string')data=JSON.parse(data)}catch{return}if(data&&data.type==='WA_EMBEDDED_SIGNUP'&&data.event==='FINISH')onboarding=data.data||{};});
+document.getElementById('whatsapp-connect').addEventListener('click',()=>FB.login(response=>{if(!response.authResponse||!response.authResponse.code)return;const form=document.getElementById('whatsapp-result');form.code.value=response.authResponse.code;form.waba_id.value=onboarding.waba_id||'';form.phone_number_id.value=onboarding.phone_number_id||'';if(!form.waba_id.value||!form.phone_number_id.value){alert('Meta hat die Einrichtung nicht vollständig bestätigt. Bitte erneut versuchen.');return}form.submit();},{config_id:{{ whatsapp_configuration_id | tojson }},response_type:'code',override_default_response_type:true,extras:{setup:{}}}));
+</script>
+{% else %}<p class="warning">Das offizielle WhatsApp-Onboarding ist noch nicht vollständig durch den PlatformAdmin eingerichtet.</p>{% endif %}
+</section>
+<section><h2>4 bis 6. Telefonnummer, Test und Einstellungen</h2><p>Nach Meta-Bestätigung werden Telefonnummer, Webhook und Vorlagen serverseitig geprüft. Empfänger werden nie automatisch aktiviert.</p></section>
+{% endif %}
+{% endblock %}

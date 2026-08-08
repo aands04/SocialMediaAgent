@@ -1,0 +1,191 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="channel-heading">
+  <div>
+    <p class="eyebrow">Verbindungen und Versand</p>
+    <h1>Social-Media-Kanäle</h1>
+    <p>Verbinde hier die Social-Media-Konten deines Vereins. Die Vereinszentrale kann freigegebene Beiträge anschließend automatisch über die verbundenen Kanäle veröffentlichen oder versenden.</p>
+  </div>
+</div>
+
+<section class="channel-intro">
+  <h2>Deine Kanäle verbinden</h2>
+  <p>Du kannst Instagram, Facebook und WhatsApp mit der Vereinszentrale verbinden.</p>
+  <p>Die Verbindung erfolgt über die offiziellen Schnittstellen von Meta. Passwörter für Instagram, Facebook oder WhatsApp werden nicht in der Vereinszentrale gespeichert.</p>
+  <div class="channel-info-grid">
+    <article><strong>Instagram</strong><span>Veröffentliche automatisch Feed-Beiträge, Beiträge mit mehreren Bildern und Storys.</span></article>
+    <article><strong>Facebook</strong><span>Veröffentliche Beiträge und Bilder automatisch auf deiner Facebook-Seite.</span></article>
+    <article><strong>WhatsApp</strong><span>Versende Spielankündigungen und Ergebnisse an dafür freigegebene Empfänger.</span><small>WhatsApp funktioniert anders: Inhalte werden als private Nachrichten versendet und nicht öffentlich veröffentlicht.</small></article>
+  </div>
+</section>
+
+<section class="channel-safety {{ 'channel-safety-paused' if paused else 'channel-safety-active' }}">
+  <div>
+    <h2>Automatische Veröffentlichung</h2>
+    <strong>{{ 'Automatische Veröffentlichungen sind derzeit pausiert.' if paused else 'Automatische Veröffentlichungen sind aktiv.' }}</strong>
+    <p>Freigaben, Kanal- und Mannschaftseinstellungen sowie der technische Not-Aus bleiben immer wirksam.</p>
+  </div>
+  {% if is_admin and environment in ['meta-test', 'production'] %}
+  <form method="post" action="/meta/emergency-stop">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    {% if paused %}<button name="enabled" value="false">Veröffentlichungen nach Prüfung fortsetzen</button>
+    {% else %}<button class="danger" name="enabled" value="true">Alle automatischen Veröffentlichungen pausieren</button>{% endif %}
+  </form>
+  {% endif %}
+</section>
+
+<div class="channel-card-grid">
+{% for channel_type, label, icon, empty_title, empty_text in [
+  ('instagram','Instagram','◎','Noch nicht verbunden','Verbinde ein professionelles Instagram-Konto, um Feed-Beiträge, Karussells und unterstützte Storys zu veröffentlichen.'),
+  ('facebook','Facebook','f','Noch nicht verbunden','Verbinde deine Facebook-Seite, um freigegebene Beiträge automatisch auch dort zu veröffentlichen.'),
+  ('whatsapp','WhatsApp','✆','Noch nicht eingerichtet','Verbinde die WhatsApp Business Platform, um Spielankündigungen oder Ergebnisse zulässig zu versenden.')
+] %}
+  <section class="channel-card" aria-labelledby="channel-{{ channel_type }}">
+    <header class="channel-card-header"><span class="channel-icon channel-icon-{{ channel_type }}" aria-hidden="true">{{ icon }}</span><h2 id="channel-{{ channel_type }}">{{ label }}</h2></header>
+    {% if cards[channel_type] %}
+      {% for card in cards[channel_type] %}
+      {% set connection = card.connection %}
+      <article class="connection-summary">
+        <h3>{{ connection.display_name }}</h3>
+        {% if connection.username %}<p>@{{ connection.username }}</p>{% elif connection.display_phone_number %}<p>{{ connection.display_phone_number }}</p>{% endif %}
+        <p><span class="channel-status channel-status-{{ connection.status }}">{{ '✓ ' if connection.status == 'connected' else '' }}{{ card.status_label }}</span></p>
+        <dl class="channel-summary-list">
+          <dt>Automatische {{ 'Nachrichten' if channel_type == 'whatsapp' else 'Veröffentlichung' }}</dt><dd>{{ 'Aktiv' if connection.automatic_delivery_enabled else 'Pausiert' }}</dd>
+          <dt>Aktive Funktionen</dt><dd>{{ card.capability_labels | join(' · ') if card.capability_labels else 'Noch keine' }}</dd>
+          <dt>Zuletzt geprüft</dt><dd>{{ connection.last_check_at | berlin if connection.last_check_at else 'Noch nicht geprüft' }}</dd>
+        </dl>
+        {% if card.progress and card.progress.completed < card.progress.total %}
+        <p class="setup-progress">Einrichtung {{ card.progress.completed }} von {{ card.progress.total }} Schritten</p>
+        {% endif %}
+        {% if connection.last_error %}<p class="channel-action-needed">Handlungsbedarf: Verbindung prüfen oder erneuern.</p>{% endif %}
+        {% if is_admin %}
+        <details class="channel-manage">
+          <summary>Verwalten</summary>
+          <form method="post" action="/channels/{{ connection.id }}/settings" class="channel-settings-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <label><input type="checkbox" name="publishing_enabled" {% if connection.publishing_enabled %}checked{% endif %}> Kanal verwenden</label>
+            <label><input type="checkbox" name="automatic_delivery_enabled" {% if connection.automatic_delivery_enabled %}checked{% endif %}> Nach Freigabe automatisch {{ 'versenden' if channel_type == 'whatsapp' else 'veröffentlichen' }}</label>
+            {% if environment == 'production' %}
+            <label class="field-help">Zum Aktivieren der Automatik <strong>AUTOMATISCH VERÖFFENTLICHEN</strong> eingeben
+              <input name="automatic_confirmation" autocomplete="off">
+            </label>
+            {% endif %}
+            <label><input type="checkbox" name="announcements" {% if connection.settings.get('announcements_enabled') %}checked{% endif %}> Spielankündigungen</label>
+            <label><input type="checkbox" name="results" {% if connection.settings.get('results_enabled') %}checked{% endif %}> Ergebnismeldungen</label>
+            {% if channel_type == 'instagram' %}<label><input type="checkbox" name="stories" {% if connection.settings.get('story_enabled') %}checked{% endif %}> Storys</label>{% endif %}
+            <button>Kanaleinstellungen speichern</button>
+          </form>
+          <div class="button-row">
+            <form method="post" action="/channels/{{ connection.id }}/check"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Verbindung prüfen</button></form>
+            {% if channel_type == 'instagram' and connection.legacy_instagram_page_id %}<form method="post" action="/instagram/{{ connection.legacy_instagram_page_id }}/meta/refresh"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Verbindung erneuern</button></form>
+            {% elif channel_type in ['facebook', 'whatsapp'] %}<a class="button secondary" href="/channels/{{ channel_type }}/setup">Verbindung erneuern</a>{% endif %}
+          </div>
+          <p class="field-help">Meta verlangt gelegentlich eine erneute Bestätigung. Gespeicherte Beiträge und Einstellungen bleiben erhalten.</p>
+          <details>
+            <summary>Verbindung trennen</summary>
+            <p>Neue Vorgänge über diesen Kanal werden gestoppt. Historische Veröffentlichungen und Auditdaten bleiben erhalten.</p>
+            <form method="post" action="/channels/{{ connection.id }}/disconnect">
+              <input type="hidden" name="csrf_token" value="{{ csrf }}">
+              <label>Zur Bestätigung <strong>VERBINDUNG TRENNEN</strong> eingeben<input name="confirmation" autocomplete="off"></label>
+              <button class="danger">Verbindung trennen</button>
+            </form>
+          </details>
+        </details>
+        {% endif %}
+        {% if is_admin %}
+        <details class="technical-details">
+          <summary>Technische Details</summary>
+          <dl class="metadata">
+            <dt>Interne Verbindung</dt><dd>{{ connection.id }}</dd>
+            <dt>Meta-Konto</dt><dd>{{ connection.external_account_id or '—' }}</dd>
+            {% if channel_type == 'facebook' %}<dt>Page ID</dt><dd>{{ connection.external_account_id or '—' }}</dd>{% endif %}
+            {% if channel_type == 'whatsapp' %}<dt>WhatsApp Business Account</dt><dd>{{ connection.parent_business_id or '—' }}</dd><dt>Phone Number ID</dt><dd>{{ connection.phone_number_id or '—' }}</dd>{% endif %}
+            <dt>Graph-Version</dt><dd>{{ connection.api_version or 'zentral konfiguriert' }}</dd>
+            <dt>Berechtigungen</dt><dd>{{ connection.scopes | join(', ') if connection.scopes else '—' }}</dd>
+            <dt>Verbindungsablauf</dt><dd>{{ connection.token_expires_at | berlin if connection.token_expires_at else 'nicht von Meta gemeldet' }}</dd>
+            <dt>Letzter technischer Fehler</dt><dd>{{ connection.last_error or 'keiner' }}</dd>
+          </dl>
+        </details>
+        {% endif %}
+      </article>
+      {% endfor %}
+    {% else %}
+      <div class="channel-empty"><strong>{{ empty_title }}</strong><p>{{ empty_text }}</p>
+      {% if is_admin %}
+        {% if channel_type == 'facebook' and not facebook_available %}<p class="field-help">Der PlatformAdmin muss Facebook zunächst technisch aktivieren.</p>{% elif channel_type == 'whatsapp' and not whatsapp_available %}<p class="field-help">Der PlatformAdmin muss WhatsApp zunächst technisch aktivieren.</p>{% endif %}
+        <a class="button" href="/channels/{{ channel_type }}/setup">{{ 'WhatsApp einrichten' if channel_type == 'whatsapp' else label ~ ' verbinden' }}</a>
+      {% endif %}
+      </div>
+    {% endif %}
+    <details class="channel-help"><summary>Wie richte ich das ein?</summary>
+      {% if channel_type == 'instagram' %}<ol><li>Professionelles Konto vorbereiten.</li><li>Mit Meta anmelden.</li><li>Konto auswählen.</li><li>Zugriff erlauben.</li><li>Verbindung prüfen.</li></ol>
+      {% elif channel_type == 'facebook' %}<ol><li>Facebook-Seite vorbereiten.</li><li>Mit Meta anmelden.</li><li>Seite auswählen.</li><li>Zugriff erlauben.</li><li>Verbindung prüfen.</li></ol>
+      {% else %}<ol><li>WhatsApp-Business-Voraussetzungen prüfen.</li><li>Business-Konto verbinden.</li><li>Telefonnummer einrichten.</li><li>genehmigte Vorlagen synchronisieren.</li><li>Empfänger mit nachweisbarer Zustimmung hinzufügen.</li></ol><p>Ein automatisches Veröffentlichen im WhatsApp-Status wird nicht angeboten.</p>{% endif %}
+    </details>
+  </section>
+{% endfor %}
+</div>
+
+{% if is_admin and (cards.instagram or cards.facebook or cards.whatsapp) %}
+<section>
+  <h2>Wo wird veröffentlicht oder versendet?</h2>
+  <p>Neue Kanalverbindungen gelten nicht rückwirkend. Weise sie ausdrücklich den gewünschten Mannschaften und Inhaltstypen zu.</p>
+  <div class="assignment-list">
+  {% for team in teams %}
+    <article><h3>{{ team.display_name }}</h3>
+    {% for channel_type in ['instagram','facebook','whatsapp'] %}{% for card in cards[channel_type] %}
+      {% set connection = card.connection %}{% set assignment = assignments.get((team.id, connection.id)) %}
+      <form method="post" action="/channels/{{ connection.id }}/teams/{{ team.id }}" class="assignment-row">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <strong>{{ channel_type | capitalize }} · {{ connection.display_name }}</strong>
+        <label><input type="checkbox" name="enabled" {% if assignment and assignment.enabled %}checked{% endif %}> verwenden</label>
+        <label><input type="checkbox" name="announcement_enabled" {% if assignment and assignment.announcement_enabled %}checked{% endif %}> Ankündigungen</label>
+        <label><input type="checkbox" name="result_enabled" {% if assignment and assignment.result_enabled %}checked{% endif %}> Ergebnisse</label>
+        {% if channel_type == 'instagram' %}<label><input type="checkbox" name="story_enabled" {% if assignment and assignment.story_enabled %}checked{% endif %}> Storys</label>{% endif %}
+        <button>Speichern</button>
+      </form>
+    {% endfor %}{% endfor %}
+    </article>
+  {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if is_admin and cards.whatsapp %}
+<section>
+  <h2>WhatsApp-Empfänger und Einwilligungen</h2>
+  <p>Ohne nachweisbare Zustimmung wird keine proaktive Vereinsnachricht versendet.</p>
+  {% for card in cards.whatsapp %}{% set connection = card.connection %}
+  <form method="post" action="/channels/{{ connection.id }}/whatsapp/recipients" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Telefonnummer im internationalen Format<input name="phone" placeholder="+49…" required></label>
+    <label>Anzeigename (optional)<input name="display_name"></label>
+    <label>Quelle und Zeitpunkt der Zustimmung<input name="opt_in_source" placeholder="z. B. Onlineformular vom 08.08.2026" required></label>
+    <label><input type="checkbox" name="consent_confirmed" required> Zulässige Zustimmung liegt nachweisbar vor</label>
+    <label><input type="checkbox" name="announcements"> Spielankündigungen</label>
+    <label><input type="checkbox" name="results"> Ergebnismeldungen</label>
+    <button>Empfänger speichern</button>
+  </form>
+  {% endfor %}
+  <div class="recipient-list">
+  {% for recipient in recipients %}<article><strong>{{ recipient.display_name or recipient.normalized_phone }}</strong><span>{{ recipient.normalized_phone }} · {{ 'Zustimmung aktiv' if recipient.opt_in_status == 'confirmed' and recipient.active else 'deaktiviert' }}</span>{% if recipient.active %}<form method="post" action="/channels/whatsapp/recipients/{{ recipient.id }}/opt-out"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="danger">Abmelden</button></form>{% endif %}</article>{% endfor %}
+  </div>
+  <h3>Nachrichtenvorlagen</h3>
+  {% if message_templates %}<div class="template-list">{% for item in message_templates %}<article>
+    <strong>{{ item.name }}</strong>
+    <span>{{ {'approved':'Genehmigt','pending':'Bei Meta eingereicht','rejected':'Abgelehnt','paused':'Pausiert','draft':'Entwurf'}.get(item.status,item.status) }}</span>
+    <form method="post" action="/channels/whatsapp/templates/{{ item.id }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label>Verwenden für
+        <select name="message_type">
+          <option value="general" {% if item.message_type == 'general' %}selected{% endif %}>Noch nicht zugeordnet</option>
+          <option value="announcement" {% if item.message_type == 'announcement' %}selected{% endif %}>Spielankündigung</option>
+          <option value="result" {% if item.message_type == 'result' %}selected{% endif %}>Ergebnismeldung</option>
+        </select>
+      </label>
+      <button>Zuordnung speichern</button>
+    </form>
+  </article>{% endfor %}</div>{% else %}<p>Noch keine Vorlagen synchronisiert.</p>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

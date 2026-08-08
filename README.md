@@ -1,9 +1,9 @@
 # SocialMediaAgent
 
 Sicherheitsorientierte, selbst gehostete Anwendung für automatisch erzeugte,
-**immer manuell freizugebende** Fußball-Instagram-Beiträge. Freigegebene und
-fällige Beiträge können in einer getrennten Produktionsumgebung kontrolliert
-vom Scheduler veröffentlicht werden. UI und Betriebsdokumentation sind
+**immer manuell freizugebende** Fußball-Inhalte. Freigegebene und fällige
+Beiträge können kontrolliert auf Instagram und Facebook veröffentlicht oder
+als zulässige WhatsApp-Vorlagennachricht versendet werden. UI und Betriebsdokumentation sind
 deutsch; externe FUSSBALL.DE-, OpenAI-, SMB- und Meta-Zugriffe bleiben
 standardmäßig Fixture/Mock/Dry-Run.
 
@@ -15,7 +15,8 @@ standardmäßig Fixture/Mock/Dry-Run.
 - sicherer lokaler bzw. host-gemounteter SMB-Speicher und einmalige Bildreservierung
 - automatische Feed-/Multi-Story-Erzeugung (1080×1350/1080×1920), Fakten-only Textgenerator
 - versionierte Freigaben, einzelne Publishing-Aufträge, Not-Aus, Idempotenz und unklare Plattformzustände
-- offizieller Graph-API-Publisher plus Mock/Dry-Run; Live-Modus ist mehrfach opt-in
+- offizielle Meta-Schnittstellen für Instagram, Facebook Pages und WhatsApp Cloud API;
+  Live-Modi sind je Kanal mehrfach opt-in
 - Docker Compose mit Web, Worker, PostgreSQL, Nginx, Healthchecks, Volumes, Backup/Restore
 
 ## Lokal starten
@@ -38,7 +39,11 @@ PUBLISHER_MODE=dry-run GLOBAL_PUBLISH_ENABLED=false docker compose -f docker-com
 ```
 
 ## Administration
-1. **Instagram-Seite:** internen Namen, Username und offizielle Konto-ID anlegen; Token ausschließlich als Docker Secret/Environment. Nach offizieller Verbindungsprüfung aktivieren. Mehrere Teams dürfen dieselbe Seite nutzen; der Beitrag snapshotet sein Ziel.
+1. **Social-Media-Kanäle:** Instagram, Facebook und WhatsApp werden über geführte
+   offizielle Meta-Verbindungen eingerichtet. Plattformpasswörter und Tokens werden nie im
+   Browser angezeigt. Eine neue Verbindung bleibt deaktiviert, bis sie ausdrücklich einer
+   Mannschaft und den gewünschten Inhaltstypen zugewiesen wurde. Voraussetzungen,
+   Sicherheit und Meta-App-Schritte beschreibt [`docs/META_CHANNELS.md`](docs/META_CHANNELS.md).
 2. **Mannschaft:** Namen/Slug, plausible `https://www.fussball.de/...`-URL, aktive Seite, relativen Medienunterordner, vorhandene Vorlagen/Fonts, Farben und Zeitzone anlegen. Löschen ist Soft-Delete/Archivierung.
 3. **Rechte:** Rolle und Mannschaftszuordnung sind getrennt. `all_teams=false` verlangt explizite `UserTeam`-Zeilen; direkte URLs und Services prüfen serverseitig.
 

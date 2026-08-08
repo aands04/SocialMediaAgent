@@ -626,5 +626,5 @@ def test_openai_text_generator_uses_resolved_prompt_without_live_request():
     generator.client = type("Client", (), {"responses": Responses()})()
     result = generator.generate({"text_prompt": prompt})
     assert result.text == "Kopierbarer Testtext"
-    assert result.prompt_version == "default-text-announcement:v2"
+    assert result.prompt_version == "default-text-announcement:v3"
     assert result.tokens == 42
