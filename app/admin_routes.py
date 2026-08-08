@@ -7,7 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -91,6 +91,16 @@ from app.models import (
     UserTeam,
 )
 from app.platform.service import platform_audit
+from app.posts.automation import (
+    RECOMMENDED_AUTOMATION_PRESET,
+    RESULT_POLL_MINUTES_MIN,
+    RESULT_POLL_MINUTES_RECOMMENDED,
+    apply_recommended_preset,
+    automatic_rule_label,
+    build_schedule_preview,
+    generation_summary,
+    selection_summary,
+)
 from app.posts.club_carousel import (
     ClubCarouselConflict,
     matchday_bundle_jobs,
@@ -2162,6 +2172,34 @@ def rules(
     structured_slots = _serialize_team_publication_slots(db, selected) if selected else []
     for row in structured_slots:
         row["summary"] = _rule_slot_summary(row)
+    preset_slots = [deepcopy(row) for row in RECOMMENDED_AUTOMATION_PRESET.slots]
+    for row in preset_slots:
+        row["summary"] = _rule_slot_summary(row)
+    current_summary = None
+    invalid_result_poll = False
+    if selected:
+        selected_rules = selected.rules or {}
+        try:
+            invalid_result_poll = (
+                int(selected_rules.get("result_poll_interval_minutes", 15))
+                < RESULT_POLL_MINUTES_MIN
+            )
+        except (TypeError, ValueError):
+            invalid_result_poll = True
+        current_summary = {
+            "announcement": generation_summary(selected_rules, "announcement"),
+            "announcement_selected": selection_summary(selected_rules, "announcement"),
+            "reminder": generation_summary(selected_rules, "reminder"),
+            "result": generation_summary(selected_rules, "result"),
+            "result_selected": selection_summary(selected_rules, "result"),
+            "configured_weekdays": sorted(
+                {
+                    int(row["match_weekday"])
+                    for row in structured_slots
+                    if row.get("match_weekday") is not None
+                }
+            ),
+        }
     return render(
         request,
         "rules.html",
@@ -2175,8 +2213,120 @@ def rules(
         publication_rule_cards=_rule_cards(structured_slots),
         publication_rule_slots=structured_slots,
         weekday_labels=WEEKDAY_LABELS,
-        title="Veröffentlichungsregeln",
+        recommended_preset=RECOMMENDED_AUTOMATION_PRESET,
+        recommended_preset_cards=_rule_cards(preset_slots),
+        current_automation_summary=current_summary,
+        invalid_result_poll=invalid_result_poll,
+        can_manage_automation=current.role == Role.ADMIN,
+        title="Automatische Beiträge",
     )
+
+
+@router.post("/rules/{team_id}/recommended-preset")
+def apply_automation_preset(
+    team_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    expected_team_version: int = Form(),
+    mode: str = Form(),
+    confirm_replace: bool = Form(default=False),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Apply the visible preset without silently overwriting custom rules."""
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    team = _team_for_rule_write(db, current, team_id, expected_team_version)
+    if mode == "replace" and not confirm_replace:
+        raise HTTPException(
+            422,
+            "Das Ersetzen vorhandener Regeln muss ausdrücklich bestätigt werden",
+        )
+    try:
+        updated, report = apply_recommended_preset(
+            team.rules,
+            mode=mode,
+            timezone_name=team.timezone or "Europe/Berlin",
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    team.rules = updated
+    team.version += 1
+    sync_team_rule_sets(db, team)
+    sync_state = db.get(FussballSyncState, team.id)
+    if sync_state is None:
+        db.add(
+            FussballSyncState(
+                club_id=team.club_id,
+                team_id=team.id,
+                status="idle",
+                next_poll_at=datetime.now(timezone.utc),
+            )
+        )
+    elif sync_state.status != "running":
+        sync_state.status = "idle"
+        sync_state.next_poll_at = datetime.now(timezone.utc)
+        sync_state.lease_owner = None
+        sync_state.lease_expires_at = None
+    audit(
+        db,
+        current,
+        "automation_preset.applied",
+        "team",
+        team.id,
+        team.id,
+        {
+            "preset_key": RECOMMENDED_AUTOMATION_PRESET.key,
+            "preset_version": RECOMMENDED_AUTOMATION_PRESET.version,
+            "mode": mode,
+            **report,
+        },
+    )
+    db.commit()
+    return redirect(
+        f"/rules?team_id={team.id}#current-automation",
+        "Die empfohlene Grundeinstellung wurde sicher übernommen",
+    )
+
+
+@router.post("/rules/{team_id}/schedule-preview", response_class=JSONResponse)
+def preview_automation_schedule(
+    team_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    kickoff_local: str = Form(),
+    result_local: str = Form(default=""),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Read-only preview; deliberately performs no flush or commit."""
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    team = db.get(Team, team_id)
+    if (
+        not team
+        or team.archived_at is not None
+        or not require_visible(db, current, team.id)
+        or (current.club_id and team.club_id != current.club_id)
+    ):
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    zone = ZoneInfo(team.timezone or "Europe/Berlin")
+    try:
+        kickoff = datetime.fromisoformat(kickoff_local).replace(tzinfo=zone)
+        result_detected = (
+            datetime.fromisoformat(result_local).replace(tzinfo=zone) if result_local else None
+        )
+    except ValueError as exc:
+        raise HTTPException(422, "Datum oder Uhrzeit ist ungültig") from exc
+    if result_detected and result_detected < kickoff:
+        raise HTTPException(422, "Das Ergebnis kann nicht vor dem Anpfiff feststehen")
+    preview = build_schedule_preview(
+        team,
+        _serialize_team_publication_slots(db, team),
+        kickoff=kickoff,
+        result_detected_at=result_detected,
+    )
+    return JSONResponse(preview)
 
 
 @router.post("/rules/{team_id}/copy-from")
@@ -2186,6 +2336,10 @@ def copy_team_rules(
     csrf_token_value: str = Form(alias="csrf_token"),
     source_team_id: str = Form(),
     target_version: int = Form(),
+    copy_mode: str = Form(default="append_missing"),
+    copy_settings: bool = Form(default=True),
+    copy_schedule: bool = Form(default=True),
+    confirm_replace: bool = Form(default=False),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -2203,8 +2357,87 @@ def copy_team_rules(
         raise HTTPException(422, "Quell- und Zielmannschaft muessen verschieden sein")
     if target.version != target_version:
         raise HTTPException(409, "Die Zielmannschaft wurde zwischenzeitlich geaendert")
+    if copy_mode not in {"append_missing", "replace"}:
+        raise HTTPException(422, "Unbekannter Übernahmemodus")
+    if not copy_settings and not copy_schedule:
+        raise HTTPException(422, "Wähle mindestens einen zu kopierenden Bereich")
+    if copy_mode == "replace" and not confirm_replace:
+        raise HTTPException(422, "Das Ersetzen vorhandener Regeln muss bestätigt werden")
 
-    target.rules = deepcopy(source.rules or {})
+    source_config = deepcopy(source.rules or {})
+    target_config = deepcopy(target.rules or {})
+    source_slots = [
+        deepcopy(row)
+        for row in source_config.pop("publication_rule_slots", [])
+        if isinstance(row, dict)
+    ]
+    source_config.pop("publication_rule_slots_configured", None)
+    target_slots = [
+        deepcopy(row)
+        for row in target_config.get("publication_rule_slots", [])
+        if isinstance(row, dict)
+    ]
+    if copy_settings:
+        copied_poll_interval = int(
+            source_config.get("result_poll_interval_minutes", RESULT_POLL_MINUTES_RECOMMENDED)
+        )
+        if copied_poll_interval < RESULT_POLL_MINUTES_MIN:
+            raise HTTPException(
+                422,
+                "Die Quellmannschaft besitzt ein ungültiges Ergebnis-Prüfintervall. "
+                "Korrigiere es zunächst auf mindestens 10 Minuten.",
+            )
+        if copy_mode == "replace":
+            protected = {
+                key: value
+                for key, value in target_config.items()
+                if key.startswith(("image_prompt", "text_prompt"))
+                or key == "style_direction"
+            }
+            target_config = {**source_config, **protected}
+        else:
+            for key, value in source_config.items():
+                target_config.setdefault(key, deepcopy(value))
+    if copy_schedule:
+        if copy_mode == "replace":
+            target_slots = source_slots
+        else:
+            existing = {
+                (
+                    row.get("post_type"),
+                    row.get("media_kind"),
+                    row.get("variant_number"),
+                    row.get("timing_model"),
+                    row.get("match_weekday"),
+                    row.get("target_weekday"),
+                    row.get("local_time"),
+                    row.get("reference"),
+                    row.get("direction"),
+                    row.get("offset_minutes"),
+                )
+                for row in target_slots
+            }
+            for row in source_slots:
+                signature = (
+                    row.get("post_type"),
+                    row.get("media_kind"),
+                    row.get("variant_number"),
+                    row.get("timing_model"),
+                    row.get("match_weekday"),
+                    row.get("target_weekday"),
+                    row.get("local_time"),
+                    row.get("reference"),
+                    row.get("direction"),
+                    row.get("offset_minutes"),
+                )
+                if signature not in existing:
+                    copied = deepcopy(row)
+                    copied["slot_key"] = f"slot-{secrets.token_hex(12)}"
+                    target_slots.append(copied)
+                    existing.add(signature)
+        target_config["publication_rule_slots"] = target_slots
+        target_config["publication_rule_slots_configured"] = True
+    target.rules = target_config
     target.version += 1
     source_rows = list(
         db.scalars(
@@ -2224,8 +2457,9 @@ def copy_team_rules(
             )
         )
     }
-    for row in target_rows.values():
-        row.active = False
+    if copy_schedule and copy_mode == "replace":
+        for row in target_rows.values():
+            row.active = False
     copied_fields = (
         "post_type",
         "reference",
@@ -2244,8 +2478,10 @@ def copy_team_rules(
         "sort_order",
         "reuse_media",
     )
-    for source_row in source_rows:
+    for source_row in (source_rows if copy_schedule else []):
         target_row = target_rows.get(source_row.name)
+        if target_row is not None and copy_mode == "append_missing":
+            continue
         if target_row is None:
             target_row = StoryRule(
                 club_id=target.club_id,
@@ -2268,7 +2504,14 @@ def copy_team_rules(
         "team",
         target.id,
         target.id,
-        {"source_team_id": source.id, "story_rules": len(source_rows)},
+        {
+            "source_team_id": source.id,
+            "target_team_id": target.id,
+            "mode": copy_mode,
+            "copy_settings": copy_settings,
+            "copy_schedule": copy_schedule,
+            "story_rules": len(source_rows) if copy_schedule else 0,
+        },
     )
     db.commit()
     return redirect(f"/rules?team_id={target.id}", "Regeln wurden kopiert")
@@ -2279,6 +2522,8 @@ def save_rules(
     team_id: str,
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
+    expected_team_version: int | None = Form(default=None),
+    preserve_legacy_weekday_settings: bool = Form(default=False),
     announcement_enabled: bool = Form(default=False),
     feed_before_minutes: int = Form(default=1440),
     announcement_timing_mode: str = Form(default="relative"),
@@ -2328,6 +2573,8 @@ def save_rules(
     result_poll_interval_minutes: int = Form(default=15),
     auto_approve_announcements: bool = Form(default=False),
     auto_approve_results: bool = Form(default=False),
+    auto_approve_announcements_acknowledged: bool = Form(default=False),
+    auto_approve_results_acknowledged: bool = Form(default=False),
     club_matchday_feed_mode: str = Form(default="separate"),
     club_matchday_primary_team_id: str = Form(default=""),
     reminder_feed_before_minutes: int = Form(default=360),
@@ -2370,15 +2617,46 @@ def save_rules(
     result_image_prompt_feed: str = Form(default="default-image-feed"),
     result_image_prompt_story: str = Form(default="default-image-story"),
     result_text_prompt: str = Form(default="default-text-result"),
-    style_direction: str = Form(default=""),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
     check_csrf(request, csrf_token_value)
     require_admin(current)
-    team = db.get(Team, team_id)
-    if not team:
-        raise HTTPException(404)
+    team = db.scalar(select(Team).where(Team.id == team_id).with_for_update())
+    if (
+        not team
+        or team.archived_at is not None
+        or not require_visible(db, current, team.id)
+        or (current.club_id and team.club_id != current.club_id)
+    ):
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    if expected_team_version is not None and team.version != expected_team_version:
+        raise HTTPException(409, "Die Regeln wurden zwischenzeitlich geändert")
+    previous_rules = deepcopy(team.rules or {})
+    previous_auto_approve_announcements = bool(
+        (team.rules or {}).get("auto_approve_announcements", False)
+    )
+    previous_auto_approve_results = bool(
+        (team.rules or {}).get("auto_approve_results", False)
+    )
+    if (
+        auto_approve_announcements
+        and not previous_auto_approve_announcements
+        and not auto_approve_announcements_acknowledged
+    ):
+        raise HTTPException(
+            422,
+            "Die automatische Freigabe für Spielankündigungen muss ausdrücklich bestätigt werden",
+        )
+    if (
+        auto_approve_results
+        and not previous_auto_approve_results
+        and not auto_approve_results_acknowledged
+    ):
+        raise HTTPException(
+            422,
+            "Die automatische Freigabe für Ergebnismeldungen muss ausdrücklich bestätigt werden",
+        )
     existing_publication_slots = _serialize_team_publication_slots(db, team)
     if late_approval not in {"publish_now", "manual", "skip", "next_story"}:
         raise HTTPException(422)
@@ -2432,8 +2710,12 @@ def save_rules(
         raise HTTPException(422, "Der Generierungsvorlauf muss zwischen 0 und 30 Tagen liegen")
     if not 1 <= sync_interval_hours <= 168:
         raise HTTPException(422, "Das Abrufintervall muss zwischen 1 und 168 Stunden liegen")
-    if not 5 <= result_poll_interval_minutes <= 120:
-        raise HTTPException(422, "Das Ergebnisintervall muss zwischen 5 und 120 Minuten liegen")
+    if not RESULT_POLL_MINUTES_MIN <= result_poll_interval_minutes <= 120:
+        raise HTTPException(
+            422,
+            "Die Ergebnisprüfung am Spieltag kann frühestens alle 10 Minuten "
+            "durchgeführt werden.",
+        )
     if not 0 <= reminder_feed_before_minutes <= 10080:
         raise HTTPException(422, "Der Erinnerungszeitpunkt ist ungültig")
     output_counts = {
@@ -2731,9 +3013,34 @@ def save_rules(
             "image_prompt_story_result", "default-image-story"
         ),
         "text_prompt_result": (team.rules or {}).get("text_prompt_result", "default-text-result"),
-        "style_direction": style_direction.strip(),
         "publication_rule_slots": existing_publication_slots,
     }
+    if preserve_legacy_weekday_settings:
+        # Die neue Oberfläche bearbeitet die kanonischen PublicationRuleSlots.
+        # Alte Felder bleiben für bestehende Worker-/Fallbackpfade unverändert,
+        # statt beim Speichern der reinen UX-Einstellungen geleert zu werden.
+        existing_rules = previous_rules
+        announcement_weekday_times = deepcopy(
+            existing_rules.get("announcement_weekday_times", {})
+        )
+        announcement_weekday_targets = deepcopy(
+            existing_rules.get("announcement_weekday_targets", {})
+        )
+        reminder_weekday_times = deepcopy(existing_rules.get("reminder_weekday_times", {}))
+        reminder_weekday_targets = deepcopy(
+            existing_rules.get("reminder_weekday_targets", {})
+        )
+        result_weekday_times = deepcopy(existing_rules.get("result_weekday_times", {}))
+        result_weekday_targets = deepcopy(existing_rules.get("result_weekday_targets", {}))
+        team.rules = {
+            **team.rules,
+            "announcement_weekday_times": announcement_weekday_times,
+            "announcement_weekday_targets": announcement_weekday_targets,
+            "reminder_weekday_times": reminder_weekday_times,
+            "reminder_weekday_targets": reminder_weekday_targets,
+            "result_weekday_times": result_weekday_times,
+            "result_weekday_targets": result_weekday_targets,
+        }
     team.version += 1
     # This is deliberately a club/page setting even though rules are stored on
     # teams. Keeping all sibling teams in sync prevents one half of a matchday
@@ -2755,6 +3062,7 @@ def save_rules(
         if sync_state is None:
             db.add(
                 FussballSyncState(
+                    club_id=team.club_id,
                     team_id=team.id,
                     status="idle",
                     next_poll_at=datetime.now(timezone.utc),
@@ -2776,8 +3084,35 @@ def save_rules(
         team.id,
         {**team.rules, "club_feed_setting_applied_to": grouped_team_ids},
     )
+    for post_type, old_value, new_value in (
+        (
+            "announcement",
+            previous_auto_approve_announcements,
+            auto_approve_announcements,
+        ),
+        ("result", previous_auto_approve_results, auto_approve_results),
+    ):
+        if old_value != new_value:
+            audit(
+                db,
+                current,
+                "automatic_approval.changed",
+                "team",
+                team.id,
+                team.id,
+                {
+                    "club_id": team.club_id,
+                    "team_id": team.id,
+                    "post_type": post_type,
+                    "old_value": old_value,
+                    "new_value": new_value,
+                },
+            )
     db.commit()
-    return redirect(f"/rules?team_id={team.id}")
+    return redirect(
+        f"/rules?team_id={team.id}",
+        f"Die Einstellungen für {team.display_name} wurden gespeichert.",
+    )
 
 
 def _team_for_rule_write(db: Session, current: User, team_id: str, expected_version: int) -> Team:
@@ -2903,10 +3238,19 @@ def save_publication_rule_slot(
             "derselben Datei.",
         )
     stable_key = slot_key or f"slot-{secrets.token_hex(12)}"
+    generated_label = automatic_rule_label(
+        post_type=post_type,
+        media_kind=media_kind,
+        timing_model=timing_model,
+        match_weekday=match_day,
+        target_weekday=target_day,
+        local_time=local_time or None,
+        offset_minutes=offset_minutes,
+    )
     payload = {
         "slot_key": stable_key,
         "post_type": post_type,
-        "label": (label.strip() or f"{media_kind.title()}-Veröffentlichung")[:160],
+        "label": (label.strip() or generated_label)[:160],
         "media_kind": media_kind,
         "variant_number": variant_number,
         "timing_model": timing_model,
