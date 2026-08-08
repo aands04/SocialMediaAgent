@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     meta_scheduler_batch_size: int = 5
     meta_app_id: str | None = None
     meta_app_secret: str | None = None
+    meta_facebook_app_id: str | None = None
+    meta_facebook_app_secret: str | None = None
+    meta_facebook_oauth_redirect_uri: str | None = None
+    meta_whatsapp_configuration_id: str | None = None
+    meta_webhook_verify_token: str | None = None
+    facebook_channel_enabled: bool = False
+    whatsapp_channel_enabled: bool = False
     meta_token_encryption_key: str | None = None
     meta_token_key_version: str = "v1"
     meta_oauth_redirect_uri: str | None = None

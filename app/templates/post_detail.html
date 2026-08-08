@@ -300,6 +300,36 @@
   </details>
   {% endif %}
 </section>
+{% if planned_channel_connections %}
+<section id="channel-previews" class="channel-previews">
+  <h2>Vorschau je zusätzlichem Kanal</h2>
+  <p>Die Vorschau verwendet dieselben verifizierten Spiel-, Mannschafts- und Mediendaten. WhatsApp ist ein privater Nachrichtenversand und keine öffentliche Veröffentlichung.</p>
+  {% for connection in planned_channel_connections %}
+  {% set preview=channel_previews.get(connection.id) %}
+  <details {% if loop.first %}open{% endif %}>
+    <summary>{{'Facebook' if connection.channel_type=='facebook' else 'WhatsApp'}} · {{connection.display_name}}</summary>
+    {% if connection.channel_type=='facebook' %}
+      <div class="channel-preview-card"><strong>Facebook-Beitrag</strong><p>{{preview.text}}</p><small>Das geprüfte Feedbild beziehungsweise die geordnete Karussell-Auswahl wird übernommen.</small></div>
+    {% else %}
+      <div class="channel-preview-card"><strong>WhatsApp-Nachricht</strong><p>{{preview.text}}</p><dl><dt>Genehmigte Vorlage</dt><dd>{{preview.template.name if preview.template else 'Noch keine passende genehmigte Vorlage'}}</dd><dt>Aktuell zulässige Empfänger</dt><dd>{{preview.recipient_count}}</dd></dl><small>Versendet wird nur über eine genehmigte Vorlage und nur an aktive Empfänger mit dokumentierter Zustimmung.</small></div>
+    {% endif %}
+    {% if can_edit %}
+    <details>
+      <summary>{{'Facebook-Text' if connection.channel_type=='facebook' else 'WhatsApp-Nachricht'}} anpassen</summary>
+      <form method="post" action="/posts/{{item.id}}/channels/{{connection.id}}/text">
+        <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
+        <label>Kanalspezifischer Text
+          <textarea name="text" rows="6" maxlength="5000" required>{{preview.text}}</textarea>
+        </label>
+        <p><small>Ohne eigene Anpassung wird der geprüfte Begleittext des Beitrags verwendet. Eine Änderung nach der Freigabe erfordert eine erneute Freigabe.</small></p>
+        <button>Text für diesen Kanal speichern</button>
+      </form>
+    </details>
+    {% endif %}
+  </details>
+  {% endfor %}
+</section>
+{% endif %}
 {% if text_versions.get(item.id) %}
 <details class="text-version-history">
   <summary>Textversionen vergleichen ({{text_versions[item.id]|length}})</summary>
@@ -329,6 +359,19 @@
 <h2 id="publications">Geplante Veröffentlichungen</h2>
 {% if can_approve %}<form id="approve-publication-jobs" method="post" action="/posts/{{item.id}}/approve">
   <input type="hidden" name="csrf_token" value="{{csrf}}">
+  <input type="hidden" name="channel_selection_submitted" value="true">
+  <fieldset class="channel-approval-selection">
+    <legend>Geplante zusätzliche Kanäle</legend>
+    <p>Instagram wird über die unten ausgewählten Feed-, Karussell- und Story-Aufträge gesteuert. Weitere Kanäle kannst du für diese Freigabe einzeln abwählen.</p>
+    {% if planned_channel_connections %}
+      {% for connection in planned_channel_connections %}
+      <label><input type="checkbox" name="channel_connection_ids" value="{{connection.id}}" checked>
+        {{'Facebook' if connection.channel_type=='facebook' else 'WhatsApp'}} · {{connection.display_name}}
+        <small>{{'Veröffentlichung' if connection.channel_type=='facebook' else 'Versand an Empfänger mit gültiger Zustimmung'}}</small>
+      </label>
+      {% endfor %}
+    {% else %}<p class="notice">Für diese Mannschaft und diesen Beitragstyp sind keine zusätzlichen Kanäle aktiviert.</p>{% endif %}
+  </fieldset>
 </form>{% endif %}
 {% if can_approve %}<div id="approval" class="approval-sticky"><div><strong>Bereit zur Veröffentlichung</strong><span>{{open_publication_count}} offen · {{published_publication_count}} bereits veröffentlicht</span></div><button form="approve-publication-jobs" class="approve">Ausgewählte Aufträge freigeben</button></div>{% endif %}
 <table><tr><th>Freigeben</th><th>Typ</th>{% if aggregate_bundle %}<th>Mannschaft</th>{% endif %}<th>Zeitpunkt</th><th>Status</th><th>Eingefrorene Versionen</th><th>Medienprüfung</th></tr>

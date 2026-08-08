@@ -35,6 +35,7 @@ from app.models import (
     MediaAsset,
     PlanProfile,
     Post,
+    PostChannelContent,
     PostStatus,
     ProviderSnapshot,
     PublicationJob,
@@ -42,9 +43,11 @@ from app.models import (
     PublicationRuleSlot,
     Role,
     SharedOpponentLogo,
+    SocialChannelConnection,
     StorageObject,
     StoryRule,
     Team,
+    TeamChannelAssignment,
     User,
 )
 from app.posts.club_carousel import coordinate_club_matchday_feed, matchday_bundle_jobs
@@ -644,10 +647,11 @@ def test_instagram_meta_test_dashboard_is_explicit_and_blocks_mock_connect(
         db.commit()
         page_id = page.id
         version = page.version
-    response = client.get("/instagram")
+    response = client.get("/channels")
     assert response.status_code == 200
-    assert "META-TEST – ECHTE INSTAGRAM-VERÖFFENTLICHUNGEN MÖGLICH" in response.text
-    assert "Meta-Testassistent öffnen" in response.text
+    assert "Social-Media-Kanäle" in response.text
+    assert "Automatische Veröffentlichungen sind derzeit pausiert" in response.text
+    assert "Technische Details" in response.text
     token = session_csrf(client)
     blocked = client.post(
         f"/instagram/{page_id}/state",
@@ -658,6 +662,117 @@ def test_instagram_meta_test_dashboard_is_explicit_and_blocks_mock_connect(
         },
     )
     assert blocked.status_code == 422
+
+
+def test_channel_specific_text_requires_reapproval_and_stays_tenant_bound(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="channel-text-page",
+            display_name="Kanaltext Instagram",
+            username="channel_text",
+            club="Dashboard Testverein",
+            active=True,
+            connection_status="connected",
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="channel-text-team",
+            display_name="Kanaltext Mannschaft",
+            short_name="KM",
+            slug="channel-text-team",
+            club="Dashboard Testverein",
+            fussball_url="https://example.invalid/channel-text-team",
+            instagram_page_id=page.id,
+            media_subdir="channel-text-team/players",
+        )
+        db.add(team)
+        db.flush()
+        post = Post(
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="announcement",
+            status=PostStatus.APPROVED,
+            text="Kurzer Instagram-Text",
+            approved_version=1,
+        )
+        connection = SocialChannelConnection(
+            channel_type="facebook",
+            internal_name="Facebook",
+            display_name="Vereinsseite",
+            external_account_id="page-42",
+            status="connected",
+            active=True,
+            publishing_enabled=True,
+        )
+        db.add_all([post, connection])
+        db.flush()
+        db.add(
+            TeamChannelAssignment(
+                team_id=team.id,
+                channel_connection_id=connection.id,
+                enabled=True,
+                announcement_enabled=True,
+            )
+        )
+        db.add(
+            PublicationJob(
+                post_id=post.id,
+                team_id=team.id,
+                instagram_page_id=None,
+                channel_type="facebook",
+                channel_connection_id=connection.id,
+                content_type="announcement",
+                target="page-42",
+                kind="feed",
+                media_path="generated/facebook.png",
+                text_snapshot=post.text,
+                scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                approval_status="approved",
+                status=JobStatus.SCHEDULED,
+                approved_post_version=post.version,
+                idempotency_key="channel-text-facebook",
+            )
+        )
+        db.commit()
+        post_id = post.id
+        connection_id = connection.id
+        post_version = post.version
+
+    detail = client.get(f"/posts/{post_id}")
+    assert detail.status_code == 200
+    assert "Vorschau je zusätzlichem Kanal" in detail.text
+    assert "Kurzer Instagram-Text" in detail.text
+
+    changed = client.post(
+        f"/posts/{post_id}/channels/{connection_id}/text",
+        data={
+            "csrf_token": session_csrf(client),
+            "version": post_version,
+            "text": "Ausführlicher Facebook-Text für die Vereinsseite.",
+        },
+        follow_redirects=False,
+    )
+    assert changed.status_code == 303
+    with factory() as db:
+        variant = db.scalar(
+            select(PostChannelContent).where(
+                PostChannelContent.post_id == post_id,
+                PostChannelContent.channel_connection_id == connection_id,
+            )
+        )
+        post = db.get(Post, post_id)
+        job = db.scalar(
+            select(PublicationJob).where(
+                PublicationJob.channel_connection_id == connection_id
+            )
+        )
+        assert variant.text.startswith("Ausführlicher Facebook-Text")
+        assert post.status == PostStatus.REAPPROVAL
+        assert post.approved_version is None
+        assert job.status == JobStatus.UNAPPROVED
+        assert job.text_snapshot == variant.text
 
 
 def logo_png(color=(20, 90, 200, 255)):
@@ -1330,7 +1445,7 @@ def test_nginx_proxies_refresh_web_container_address_via_docker_dns():
     nginx_root = Path(__file__).parents[1] / "deploy" / "nginx"
     for filename, expected_proxy_count in (
         ("default.conf", 3),
-        ("meta-public.conf", 2),
+        ("meta-public.conf", 5),
     ):
         config = (nginx_root / filename).read_text(encoding="utf-8")
         assert "resolver 127.0.0.11 ipv6=off valid=10s;" in config
@@ -1881,21 +1996,16 @@ def test_incomplete_legacy_matchday_post_can_be_opened_and_deleted(browser, tmp_
 def test_dashboard_admin_flow(browser):
     client, factory = browser
     token = session_csrf(client)
-    result = client.post(
-        "/instagram",
-        data={
-            "csrf_token": token,
-            "internal_name": "main",
-            "display_name": "Hauptseite",
-            "username": "club",
-            "club": "SV",
-            "account_id": "mock-42",
-        },
-        follow_redirects=False,
-    )
-    assert result.status_code == 303
     with factory() as db:
-        page = db.query(InstagramPage).one()
+        page = InstagramPage(
+            internal_name="main",
+            display_name="Hauptseite",
+            username="club",
+            club="SV",
+            account_id="mock-42",
+        )
+        db.add(page)
+        db.commit()
         version = page.version
     assert (
         client.post(

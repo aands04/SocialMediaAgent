@@ -35,6 +35,7 @@ def approve(
     post: Post,
     user: User,
     selected_jobs: list[str] | None = None,
+    selected_channel_connections: list[str] | None = None,
     *,
     commit: bool = True,
 ) -> Post:
@@ -189,6 +190,18 @@ def approve(
             job.status = JobStatus.SCHEDULED
     if late and behavior == "next_story" and future_stories:
         future_stories[0].status = JobStatus.SCHEDULED
+    from app.channels.jobs import ensure_approved_channel_jobs
+
+    channel_jobs = ensure_approved_channel_jobs(
+        db,
+        post,
+        selected,
+        (
+            set(selected_channel_connections)
+            if selected_channel_connections is not None
+            else None
+        ),
+    )
     db.add(
         AuditLog(
             user_id=user.id,
@@ -200,6 +213,8 @@ def approve(
                 "version": post.version,
                 "jobs": [j.id for j in selected],
                 "late_behavior": behavior,
+                "channel_jobs": [job.id for job in channel_jobs],
+                "selected_channel_connections": selected_channel_connections,
             },
         )
     )
@@ -213,11 +228,18 @@ def approve_matchday_bundle(
     post: Post,
     user: User,
     selected_jobs: list[str] | None = None,
+    selected_channel_connections: list[str] | None = None,
 ) -> Post:
     """Approve the aggregate carousel and all selected per-game stories atomically."""
     primary, members, visible_jobs, _job_posts = matchday_bundle_jobs(db, post)
     if len(members) == 1 or post.id != primary.id:
-        return approve(db, post, user, selected_jobs)
+        return approve(
+            db,
+            post,
+            user,
+            selected_jobs,
+            selected_channel_connections,
+        )
 
     visible_ids = {job.id for job in visible_jobs}
     selected_ids = set(selected_jobs) if selected_jobs is not None else visible_ids
@@ -232,7 +254,14 @@ def approve_matchday_bundle(
                 if job.post_id == member.id and job.id in selected_ids
             ]
             if member_job_ids:
-                approve(db, member, user, member_job_ids, commit=False)
+                approve(
+                    db,
+                    member,
+                    user,
+                    member_job_ids,
+                    selected_channel_connections,
+                    commit=False,
+                )
         db.commit()
     except Exception:
         db.rollback()

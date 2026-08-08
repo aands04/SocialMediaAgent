@@ -136,6 +136,8 @@ def complete_oauth(
             raise MetaApiError("Zielseite wurde während OAuth entfernt")
         confirmed_username = str(profile.get("username") or "")
         if (
+            not (page.defaults or {}).get("guided_setup")
+            and
             page.username
             and confirmed_username
             and page.username.casefold() != confirmed_username.casefold()
@@ -172,6 +174,7 @@ def complete_oauth(
         connection.disconnected_at = None
         page.account_id = profile_id
         page.username = connection.confirmed_username or page.username
+        page.display_name = page.display_name or page.username
         page.connection_status = "connected"
         page.last_check_at = datetime.now(timezone.utc)
         db.add(

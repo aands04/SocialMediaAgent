@@ -62,6 +62,7 @@ def _candidate_ids(db: Session, settings: Settings) -> list[tuple[str, str]]:
         )
         .join(Club, Club.id == PublicationJob.club_id)
         .where(
+            PublicationJob.channel_type == "instagram",
             PublicationJob.status.in_([JobStatus.SCHEDULED, JobStatus.RETRY]),
             PublicationJob.approval_status == "approved",
             PublicationJob.platform_id.is_(None),

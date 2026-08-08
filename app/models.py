@@ -685,6 +685,7 @@ class PublicationRuleSlot(Base, Timestamped):
 class Post(Base, Timestamped):
     __tablename__ = "posts"
     __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_posts_id_club"),
         UniqueConstraint(
             "club_id",
             "game_id",
@@ -855,13 +856,38 @@ class PublicationJob(Base, Timestamped):
     __tablename__ = "publication_jobs"
     __table_args__ = (
         UniqueConstraint("club_id", "idempotency_key", name="uq_publication_jobs_club_idempotency"),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="RESTRICT",
+            name="fk_publication_jobs_channel_connection_club",
+        ),
+        CheckConstraint(
+            "channel_type IN ('instagram', 'facebook', 'whatsapp')",
+            name="ck_publication_jobs_channel_type",
+        ),
+        CheckConstraint(
+            "delivery_action IN ('publish', 'send')",
+            name="ck_publication_jobs_delivery_action",
+        ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     post_id: Mapped[str] = mapped_column(ForeignKey("posts.id"))
     game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id"), nullable=True)
     team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"))
-    instagram_page_id: Mapped[str] = mapped_column(ForeignKey("instagram_pages.id"))
+    instagram_page_id: Mapped[str | None] = mapped_column(
+        ForeignKey("instagram_pages.id"), nullable=True
+    )
+    channel_type: Mapped[str] = mapped_column(
+        String(20), default="instagram", server_default="instagram", index=True
+    )
+    channel_connection_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    content_type: Mapped[str | None] = mapped_column(String(40))
+    target: Mapped[str | None] = mapped_column(String(200))
+    delivery_action: Mapped[str] = mapped_column(
+        String(20), default="publish", server_default="publish"
+    )
     story_rule_id: Mapped[str | None] = mapped_column(ForeignKey("story_rules.id"))
     kind: Mapped[str] = mapped_column(String(10))
     media_path: Mapped[str] = mapped_column(String(800))
@@ -979,6 +1005,303 @@ class InstagramConnection(Base, Timestamped):
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SocialChannelConnection(Base, Timestamped):
+    """Tenant-owned external channel without exposing provider credentials.
+
+    Existing Instagram rows remain authoritative during the compatibility
+    period and are linked through ``legacy_instagram_page_id``. New Facebook
+    and WhatsApp credentials are encrypted with the existing Meta token key.
+    """
+
+    __tablename__ = "social_channel_connections"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_social_channel_connections_id_club"),
+        UniqueConstraint(
+            "club_id",
+            "channel_type",
+            "external_account_id",
+            name="uq_social_channel_external_account",
+        ),
+        CheckConstraint(
+            "channel_type IN ('instagram', 'facebook', 'whatsapp')",
+            name="ck_social_channel_type",
+        ),
+        ForeignKeyConstraint(
+            ["legacy_instagram_page_id", "club_id"],
+            ["instagram_pages.id", "instagram_pages.club_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    channel_type: Mapped[str] = mapped_column(String(20), index=True)
+    internal_name: Mapped[str] = mapped_column(String(120))
+    display_name: Mapped[str] = mapped_column(String(160))
+    username: Mapped[str | None] = mapped_column(String(120))
+    external_account_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    parent_business_id: Mapped[str | None] = mapped_column(String(160))
+    phone_number_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    display_phone_number: Mapped[str | None] = mapped_column(String(40))
+    legacy_instagram_page_id: Mapped[str | None] = mapped_column(
+        String(36), unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(40), default="setup_required", index=True)
+    capabilities: Mapped[list] = mapped_column(JSON, default=list)
+    scopes: Mapped[list] = mapped_column(JSON, default=list)
+    settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    encrypted_token: Mapped[str | None] = mapped_column(Text)
+    token_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    token_key_version: Mapped[str | None] = mapped_column(String(40))
+    api_version: Mapped[str | None] = mapped_column(String(20))
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    publishing_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    automatic_delivery_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PostChannelContent(Base, Timestamped):
+    """Editable, tenant-bound text variant for one concrete target channel."""
+
+    __tablename__ = "post_channel_contents"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "post_id",
+            "channel_connection_id",
+            name="uq_post_channel_content_target",
+        ),
+        ForeignKeyConstraint(
+            ["post_id", "club_id"],
+            ["posts.id", "posts.club_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "channel_type IN ('facebook', 'whatsapp')",
+            name="ck_post_channel_content_type",
+        ),
+        CheckConstraint(
+            "source IN ('derived', 'manual', 'ai')",
+            name="ck_post_channel_content_source",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    post_id: Mapped[str] = mapped_column(String(36), index=True)
+    channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    channel_type: Mapped[str] = mapped_column(String(20), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(20), default="derived")
+    updated_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+
+
+class SocialChannelOAuthState(Base):
+    __tablename__ = "social_channel_oauth_states"
+    __table_args__ = (
+        CheckConstraint(
+            "channel_type IN ('facebook', 'whatsapp')",
+            name="ck_social_channel_oauth_type",
+        ),
+        ForeignKeyConstraint(
+            ["user_id", "club_id"],
+            ["users.id", "users.club_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    channel_type: Mapped[str] = mapped_column(String(20), index=True)
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    redirect_uri: Mapped[str] = mapped_column(String(1000))
+    encrypted_selection_payload: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class TeamChannelAssignment(Base, Timestamped):
+    __tablename__ = "team_channel_assignments"
+    __table_args__ = (
+        UniqueConstraint(
+            "team_id", "channel_connection_id", name="uq_team_channel_assignment"
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(String(36), index=True)
+    team_id: Mapped[str] = mapped_column(String(36), index=True)
+    channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    announcement_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    result_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    story_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class WhatsAppRecipient(Base, Timestamped):
+    __tablename__ = "whatsapp_recipients"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "channel_connection_id",
+            "normalized_phone",
+            name="uq_whatsapp_recipient_phone",
+        ),
+        UniqueConstraint("id", "club_id", name="uq_whatsapp_recipients_id_club"),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "opt_in_status IN ('pending', 'confirmed', 'revoked')",
+            name="ck_whatsapp_recipient_opt_in",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    normalized_phone: Mapped[str] = mapped_column(String(32), index=True)
+    display_name: Mapped[str | None] = mapped_column(String(160))
+    opt_in_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    opt_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    opt_in_source: Mapped[str | None] = mapped_column(String(160))
+    opt_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    preferred_message_types: Mapped[list] = mapped_column(JSON, default=list)
+    provider_recipient_id: Mapped[str | None] = mapped_column(String(160))
+
+
+class WhatsAppMessageTemplate(Base, Timestamped):
+    __tablename__ = "whatsapp_message_templates"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "channel_connection_id",
+            "provider_template_id",
+            name="uq_whatsapp_provider_template",
+        ),
+        UniqueConstraint("id", "club_id", name="uq_whatsapp_templates_id_club"),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    provider_template_id: Mapped[str] = mapped_column(String(160))
+    language: Mapped[str] = mapped_column(String(20), default="de")
+    category: Mapped[str] = mapped_column(String(40), default="utility")
+    message_type: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
+    components: Mapped[list] = mapped_column(JSON, default=list)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class ChannelDeliveryAttempt(Base, Timestamped):
+    __tablename__ = "channel_delivery_attempts"
+    __table_args__ = (
+        UniqueConstraint("club_id", "idempotency_key", name="uq_channel_delivery_idempotency"),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["recipient_id", "club_id"],
+            ["whatsapp_recipients.id", "whatsapp_recipients.club_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["template_id", "club_id"],
+            ["whatsapp_message_templates.id", "whatsapp_message_templates.club_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    publication_job_id: Mapped[str] = mapped_column(
+        ForeignKey("publication_jobs.id", ondelete="CASCADE"), index=True
+    )
+    channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    recipient_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    template_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    action: Mapped[str] = mapped_column(String(20), default="publish")
+    status: Mapped[str] = mapped_column(String(40), default="queued", index=True)
+    platform_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    cost_amount: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    cost_currency: Mapped[str | None] = mapped_column(String(8))
+    sanitized_response: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_category: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str] = mapped_column(String(180))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MetaWebhookEvent(Base):
+    __tablename__ = "meta_webhook_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "channel_type",
+            "provider_event_key",
+            name="uq_meta_webhook_event_key",
+        ),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    channel_type: Mapped[str] = mapped_column(String(20), index=True)
+    channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider_event_key: Mapped[str] = mapped_column(String(200))
+    event_type: Mapped[str] = mapped_column(String(100), index=True)
+    payload_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(30), default="received", index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class InstagramOAuthState(Base):

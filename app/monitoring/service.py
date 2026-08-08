@@ -19,6 +19,7 @@ from app.models import (
     ProviderSnapshot,
     PublicationJob,
     PublicMediaGrant,
+    SocialChannelConnection,
     SystemSetting,
     Team,
 )
@@ -392,6 +393,51 @@ def system_status(db: Session, settings: Settings) -> dict:
             ),
             "detail": meta_counts,
         }
+        channel_connections = list(db.scalars(select(SocialChannelConnection)))
+        channel_detail = {}
+        stale_connection_before = now - timedelta(
+            seconds=max(3600, settings.meta_connection_check_interval_seconds * 2)
+        )
+        channel_health_ok = True
+        for channel_type in ("instagram", "facebook", "whatsapp"):
+            channel_items = [
+                item
+                for item in channel_connections
+                if item.channel_type == channel_type and item.active
+            ]
+            enabled_items = [item for item in channel_items if item.publishing_enabled]
+            unhealthy = [
+                item
+                for item in enabled_items
+                if item.status != "connected"
+                or not item.last_success_at
+                or (
+                    item.last_success_at
+                    if item.last_success_at.tzinfo
+                    else item.last_success_at.replace(tzinfo=timezone.utc)
+                )
+                < stale_connection_before
+            ]
+            channel_detail[channel_type] = {
+                "active_connections": len(channel_items),
+                "enabled_connections": len(enabled_items),
+                "unhealthy_connections": len(unhealthy),
+                "last_successful_check": max(
+                    (
+                        item.last_success_at
+                        for item in channel_items
+                        if item.last_success_at
+                    ),
+                    default=None,
+                ),
+            }
+            channel_health_ok = channel_health_ok and not unhealthy
+        checks["social_media_channels"] = {
+            "ok": channel_health_ok,
+            "detail": channel_detail,
+        }
+        if not channel_health_ok:
+            critical.append("Social-Media-Kanalverbindung")
         sync_states = db.scalars(select(FussballSyncState)).all()
         enabled_team_ids = {
             team.id

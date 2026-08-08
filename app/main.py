@@ -29,6 +29,8 @@ from app.auth.service import (
     validate_new_password,
     verify_password,
 )
+from app.channels.routes import router as channels_router
+from app.channels.webhooks import router as channel_webhook_router
 from app.config import get_settings
 from app.db import get_db
 from app.limits.service import effective_limits
@@ -740,5 +742,7 @@ def dashboard(
 
 app.include_router(admin_router)
 app.include_router(meta_router)
+app.include_router(channels_router)
+app.include_router(channel_webhook_router)
 app.include_router(platform_router)
 app.include_router(storage_router)

@@ -1,7 +1,7 @@
 # Architektur
 
 ## Zielbild und Komponenten
-Der Social Media Agent ist ein **modularer Monolith**. `app/main.py` liefert FastAPI/Jinja2/HTMX, `app/models.py` und Alembic bilden PostgreSQL ab. Fachmodule kapseln Authentifizierung, Mannschaften, Instagram-Seiten, Spiele, Medien/SMB, Designs, Rendering, Text, Beiträge, Freigaben, Publishing, Jobs, Audit und Monitoring. Web und Worker sind getrennte Prozesse desselben Artefakts; PostgreSQL ist die einzige Wahrheitsquelle.
+Der Social Media Agent ist ein **modularer Monolith**. `app/main.py` liefert FastAPI/Jinja2/HTMX, `app/models.py` und Alembic bilden PostgreSQL ab. Fachmodule kapseln Authentifizierung, Mannschaften, Social-Media-Kanäle, Spiele, Medien/SMB, Designs, Rendering, Text, Beiträge, Freigaben, Publishing, Jobs, Audit und Monitoring. Web und Worker sind getrennte Prozesse desselben Artefakts; PostgreSQL ist die einzige Wahrheitsquelle.
 
 Externe Systeme liegen hinter Ports: `GameDataProvider`/`FussballDeProvider`, `StorageProvider`/`LocalStorageProvider`/`SmbStorageProvider`, `TextGenerator`, `ImageProvider` und `SocialMediaPublisher`. Standardmäßig werden Fixture-Texte, der lokale Playwright-Renderer und `DryRunPublisher` eingesetzt. Optional erzeugen `OpenAITextGenerator` und `OpenAIImageProvider` Begleittext und eigenständige Grafiken; beide bleiben von der Instagram-Veröffentlichung getrennt.
 
@@ -13,7 +13,7 @@ Externe Systeme liegen hinter Ports: `GameDataProvider`/`FussballDeProvider`, `S
 5. Der Worker sperrt den Auftrag, prüft unmittelbar sämtliche Gates und ruft erst dann den Publisher. Nur bestätigte Antworten werden `published`.
 
 ## Datenmodell und Invarianten
-`User`, `UserTeam`, `Team`, `InstagramPage`, `Game`, `MediaAsset`, `LogoAsset`, `StoryRule`, `PromptTemplate`, `Post`, `PublicationJob`, `AuditLog`, `Notification` und `SystemSetting` bilden das Kernmodell. Eindeutige Constraints verhindern doppelte Spiele, Hauptbeiträge, Story-Regeln, Promptversionen, Medienpfade, Logo-Prüfsummen und Idempotency Keys. Das einmalige `reserved_game_id` erlaubt dasselbe Bild für Feed und Story eines Spiels, nicht für andere Spiele. Beiträge speichern Seite, Design-, Prompt-, Farb-, Font-, Logo-, Medien- und Textversionen als Snapshot.
+`User`, `UserTeam`, `Team`, `InstagramPage`, `SocialChannelConnection`, `TeamChannelAssignment`, `Game`, `MediaAsset`, `LogoAsset`, `StoryRule`, `PromptTemplate`, `Post`, `PublicationJob`, `AuditLog`, `Notification` und `SystemSetting` bilden das Kernmodell. Eindeutige und zusammengesetzte Constraints verhindern doppelte Spiele, fremde Kanalzuordnungen, Hauptbeiträge, Story-Regeln, Promptversionen, Medienpfade, Logo-Prüfsummen und Idempotency Keys. WhatsApp-Empfänger, Vorlagen, Webhookereignisse und Auslieferungsversuche sind eigenständig und mandantengebunden. Das einmalige `reserved_game_id` erlaubt dasselbe Bild für Feed und Story eines Spiels, nicht für andere Spiele. Beiträge speichern Seite, Design-, Prompt-, Farb-, Font-, Logo-, Medien- und Textversionen als Snapshot.
 
 ## KI-Generierung und Promptinvarianten
 Bild- und Textprompts werden durch eine `SandboxedEnvironment` mit `StrictUndefined` gerendert. Nur explizit zugelassene Faktenplatzhalter sind erlaubt. Unveränderliche Sicherheitspräfixe verbieten erfundene Spielinformationen, Fantasielogos und zusätzliche Personen. Der Spielort wird vor dem Modellaufruf deterministisch normalisiert: Bei Heimspielen gilt zuerst die im Vereinsbranding hinterlegte Kurzbezeichnung, danach die ausgewählte Standard-Heimspielstätte und erst danach der Spielort des Providers. Auswärtsrasen wird als `RP [Ort]`, Auswärtskunstrasen als `KR [Ort]` ausgegeben; eine fehlende Platzart blockiert den KI-Aufruf.
@@ -56,6 +56,16 @@ neustartsicher. Pro Durchlauf wird höchstens ein externer Schritt ausgeführt;
 gespeicherte Container- und Media-IDs verhindern Doppelveröffentlichungen.
 Unterbrochene möglicherweise schreibende Aufrufe werden `uncertain` und nie
 automatisch wiederholt.
+
+Das Modul `app/channels` ergänzt diesen bewährten Instagram-Ablauf um eine
+gemeinsame Kanalabstraktion. Facebook ist ein Publishing-Kanal, WhatsApp ein
+Nachrichtenkanal. Eine Freigabe erzeugt nur für die dabei ausdrücklich
+ausgewählten und der Mannschaft zugeordneten Verbindungen neue Jobs. Die
+kanalspezifischen Fähigkeiten verhindern Instagram-Story-Optionen für WhatsApp.
+Page- und Cloud-API-Tokens sind verschlüsselt; Webhooks sind signiert,
+idempotent und werden vor der Verarbeitung eindeutig einem Verein zugeordnet.
+Details und aktuelle offizielle Meta-Voraussetzungen stehen in
+[`docs/META_CHANNELS.md`](docs/META_CHANNELS.md).
 
 ## Sicherheit
 Argon2-Passwort-Hashes, serverseitig signierte HttpOnly-Sessions, SameSite-Cookies, Produktions-`Secure`, CSRF-Token, 15-Minuten-Sperre nach fünf Fehlversuchen, Inaktivitätsablauf, keine Registrierung sowie rollen- und mannschaftsbezogene serverseitige Prüfungen bilden die Basis. Pfade werden kanonisiert; absolute Pfade, Traversal, ausbrechende Symlinks und fremde Dateitypen werden verworfen. SMB wird nur vom Host gemountet, Credentials gelangen weder in DB noch Quellcode. Secrets kommen aus Docker Secrets/Environment. Optimistische Versionsfelder verhindern Lost Updates. Sicherheits- und Freigabeaktionen werden auditiert. TOTP-2FA kann am User-Modul ergänzt werden.
