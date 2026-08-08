@@ -112,7 +112,7 @@
     {% else %}
       <div class="channel-empty"><strong>{{ empty_title }}</strong><p>{{ empty_text }}</p>
       {% if is_admin %}
-        {% if channel_type == 'facebook' and not facebook_available %}<p class="field-help">Der PlatformAdmin muss Facebook zunächst technisch aktivieren.</p>{% elif channel_type == 'whatsapp' and not whatsapp_available %}<p class="field-help">Der PlatformAdmin muss WhatsApp zunächst technisch aktivieren.</p>{% endif %}
+        {% if channel_type == 'facebook' and not facebook_available %}<p class="field-help">Facebook ist derzeit plattformweit pausiert.</p>{% elif channel_type == 'whatsapp' and not whatsapp_available %}<p class="field-help">WhatsApp ist derzeit plattformweit pausiert.</p>{% endif %}
         <a class="button" href="/channels/{{ channel_type }}/setup">{{ 'WhatsApp einrichten' if channel_type == 'whatsapp' else label ~ ' verbinden' }}</a>
       {% endif %}
       </div>

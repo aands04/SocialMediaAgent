@@ -35,9 +35,9 @@ def assert_channel_enabled(settings: Settings, channel_type: str) -> None:
     if not settings.meta_production_enabled and settings.environment == "production":
         raise ChannelApiError("Meta-Integration ist nicht freigegeben")
     if channel_type == "facebook" and not settings.facebook_channel_enabled:
-        raise ChannelApiError("Facebook ist noch nicht durch den PlatformAdmin aktiviert")
+        raise ChannelApiError("Facebook ist plattformweit vorübergehend pausiert")
     if channel_type == "whatsapp" and not settings.whatsapp_channel_enabled:
-        raise ChannelApiError("WhatsApp ist noch nicht durch den PlatformAdmin aktiviert")
+        raise ChannelApiError("WhatsApp ist plattformweit vorübergehend pausiert")
 
 
 def start_channel_oauth(

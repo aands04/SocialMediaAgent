@@ -36,8 +36,10 @@ class Settings(BaseSettings):
     meta_facebook_oauth_redirect_uri: str | None = None
     meta_whatsapp_configuration_id: str | None = None
     meta_webhook_verify_token: str | None = None
-    facebook_channel_enabled: bool = False
-    whatsapp_channel_enabled: bool = False
+    # Facebook und WhatsApp sind reguläre Plattformfunktionen. Die Schalter
+    # bleiben ausschließlich als betriebliche, plattformweite Pause erhalten.
+    facebook_channel_enabled: bool = True
+    whatsapp_channel_enabled: bool = True
     meta_token_encryption_key: str | None = None
     meta_token_key_version: str = "v1"
     meta_oauth_redirect_uri: str | None = None
