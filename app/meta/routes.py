@@ -2,13 +2,14 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
+from app.file_delivery import detached_file_response
 from app.meta.api import MetaApiClient, MetaApiError
 from app.meta.media import MediaGrantError, resolve_grant, revoke_grant
 from app.meta.oauth import (
@@ -608,7 +609,8 @@ def public_meta_media(token: str, db: Session = Depends(get_db)):
         _, path = resolve_grant(db, settings, token)
     except MediaGrantError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return FileResponse(
+    return detached_file_response(
+        db,
         path,
         media_type="image/png",
         headers={

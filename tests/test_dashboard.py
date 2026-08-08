@@ -1576,6 +1576,25 @@ def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(brow
     assert page.status_code == 200
     assert page.text.count("Gemeinsame Ankündigung erzeugen") == 1
     assert "durch Vereinsregel gebündelt" in page.text
+    grouped_result = re.search(
+        r'<button name="post_type" value="result"([^>]*)>Gemeinsames Ergebnis erzeugen</button>',
+        page.text,
+    )
+    assert grouped_result and "disabled" in grouped_result.group(1)
+
+    with factory() as db:
+        for game_id in game_ids:
+            game = db.get(Game, game_id)
+            game.home_score = 1
+            game.away_score = 0
+            game.result_confirmed = True
+        db.commit()
+    confirmed_page = client.get("/games").text
+    grouped_result = re.search(
+        r'<button name="post_type" value="result"([^>]*)>Gemeinsames Ergebnis erzeugen</button>',
+        confirmed_page,
+    )
+    assert grouped_result and "disabled" not in grouped_result.group(1)
 
     token = session_csrf(client)
     separated = client.post(
@@ -2461,6 +2480,224 @@ def test_mock_game_uses_opponent_and_side_and_can_be_deleted(browser):
             "FC Auswärts",
             "SV Ehlen I",
         )
+
+
+def test_result_can_be_entered_confirmed_and_corrected_from_games_dashboard(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="result-entry-page",
+            display_name="Ergebnis-Seite",
+            username="result_entry",
+            club="Dashboard Testverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="result-entry-team",
+            display_name="Dashboard Testelf",
+            short_name="DTE",
+            slug="result-entry-team",
+            club="Dashboard Testverein",
+            fussball_url="https://example.invalid/result-entry-team",
+            instagram_page_id=page.id,
+            media_subdir="result-entry/players",
+            rules={"result_enabled": True},
+        )
+        db.add(team)
+        db.flush()
+        game = Game(
+            team_id=team.id,
+            provider="mock",
+            external_id="result-entry-game",
+            home_team="Dashboard Testelf",
+            away_team="FC Ergebnis",
+            kickoff=datetime.now(timezone.utc) - timedelta(hours=3),
+            competition="Testliga",
+            venue="Testplatz",
+            pitch="Rasenplatz",
+            source_url="fixture://result-entry-game",
+        )
+        db.add(game)
+        db.commit()
+        game_id = game.id
+        game_version = game.version
+        team_id = team.id
+        page_id = page.id
+
+    overview = client.get("/games")
+    assert overview.status_code == 200
+    assert "Ergebnis eintragen und bestätigen" in overview.text
+    result_button = re.search(
+        r'<button name="post_type" value="result"([^>]*)>Ergebnis</button>',
+        overview.text,
+    )
+    assert result_button and "disabled" in result_button.group(1)
+
+    token = session_csrf(client)
+    missing_result = client.post(
+        f"/games/{game_id}/generate",
+        data={"csrf_token": token, "post_type": "result"},
+        follow_redirects=False,
+    )
+    assert missing_result.status_code == 303
+    assert missing_result.headers["location"].startswith("/games?notice=")
+    assert (
+        client.post(
+            f"/games/{game_id}/result",
+            data={
+                "csrf_token": "wrong",
+                "version": str(game_version),
+                "home_score": "2",
+                "away_score": "1",
+                "confirmation": "true",
+            },
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/games/{game_id}/result",
+            data={
+                "csrf_token": token,
+                "version": str(game_version),
+                "home_score": "2",
+                "away_score": "1",
+            },
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            f"/games/{game_id}/result",
+            data={
+                "csrf_token": token,
+                "version": str(game_version),
+                "home_score": "100",
+                "away_score": "1",
+                "confirmation": "true",
+            },
+        ).status_code
+        == 422
+    )
+
+    confirmed = client.post(
+        f"/games/{game_id}/result",
+        data={
+            "csrf_token": token,
+            "version": str(game_version),
+            "home_score": "2",
+            "away_score": "1",
+            "confirmation": "true",
+        },
+        follow_redirects=False,
+    )
+    assert confirmed.status_code == 303
+    with factory() as db:
+        game = db.get(Game, game_id)
+        assert (game.home_score, game.away_score) == (2, 1)
+        assert game.result_confirmed is True
+        assert game.status == "finished"
+        assert game.overrides["result_confirmation_source"] == "dashboard_manual"
+        assert game.overrides["provider_score_candidate"] == "2:1"
+        corrected_version = game.version
+        assert (
+            db.query(AuditLog).filter_by(action="game.result_confirmed_manually").count()
+            == 1
+        )
+
+        user = db.query(User).filter_by(email="admin@test.invalid").one()
+        post = Post(
+            game_id=game.id,
+            team_id=team_id,
+            instagram_page_id=page_id,
+            post_type="result",
+            status=PostStatus.APPROVED,
+            text="Altes Ergebnis 2:1",
+            approved_version=1,
+            approved_by=user.id,
+            approved_at=datetime.now(timezone.utc),
+        )
+        db.add(post)
+        db.flush()
+        scheduled = PublicationJob(
+            post_id=post.id,
+            game_id=game.id,
+            team_id=team_id,
+            instagram_page_id=page_id,
+            kind="feed",
+            media_path="/tmp/result-feed.png",
+            scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            status=JobStatus.SCHEDULED,
+            approval_status="approved",
+            approved_post_version=post.version,
+            idempotency_key="result-entry-scheduled",
+        )
+        published = PublicationJob(
+            post_id=post.id,
+            game_id=game.id,
+            team_id=team_id,
+            instagram_page_id=page_id,
+            kind="story",
+            media_path="/tmp/result-story.png",
+            scheduled_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+            status=JobStatus.PUBLISHED,
+            approval_status="approved",
+            approved_post_version=post.version,
+            idempotency_key="result-entry-published",
+            platform_id="published-result-story",
+        )
+        db.add_all([scheduled, published])
+        db.commit()
+        post_id = post.id
+        scheduled_id = scheduled.id
+        published_id = published.id
+
+    stale = client.post(
+        f"/games/{game_id}/result",
+        data={
+            "csrf_token": token,
+            "version": str(game_version),
+            "home_score": "3",
+            "away_score": "1",
+            "confirmation": "true",
+        },
+    )
+    assert stale.status_code == 409
+
+    corrected = client.post(
+        f"/games/{game_id}/result",
+        data={
+            "csrf_token": token,
+            "version": str(corrected_version),
+            "home_score": "3",
+            "away_score": "1",
+            "confirmation": "true",
+        },
+        follow_redirects=False,
+    )
+    assert corrected.status_code == 303
+    with factory() as db:
+        post = db.get(Post, post_id)
+        scheduled = db.get(PublicationJob, scheduled_id)
+        published = db.get(PublicationJob, published_id)
+        assert post.status == PostStatus.REAPPROVAL
+        assert post.approved_version is None
+        assert post.approved_by is None
+        assert post.approved_at is None
+        assert scheduled.status == JobStatus.UNAPPROVED
+        assert scheduled.approval_status == "reapproval_required"
+        assert published.status == JobStatus.PUBLISHED
+        assert published.platform_id == "published-result-story"
+
+    confirmed_overview = client.get("/games")
+    assert "Ergebnis bestätigt: 3:1" in confirmed_overview.text
+    result_button = re.search(
+        r'<button name="post_type" value="result"([^>]*)>Ergebnis</button>',
+        confirmed_overview.text,
+    )
+    assert result_button and "disabled" not in result_button.group(1)
 
 
 def test_real_provider_game_is_suppressed_and_can_be_restored(browser):

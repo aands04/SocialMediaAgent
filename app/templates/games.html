@@ -46,7 +46,15 @@
       <td><input type="checkbox" name="game_ids" value="{{x.id}}" form="connect-games-form" aria-label="{{x.home_team}} gegen {{x.away_team}} auswählen"></td>
       <td><strong>{{group.teams[x.team_id].display_name}}</strong><br>{{x.home_team}} – {{x.away_team}}<br><small>{{x.provider}} / {{x.source_url}}</small></td>
       <td>{{x.kickoff|berlin}}</td>
-      <td>{{x.status}}{% if x.overrides.get('provider_status')=='provisional' %}<small>FUSSBALL.DE: vorläufig</small>{% endif %}</td>
+      <td>
+        {{x.status}}
+        {% if x.overrides.get('provider_status')=='provisional' %}<small>FUSSBALL.DE: vorläufig</small>{% endif %}
+        {% if x.result_confirmed and x.home_score is not none and x.away_score is not none %}
+          <small class="success">Ergebnis bestätigt: {{x.home_score}}:{{x.away_score}}</small>
+        {% else %}
+          <small class="warning">Ergebnis noch nicht bestätigt</small>
+        {% endif %}
+      </td>
       <td>
         {% set logo=logo_map.get(x.id) %}<strong>{{opponents.get(x.id,'Gegner')}}</strong>
         {% if logo %}
@@ -71,18 +79,34 @@
         </details>
       </td>
       <td>
+        <details class="result-confirmation">
+          <summary>
+            {% if x.result_confirmed %}Ergebnis anzeigen oder korrigieren{% else %}Ergebnis eintragen und bestätigen{% endif %}
+          </summary>
+          <form method="post" action="/games/{{x.id}}/result" onsubmit="return confirm('Dieses Spielergebnis verbindlich bestätigen?');">
+            <input type="hidden" name="csrf_token" value="{{csrf}}">
+            <input type="hidden" name="version" value="{{x.version}}">
+            <div class="score-fields">
+              <label>{{x.home_team}}<input type="number" name="home_score" min="0" max="99" value="{{x.home_score if x.home_score is not none else ''}}" required inputmode="numeric"></label>
+              <span aria-hidden="true">:</span>
+              <label>{{x.away_team}}<input type="number" name="away_score" min="0" max="99" value="{{x.away_score if x.away_score is not none else ''}}" required inputmode="numeric"></label>
+            </div>
+            <label class="checkbox-label"><input type="checkbox" name="confirmation" value="true" required> Ergebnis wurde geprüft und ist korrekt</label>
+            <button>{% if x.result_confirmed %}Ergebnis korrigieren{% else %}Ergebnis bestätigen{% endif %}</button>
+          </form>
+        </details>
         {% if not group.grouped %}
         <form method="post" action="/games/{{x.id}}/generate">
           <input type="hidden" name="csrf_token" value="{{csrf}}">
           <button name="post_type" value="announcement">Ankündigung</button>
           <button name="post_type" value="reminder">Erinnerung</button>
-          <button name="post_type" value="result">Ergebnis</button>
+          <button name="post_type" value="result" {% if not x.result_confirmed %}disabled title="Ergebnis zuerst eintragen und bestätigen"{% endif %}>Ergebnis</button>
         </form>
         {% else %}
         <form method="post" action="/games/{{x.id}}/generate">
           <input type="hidden" name="csrf_token" value="{{csrf}}">
           <button name="post_type" value="reminder">Eigene Erinnerung</button>
-          {% if not group.result_grouped %}<button name="post_type" value="result">Eigenes Ergebnis</button>{% endif %}
+          {% if not group.result_grouped %}<button name="post_type" value="result" {% if not x.result_confirmed %}disabled title="Ergebnis zuerst eintragen und bestätigen"{% endif %}>Eigenes Ergebnis</button>{% endif %}
         </form>
         {% endif %}
         {% if x.status=='provisional' %}<form method="post" action="/games/{{x.id}}/confirm-provisional"><input type="hidden" name="csrf_token" value="{{csrf}}"><input name="confirmation" placeholder="VORLÄUFIGES SPIEL BESTÄTIGEN" required><button class="warning">Manuell bestätigen</button></form>{% endif %}
@@ -97,7 +121,7 @@
     <form method="post" action="/games/{{group.games[0].id}}/generate">
       <input type="hidden" name="csrf_token" value="{{csrf}}">
       <button name="post_type" value="announcement">Gemeinsame Ankündigung erzeugen</button>
-      {% if group.result_grouped %}<button name="post_type" value="result">Gemeinsames Ergebnis erzeugen</button>{% endif %}
+      {% if group.result_grouped %}<button name="post_type" value="result" {% if not group.all_results_confirmed %}disabled title="Zuerst alle Einzelergebnisse eintragen und bestätigen"{% endif %}>Gemeinsames Ergebnis erzeugen</button>{% endif %}
     </form>
   </div>
   {% endif %}

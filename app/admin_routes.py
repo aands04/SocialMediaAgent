@@ -7,7 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -32,6 +32,7 @@ from app.branding.service import (
 )
 from app.config import get_settings
 from app.db import get_db
+from app.file_delivery import detached_file_response
 from app.games.bundles import connect_games, dashboard_game_groups, separate_games
 from app.games.identity import team_name_variants
 from app.limits.service import LimitExceeded, assert_resource_capacity
@@ -628,6 +629,42 @@ def _invalidate_posts_for_logo_change(db: Session, game: Game, reason: str) -> l
                 PublicationJob.status != JobStatus.PUBLISHED,
             )
         ):
+            publication.status = JobStatus.UNAPPROVED
+            publication.approval_status = "reapproval_required"
+            publication.approved_post_version = None
+            publication.error = reason
+        affected.append(post.id)
+    return affected
+
+
+def _invalidate_posts_for_result_change(db: Session, game: Game, reason: str) -> list[str]:
+    """Revoke open result approvals, including shared matchday carousels."""
+    affected: list[str] = []
+    candidates = db.scalars(select(Post).where(Post.post_type == "result")).all()
+    for post in candidates:
+        bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
+        if post.game_id != game.id and game.id not in (bundle.get("game_ids") or []):
+            continue
+        if post.status in {PostStatus.PUBLISHED, PostStatus.CANCELLED}:
+            continue
+        post.version += 1
+        post.approved_version = None
+        post.approved_by = None
+        post.approved_at = None
+        post.status = PostStatus.REAPPROVAL
+        warning = "Bestätigtes Spielergebnis wurde geändert; erneute Prüfung erforderlich"
+        post.critical_warnings = list(
+            dict.fromkeys([*(post.critical_warnings or []), warning])
+        )
+        for publication in db.scalars(
+            select(PublicationJob).where(PublicationJob.post_id == post.id)
+        ):
+            if publication.status in {
+                JobStatus.PUBLISHED,
+                JobStatus.CANCELLED,
+                JobStatus.SKIPPED,
+            }:
+                continue
             publication.status = JobStatus.UNAPPROVED
             publication.approval_status = "reapproval_required"
             publication.approved_post_version = None
@@ -1504,7 +1541,7 @@ def preview_media(
         path = media_asset_path(asset, settings.media_root, settings.upload_root)
     except StorageError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return FileResponse(path, media_type=asset.mime_type)
+    return detached_file_response(db, path, media_type=asset.mime_type)
 
 
 @router.post("/media/{asset_id}/toggle")
@@ -1567,7 +1604,7 @@ def preview_font(
         or path.suffix.lower() not in {".woff2", ".ttf"}
     ):
         raise HTTPException(404)
-    return FileResponse(path, media_type=font.mime_type)
+    return detached_file_response(db, path, media_type=font.mime_type)
 
 
 @router.post("/fonts")
@@ -3901,7 +3938,7 @@ def post_media_version(
     root = settings.generated_root.resolve()
     if root not in path.parents or path.is_symlink() or not path.is_file():
         raise HTTPException(404, "Medienversion fehlt")
-    return FileResponse(path, media_type=version.mime_type)
+    return detached_file_response(db, path, media_type=version.mime_type)
 
 
 @router.post("/posts/{post_id}/media-slots/{slot_id}/select")
@@ -4815,7 +4852,8 @@ def logo_preview(
         or not path.is_file()
     ):
         raise HTTPException(404)
-    return FileResponse(
+    return detached_file_response(
+        db,
         path,
         media_type=logo.mime_type,
         filename=f"gegnerlogo-{logo.id[:8]}{Path(logo.original_path).suffix.lower()}",
@@ -4841,7 +4879,8 @@ def shared_opponent_logo_preview(
         path = shared_logo_path(logo, settings.upload_root)
     except LogoValidationError as exc:
         raise HTTPException(404, str(exc)) from exc
-    return FileResponse(
+    return detached_file_response(
+        db,
         path,
         media_type=logo.mime_type,
         filename=f"gegnerlogo-{logo.id[:8]}{Path(logo.original_path).suffix.lower()}",
@@ -5488,6 +5527,104 @@ def update_game_details(
     return redirect("/games", "Spielort, Platzart und Wettbewerb gespeichert")
 
 
+@router.post("/games/{game_id}/result")
+def confirm_game_result(
+    game_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    version: int = Form(),
+    home_score: int = Form(),
+    away_score: int = Form(),
+    confirmation: bool = Form(default=False),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    game = db.scalar(select(Game).where(Game.id == game_id).with_for_update())
+    if not game:
+        raise HTTPException(404, "Spiel nicht gefunden")
+    require(current, db, "edit_game", game.team_id)
+    if game.version != version:
+        raise HTTPException(
+            409,
+            "Das Spiel wurde zwischenzeitlich geändert. Bitte Seite neu laden und Ergebnis prüfen.",
+        )
+    if not confirmation:
+        raise HTTPException(422, "Das Ergebnis muss ausdrücklich bestätigt werden")
+    if not 0 <= home_score <= 99 or not 0 <= away_score <= 99:
+        raise HTTPException(422, "Tore müssen als Zahl zwischen 0 und 99 angegeben werden")
+    if game.status in {"cancelled", "postponed"}:
+        raise HTTPException(409, "Für abgesagte oder verschobene Spiele ist kein Ergebnis möglich")
+
+    before = {
+        "home_score": game.home_score,
+        "away_score": game.away_score,
+        "result_confirmed": game.result_confirmed,
+        "status": game.status,
+    }
+    after = {
+        "home_score": home_score,
+        "away_score": away_score,
+        "result_confirmed": True,
+        "status": "finished",
+    }
+    if before == after:
+        return redirect("/games", "Dieses Ergebnis ist bereits bestätigt")
+
+    now = datetime.now(timezone.utc)
+    candidate = f"{home_score}:{away_score}"
+    game.home_score = home_score
+    game.away_score = away_score
+    game.result_confirmed = True
+    game.status = "finished"
+    game.checked_at = now
+    game.version += 1
+    overrides = dict(game.overrides or {})
+    overrides.update(
+        {
+            "provider_score_candidate": candidate,
+            "provider_score_first_seen_at": overrides.get(
+                "provider_score_first_seen_at", now.isoformat()
+            ),
+            "provider_score_observations": max(
+                2, int(overrides.get("provider_score_observations", 0))
+            ),
+            "result_detected_at": overrides.get("result_detected_at", now.isoformat()),
+            "result_confirmed_at": now.isoformat(),
+            "result_confirmation_source": "dashboard_manual",
+            "result_confirmed_by": current.id,
+        }
+    )
+    game.overrides = overrides
+
+    result_changed = (
+        before["result_confirmed"]
+        and (before["home_score"], before["away_score"]) != (home_score, away_score)
+    )
+    reason = "Bestätigtes Spielergebnis wurde im Dashboard geändert"
+    affected_posts = (
+        _invalidate_posts_for_result_change(db, game, reason) if result_changed else []
+    )
+    audit(
+        db,
+        current,
+        "game.result_confirmed_manually",
+        "game",
+        game.id,
+        game.team_id,
+        {
+            "before": before,
+            "after": after,
+            "affected_posts": affected_posts,
+        },
+    )
+    db.commit()
+    message = f"Ergebnis {home_score}:{away_score} wurde bestätigt"
+    if affected_posts:
+        message += "; vorhandene Ergebnisbeiträge benötigen eine erneute Freigabe"
+    return redirect("/games", message)
+
+
 @router.post("/games/{game_id}/generate")
 def generate_game_post(
     game_id: str,
@@ -5512,6 +5649,8 @@ def generate_game_post(
     except PermissionError as e:
         raise HTTPException(403, str(e)) from e
     except ValueError as e:
+        if post_type == "result" and "bestätigt" in str(e):
+            return redirect("/games", str(e))
         raise HTTPException(422, str(e)) from e
     if post:
         return redirect(f"/posts/{post.id}", "Vorhandener Beitrag geöffnet")
@@ -5702,8 +5841,6 @@ def run_diagnostic(
 def download_snapshot(
     snapshot_id: str, current=Depends(current_user), db: Session = Depends(get_db)
 ):
-    from fastapi.responses import FileResponse
-
     from app.models import ProviderSnapshot
 
     require_admin(current)
@@ -5714,8 +5851,11 @@ def download_snapshot(
     path = (root / snapshot.relative_path).resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(404, "Snapshot-Datei fehlt oder ist unvollständig")
-    return FileResponse(
-        path, media_type="text/html", filename=f"fussball-{snapshot.checksum[:12]}.html"
+    return detached_file_response(
+        db,
+        path,
+        media_type="text/html",
+        filename=f"fussball-{snapshot.checksum[:12]}.html",
     )
 
 
@@ -5763,8 +5903,6 @@ def snapshot_to_fixture(
 def post_media(
     post_id: str, job_id: str, current=Depends(current_user), db: Session = Depends(get_db)
 ):
-    from fastapi.responses import FileResponse
-
     item = db.get(Post, post_id)
     job = db.get(PublicationJob, job_id)
     if not item or not job or job.post_id != item.id:
@@ -5774,7 +5912,7 @@ def post_media(
     root = settings.generated_root.resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(404, "Grafik fehlt")
-    return FileResponse(path, media_type="image/png")
+    return detached_file_response(db, path, media_type="image/png")
 
 
 @router.get("/posts/{post_id}/media/{job_id}/items/{item_id}")
@@ -5801,7 +5939,7 @@ def post_carousel_media(
     root = settings.generated_root.resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(404, "Karussellbild fehlt")
-    return FileResponse(path, media_type="image/png")
+    return detached_file_response(db, path, media_type="image/png")
 
 
 @router.get("/diagnostics/{snapshot_id}/import", response_class=HTMLResponse)
