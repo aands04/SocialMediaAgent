@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     # bleiben ausschließlich als betriebliche, plattformweite Pause erhalten.
     facebook_channel_enabled: bool = True
     whatsapp_channel_enabled: bool = True
+    live_center_enabled: bool = True
+    live_event_ai_parsing_enabled: bool = False
+    live_event_ai_model: str = "gpt-5-mini"
+    live_event_reporter_rate_limit_per_minute: int = 12
+    live_event_game_window_before_minutes: int = 180
+    live_event_game_window_after_minutes: int = 420
+    live_event_active_game_ttl_minutes: int = 480
     meta_token_encryption_key: str | None = None
     meta_token_key_version: str = "v1"
     meta_oauth_redirect_uri: str | None = None

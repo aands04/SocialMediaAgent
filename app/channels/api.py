@@ -321,3 +321,35 @@ class MetaGraphClient:
             json=payload,
             headers={"Authorization": f"Bearer {access_token}"},
         )
+
+    def send_whatsapp_group_text(
+        self,
+        *,
+        phone_number_id: str,
+        access_token: str,
+        group_id: str,
+        text: str,
+    ) -> dict:
+        """Send a text to a group created through Meta's official Groups API.
+
+        Callers must verify account eligibility and group ownership before this
+        method is reached.  Existing consumer or WhatsApp-Web groups are never
+        accepted as targets.
+        """
+
+        if not group_id or not text.strip():
+            raise ChannelApiError("WhatsApp-Gruppenziel oder Nachricht fehlt")
+        return self._request_json(
+            "POST",
+            f"{phone_number_id}/messages",
+            "WhatsApp-Gruppennachricht versenden",
+            uncertain_on_transport_error=True,
+            json={
+                "messaging_product": "whatsapp",
+                "recipient_type": "group",
+                "to": group_id,
+                "type": "text",
+                "text": {"preview_url": False, "body": text[:4096]},
+            },
+            headers={"Authorization": f"Bearer {access_token}"},
+        )

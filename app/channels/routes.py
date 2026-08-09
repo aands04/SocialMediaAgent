@@ -688,7 +688,7 @@ def configure_whatsapp_template(
 ):
     check_csrf(request, csrf_token_value)
     require_admin(current)
-    if message_type not in {"general", "announcement", "result"}:
+    if message_type not in {"general", "announcement", "result", "live_event"}:
         raise HTTPException(422, "Unbekannter Nachrichtentyp")
     item = db.get(WhatsAppMessageTemplate, template_id)
     if item is None:

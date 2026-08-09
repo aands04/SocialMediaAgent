@@ -31,7 +31,9 @@ from app.models import (
     InstagramConnection,
     InstagramPage,
     JobStatus,
+    LiveGameState,
     LogoAsset,
+    MatchEvent,
     MediaAsset,
     PlanProfile,
     Post,
@@ -3333,3 +3335,76 @@ def test_editor_can_view_but_cannot_change_automatic_post_rules(browser):
         },
     )
     assert forbidden.status_code == 403
+
+
+def test_live_center_accepts_tenant_scoped_manual_event_with_csrf(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="live-center-page",
+            display_name="Live-Center-Seite",
+            username="live_center_page",
+            club="Dashboard Testverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="live-center-team",
+            display_name="Live-Center-Mannschaft",
+            short_name="LC",
+            slug="live-center-team",
+            club="Dashboard Testverein",
+            fussball_url="https://example.invalid/live-center-team",
+            instagram_page_id=page.id,
+            media_subdir="live-center/players",
+            timezone="Europe/Berlin",
+        )
+        db.add(team)
+        db.flush()
+        game = Game(
+            team_id=team.id,
+            provider="mock",
+            external_id="live-center-game",
+            home_team=team.display_name,
+            away_team="Testgegner",
+            kickoff=datetime.now(timezone.utc),
+            competition="Testliga",
+            venue="Testplatz",
+            status="scheduled",
+            source_url="fixture://live-center-game",
+            checked_at=datetime.now(timezone.utc),
+        )
+        db.add(game)
+        db.commit()
+        game_id = game.id
+
+    page = client.get("/live")
+    assert page.status_code == 200
+    assert "Live Center" in page.text
+    assert "Live-Center-Mannschaft" in page.text
+
+    rejected = client.post(
+        f"/live/games/{game_id}/events",
+        data={"csrf_token": "ungueltig", "event_type": "goal", "minute": 12},
+    )
+    assert rejected.status_code == 403
+
+    created = client.post(
+        f"/live/games/{game_id}/events",
+        data={
+            "csrf_token": session_csrf(client),
+            "event_type": "goal",
+            "minute": 12,
+            "player_name": "Testspieler",
+        },
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    with factory() as db:
+        event = db.scalar(select(MatchEvent).where(MatchEvent.game_id == game_id))
+        state = db.scalar(select(LiveGameState).where(LiveGameState.game_id == game_id))
+        assert event is not None
+        assert event.status == "confirmed"
+        assert state is not None
+        assert (state.home_score, state.away_score) == (1, 0)

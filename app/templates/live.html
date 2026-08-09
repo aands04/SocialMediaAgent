@@ -1,0 +1,208 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="live-header">
+  <div>
+    <h1>Live Center</h1>
+    <p>Erfasse Spielereignisse einmal und verteile bestätigte Live-Informationen kontrolliert über die freigegebenen Kanäle.</p>
+  </div>
+  {% if user.role.value == 'admin' %}
+  <form method="post" action="/live/pause">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <input type="hidden" name="paused" value="{{'false' if live_paused else 'true'}}">
+    <button class="{{'danger' if not live_paused else ''}}">{{'Live-Verteilung fortsetzen' if live_paused else 'Live-Verteilung pausieren'}}</button>
+  </form>
+  {% endif %}
+</div>
+{% if live_paused %}<p class="warning"><strong>Live-Verteilung pausiert.</strong> Ereignisse bleiben sichtbar, neue externe Auslieferungen werden blockiert.</p>{% endif %}
+
+<nav class="subnav" aria-label="Live-Center-Bereiche">
+  <a href="#spiele">Spiele</a>
+  <a href="#reporter">Reporter</a>
+  <a href="#zielgruppen">WhatsApp-Ziele</a>
+  <a href="#regeln">Regeln</a>
+  <a href="#simulator">Simulator</a>
+</nav>
+
+<section id="spiele">
+  <h2>Live- und anstehende Spiele</h2>
+  {% if not games %}<p>In den letzten zwei und kommenden sieben Tagen sind keine sichtbaren Spiele vorhanden.</p>{% endif %}
+  <div class="live-game-grid">
+  {% for game in games %}
+    {% set team=teams_by_id[game.team_id] %}
+    {% set state=states.get(game.id) %}
+    <article class="live-game-card">
+      <header class="live-game-card__header">
+        <div><strong>{{team.display_name}}</strong><br><small>{{game.kickoff|berlin}} · {{game.competition or 'Wettbewerb offen'}}</small></div>
+        <div class="live-score" aria-label="Aktueller Spielstand">
+          {{state.home_score if state else (game.home_score if game.home_score is not none else 0)}} : {{state.away_score if state else (game.away_score if game.away_score is not none else 0)}}
+          <small>{{state.phase if state else game.status}}</small>
+        </div>
+      </header>
+      <h3>{{game.home_team}} – {{game.away_team}}</h3>
+      <p>{{game.venue or 'Spielort noch offen'}}</p>
+      {% if state and state.live_publishing_paused %}<p class="warning"><strong>Externe Live-Veröffentlichungen für dieses Spiel sind pausiert.</strong> Ereignisse werden weiterhin erfasst.</p>{% endif %}
+      {% if user.role.value in ['admin','approver','reviewer'] %}
+      <form method="post" action="/live/games/{{game.id}}/pause">
+        <input type="hidden" name="csrf_token" value="{{csrf}}">
+        <input type="hidden" name="paused" value="{{'false' if state and state.live_publishing_paused else 'true'}}">
+        <button class="{{'danger' if not state or not state.live_publishing_paused else ''}}">{{'Live-Veröffentlichungen fortsetzen' if state and state.live_publishing_paused else 'Live-Veröffentlichungen pausieren'}}</button>
+      </form>
+      {% endif %}
+      {% if user.role.value in ['admin', 'editor', 'approver'] %}
+      <details>
+        <summary>Ereignis manuell erfassen</summary>
+        <form method="post" action="/live/games/{{game.id}}/events" class="gridform live-event-form">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <label>Ereignis<select name="event_type" required>{% for key,label in event_labels.items() %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label>
+          <label>Minute<input type="number" name="minute" min="0" max="150" inputmode="numeric"></label>
+          <label>Nachspielzeit<input type="number" name="stoppage_minute" min="0" max="30" inputmode="numeric"></label>
+          <label>Spielstand Heim<input type="number" name="home_score" min="0" max="99" inputmode="numeric"></label>
+          <label>Spielstand Gast<input type="number" name="away_score" min="0" max="99" inputmode="numeric"></label>
+          <label>Spieler/in<input name="player_name" maxlength="160" autocomplete="off"></label>
+          <label>Ein-/ausgewechselte Person<input name="related_player_name" maxlength="160" autocomplete="off"></label>
+          <label class="full-width">Kurze Zusatzinformation<input name="comment" maxlength="500"></label>
+          <button>Verbindlich speichern</button>
+        </form>
+        <p><small>Spielstandskorrekturen und Endstände werden protokolliert. Bestehende Ereignisse werden nicht still überschrieben.</small></p>
+      </details>
+      {% endif %}
+      <div class="live-timeline">
+        <h4>Ereignisse</h4>
+        {% for event in events_by_game.get(game.id, []) %}
+        <div class="live-event live-event--{{event.status}}">
+          <div>
+            <strong>{% if event.minute is not none %}{{event.minute}}{% if event.stoppage_minute %}+{{event.stoppage_minute}}{% endif %}'. {% endif %}{{event_labels.get(event.event_type, event.event_type)}}</strong>
+            {% if event.player_name %} · {{event.player_name}}{% endif %}
+            {% if event.home_score_after is not none %}<span class="badge">{{event.home_score_after}}:{{event.away_score_after}}</span>{% endif %}
+            <small>Quelle: {{'WhatsApp-Reporter' if event.provider == 'whatsapp' else 'Live Center' if event.provider in ['dashboard','simulator'] else event.provider}} · {{'Bestätigt' if event.status == 'confirmed' else 'Prüfung nötig' if event.status == 'pending' else event.status}}</small>
+            {% for warning in event.metadata_json.get('warnings', []) %}<small class="warning">{{warning}}</small>{% endfor %}
+            {% set event_deliveries=deliveries_by_event.get(event.id, []) %}
+            {% if event_deliveries %}<small>Ziele: {% for delivery in event_deliveries %}{{{'dashboard':'Dashboard','instagram':'Instagram','facebook':'Facebook','whatsapp':'WhatsApp'}.get(delivery.channel_type, delivery.channel_type)}} ({{{'delivered':'zugestellt','sent':'versendet','queued':'eingeplant','awaiting_approval':'Freigabe erforderlich','blocked':'blockiert','failed':'fehlgeschlagen'}.get(delivery.status, delivery.status)}}){% if not loop.last %}, {% endif %}{% endfor %}</small>{% endif %}
+          </div>
+          {% if event.status == 'pending' and user.role.value in ['admin','approver','reviewer'] %}
+          <div class="live-event-actions">
+            <form method="post" action="/live/events/{{event.id}}/confirm" onsubmit="return confirm('Dieses Ereignis verbindlich bestätigen?');">
+              <input type="hidden" name="csrf_token" value="{{csrf}}"><button>Bestätigen</button>
+            </form>
+            <form method="post" action="/live/events/{{event.id}}/reject" onsubmit="return confirm('Dieses Ereignis ablehnen?');">
+              <input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Ablehnen</button>
+            </form>
+          </div>
+          {% endif %}
+          {% if user.role.value in ['admin','approver','reviewer'] %}
+            {% for delivery in event_deliveries if delivery.status == 'awaiting_approval' %}
+            <div class="live-delivery-actions">
+              <strong>{{{'instagram':'Instagram','facebook':'Facebook','whatsapp':'WhatsApp'}.get(delivery.channel_type, delivery.channel_type)}}:</strong>
+              <form method="post" action="/live/deliveries/{{delivery.id}}/decision">
+                <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="decision" value="approve"><button>Auslieferung freigeben</button>
+              </form>
+              <form method="post" action="/live/deliveries/{{delivery.id}}/decision">
+                <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="decision" value="reject"><button class="danger">Nicht ausliefern</button>
+              </form>
+            </div>
+            {% endfor %}
+          {% endif %}
+        </div>
+        {% else %}<p><small>Noch keine Live-Ereignisse.</small></p>{% endfor %}
+      </div>
+    </article>
+  {% endfor %}
+  </div>
+</section>
+
+<section id="reporter">
+  <h2>Reporter und Mannschaften</h2>
+  <p>Nur freigegebene Absender einer WhatsApp-Verbindung dieses Vereins können Live-Meldungen einreichen. Wähle vor dem Spiel ein eindeutiges aktives Spiel.</p>
+  {% if user.role.value == 'admin' %}
+  {% if whatsapp_connections %}
+  <details>
+    <summary>Reporter hinzufügen</summary>
+    <form method="post" action="/live/reporters" class="gridform">
+      <input type="hidden" name="csrf_token" value="{{csrf}}">
+      <label>Name<input name="display_name" maxlength="160" required></label>
+      <label>WhatsApp-Nummer<input name="normalized_phone" placeholder="+491701234567" required></label>
+      <label>Vereins-WhatsApp<select name="channel_connection_id" required>{% for connection in whatsapp_connections %}<option value="{{connection.id}}">{{connection.display_name}} · {{connection.display_phone_number or 'Nummer bei Meta'}}</option>{% endfor %}</select></label>
+      <fieldset><legend>Mannschaften</legend>{% for team in teams %}<label class="checkbox-label"><input type="checkbox" name="team_ids" value="{{team.id}}"> {{team.display_name}}</label>{% endfor %}</fieldset>
+      <label class="checkbox-label"><input type="checkbox" name="all_teams"> Alle Mannschaften dieses Vereins</label>
+      <label class="checkbox-label"><input type="checkbox" name="trusted_auto_confirm"> Eindeutige Meldungen automatisch bestätigen</label>
+      <label class="checkbox-label"><input type="checkbox" name="may_correct"> Darf Spielstände korrigieren</label>
+      <fieldset><legend>Erlaubte Ereignisse (optional)</legend><p><small>Ohne Auswahl darf der Reporter alle Ereignistypen melden.</small></p>{% for key,label in event_labels.items() %}<label class="checkbox-label"><input type="checkbox" name="allowed_event_types" value="{{key}}"> {{label}}</label>{% endfor %}</fieldset>
+      <button>Reporter speichern</button>
+    </form>
+  </details>
+  {% else %}<p class="warning">Für Reporter muss zuerst unter „Social-Media-Kanäle“ eine WhatsApp-Verbindung eingerichtet werden.</p>{% endif %}
+  {% endif %}
+  <table>
+    <tr><th>Reporter</th><th>Mannschaften</th><th>Aktives Spiel</th><th>Status</th></tr>
+    {% for reporter in reporters %}
+    <tr>
+      <td><strong>{{reporter.display_name}}</strong>{% if user.role.value == 'admin' %}<br><small>{{reporter.normalized_phone}}</small>{% endif %}</td>
+      <td>{% if reporter.all_teams %}Alle Mannschaften{% else %}{% for team in teams if team.id in reporter_team_ids.get(reporter.id, []) %}{{team.display_name}}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</td>
+      <td>
+        {% if user.role.value == 'admin' %}
+        <form method="post" action="/live/reporters/{{reporter.id}}/active-game">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <select name="game_id" required><option value="">Spiel auswählen</option>{% for game in games if reporter.all_teams or game.team_id in reporter_team_ids.get(reporter.id, []) %}<option value="{{game.id}}" {% if reporter.active_game_id == game.id %}selected{% endif %}>{{teams_by_id[game.team_id].display_name}} · {{game.kickoff|berlin}}</option>{% endfor %}</select>
+          <button>Zuordnen</button>
+        </form>
+        {% else %}{{'zugeordnet' if reporter.active_game_id else 'nicht zugeordnet'}}{% endif %}
+      </td>
+      <td>{{'Aktiv' if reporter.active else 'Deaktiviert'}}{% if reporter.trusted_auto_confirm %}<br><small>Vertrauenswürdig</small>{% endif %}{% if reporter.allowed_event_types %}<br><small>{{reporter.allowed_event_types|length}} Ereignistyp(en) erlaubt</small>{% endif %}{% if reporter.active_game_expires_at %}<br><small>Spielzuordnung bis {{reporter.active_game_expires_at|berlin}}</small>{% endif %}{% if user.role.value == 'admin' %}<form method="post" action="/live/reporters/{{reporter.id}}/active"><input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="active" value="{{'false' if reporter.active else 'true'}}"><button class="{{'danger' if reporter.active else ''}}">{{'Deaktivieren' if reporter.active else 'Aktivieren'}}</button></form>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="4">Noch keine Reporter eingerichtet.</td></tr>{% endfor %}
+  </table>
+</section>
+
+<section id="zielgruppen">
+  <h2>WhatsApp-Zielgruppen</h2>
+  <p>Offizielle Gruppen stehen nur bei bestätigter Meta-Eignung zur Verfügung. Andernfalls verwendet das Live Center ausschließlich Empfängerlisten mit dokumentierter Einwilligung.</p>
+  {% if user.role.value == 'admin' and whatsapp_connections %}
+  <details>
+    <summary>Zielgruppe anlegen</summary>
+    <form method="post" action="/live/whatsapp-audiences" class="gridform">
+      <input type="hidden" name="csrf_token" value="{{csrf}}">
+      <label>Name<input name="name" maxlength="160" placeholder="Vereinsinfos" required></label>
+      <label>Vereins-WhatsApp<select name="channel_connection_id" required>{% for connection in whatsapp_connections %}<option value="{{connection.id}}">{{connection.display_name}}</option>{% endfor %}</select></label>
+      <label>Typ<select name="audience_type" required><option value="recipient_list">Opt-in-Empfängerliste</option><option value="group">Offizielle WhatsApp-Gruppe</option></select></label>
+      <label>Externe Gruppen-ID (nur offizielle Gruppe)<input name="external_group_id" maxlength="200"></label>
+      <fieldset><legend>Empfänger für eine Empfängerliste</legend>{% for recipient in whatsapp_recipients %}<label class="checkbox-label"><input type="checkbox" name="recipient_ids" value="{{recipient.id}}"> {{recipient.display_name or recipient.normalized_phone}}</label>{% else %}<p><small>Noch keine aktiven Opt-in-Empfänger unter Social-Media-Kanäle.</small></p>{% endfor %}</fieldset>
+      <button>Zielgruppe speichern</button>
+    </form>
+  </details>
+  {% endif %}
+  <table><tr><th>Name</th><th>Typ</th><th>Verbindung</th><th>Status</th></tr>{% for audience in whatsapp_audiences %}<tr><td>{{audience.name}}</td><td>{{'Offizielle Gruppe' if audience.audience_type == 'group' else 'Opt-in-Empfängerliste'}}</td><td>{% for connection in whatsapp_connections if connection.id == audience.channel_connection_id %}{{connection.display_name}}{% endfor %}</td><td>{{'Aktiv' if audience.active else 'Deaktiviert'}}{% if audience.audience_type == 'group' %} · {{'verfügbar' if audience.eligibility_status == 'available' else 'nicht freigegeben'}}{% endif %}</td></tr>{% else %}<tr><td colspan="4">Noch keine WhatsApp-Zielgruppe eingerichtet.</td></tr>{% endfor %}</table>
+</section>
+
+<section id="regeln">
+  <h2>Live-Regeln</h2>
+  <p>„Automatisch“ legt externe Auslieferungen nur an, wenn Ereignis, Kanal, Opt-in und alle Sicherheitsschalter gültig sind. Instagram-Live-Bilder bleiben im bestehenden Generierungs- und Freigabeprozess.</p>
+  {% if user.role.value == 'admin' %}
+  <details>
+    <summary>Regel anlegen oder ändern</summary>
+    <form method="post" action="/live/rules" class="gridform">
+      <input type="hidden" name="csrf_token" value="{{csrf}}">
+      <label>Mannschaft<select name="team_id" required>{% for team in teams %}<option value="{{team.id}}">{{team.display_name}}</option>{% endfor %}</select></label>
+      <label>Ereignis<select name="event_type" required>{% for key,label in event_labels.items() %}<option value="{{key}}">{{label}}</option>{% endfor %}</select></label>
+      <label>Modus<select name="delivery_mode"><option value="off">Aus</option><option value="manual">Nach manueller Freigabe</option><option value="automatic">Automatisch</option></select></label>
+      <label>WhatsApp-Zielgruppe<select name="whatsapp_audience_id"><option value="">Nur erforderlich, wenn WhatsApp ausgewählt ist</option>{% for audience in whatsapp_audiences %}<option value="{{audience.id}}">{{audience.name}} · {{'Gruppe' if audience.audience_type == 'group' else 'Empfängerliste'}}</option>{% endfor %}</select></label>
+      <fieldset><legend>Kanäle</legend><label><input type="checkbox" name="channel_types" value="dashboard" checked> Dashboard</label><label><input type="checkbox" name="channel_types" value="whatsapp"> WhatsApp</label><label><input type="checkbox" name="channel_types" value="instagram"> Instagram</label><label><input type="checkbox" name="channel_types" value="facebook"> Facebook</label></fieldset>
+      <label class="checkbox-label"><input type="checkbox" name="enabled"> Regel aktiv</label>
+      <label class="checkbox-label"><input type="checkbox" name="require_confirmation" checked> Zusätzliche Auslieferungsfreigabe erforderlich</label>
+      <button>Regel speichern</button>
+    </form>
+  </details>
+  {% endif %}
+  <table><tr><th>Mannschaft</th><th>Ereignis</th><th>Modus</th><th>Kanäle</th><th>Zielgruppe</th><th>Status</th></tr>{% for rule in rules %}<tr><td>{{teams_by_id[rule.team_id].display_name}}</td><td>{{event_labels.get(rule.event_type, rule.event_type)}}</td><td>{{{'off':'Aus','manual':'Manuell','automatic':'Automatisch'}.get(rule.delivery_mode, rule.delivery_mode)}}</td><td>{% for channel in rule.channel_types %}{{{'dashboard':'Dashboard','instagram':'Instagram','facebook':'Facebook','whatsapp':'WhatsApp'}.get(channel, channel)}}{% if not loop.last %}, {% endif %}{% endfor %}</td><td>{% if rule.whatsapp_audience_id and whatsapp_audiences_by_id.get(rule.whatsapp_audience_id) %}{{whatsapp_audiences_by_id[rule.whatsapp_audience_id].name}}{% else %}Nur Dashboard{% endif %}</td><td>{{'Aktiv' if rule.enabled else 'Aus'}}</td></tr>{% else %}<tr><td colspan="6">Noch keine Live-Regeln.</td></tr>{% endfor %}</table>
+</section>
+
+<section id="simulator">
+  <h2>Simulator</h2>
+  <p>Testet ausschließlich den deterministischen Parser. Es wird kein Ereignis gespeichert und kein Meta-Aufruf ausgeführt.</p>
+  <form method="post" action="/live/simulate">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <label>Testmeldung<input name="message" placeholder="Tor 23 Müller" maxlength="500" required></label>
+    <button>Im Testmodus auswerten</button>
+  </form>
+  {% if simulated %}<div class="notice"><strong>Erkannt:</strong> {{event_labels.get(simulated.event_type, simulated.event_type)}}{% if simulated.minute is not none %}, {{simulated.minute}}. Minute{% endif %}{% if simulated.player_name %}, {{simulated.player_name}}{% endif %}. Keine Speicherung.</div>{% endif %}
+</section>
+{% endblock %}

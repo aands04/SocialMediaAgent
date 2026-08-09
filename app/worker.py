@@ -11,6 +11,7 @@ from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.games.automatic import run_automatic_fussball_cycle
 from app.jobs.generation import claim_next, process_generation_job
+from app.live.publishing import LivePublishingError, run_live_delivery_cycle
 from app.meta.connection_health import run_automatic_connection_check_cycle
 from app.meta.publishing import MetaPublishingError
 from app.meta.scheduler import run_automatic_publishing_cycle
@@ -131,6 +132,7 @@ def run():
         automatic_result = None
         channel_result = None
         connection_check_result = None
+        live_delivery_result = None
         fussball_result = None
         with SessionLocal() as db:
             if loops == 1 or loops % 240 == 0:
@@ -218,6 +220,14 @@ def run():
                 except (ChannelDeliveryError, ValueError) as exc:
                     db.rollback()
                     log.error("automatic_channel_scheduler_blocked", error=str(exc))
+                if settings.live_center_enabled:
+                    try:
+                        live_delivery_result = run_live_delivery_cycle(db, settings)
+                        due_count += live_delivery_result.queued
+                        processed += live_delivery_result.delivered
+                    except (LivePublishingError, ValueError) as exc:
+                        db.rollback()
+                        log.error("automatic_live_delivery_blocked", error=str(exc))
 
         payload = {
             "at": datetime.now(timezone.utc).isoformat(),
@@ -243,6 +253,11 @@ def run():
             "automatic_connection_checks": (
                 connection_check_result.__dict__
                 if connection_check_result is not None
+                else None
+            ),
+            "automatic_live_delivery": (
+                live_delivery_result.__dict__
+                if live_delivery_result is not None
                 else None
             ),
             "fussball_cycle": (fussball_result.__dict__ if fussball_result is not None else None),
