@@ -38,6 +38,7 @@ check "Compose-Konfiguration" sh -c "$COMPOSE config --quiet"
   [ "${META_TEST_ENABLED:-}" = "false" ] &&
   [ "${META_TEST_PUBLISH_ENABLED:-}" = "false" ] &&
   [ -z "${META_ACCESS_TOKEN:-}" ] &&
+  [ -z "${META_FACEBOOK_APP_SECRET:-}" ] &&
   ok "Harte Produktions-Umgebungsgates" ||
   fail "Produktions-Umgebungsgates sind nicht korrekt"
 
@@ -105,6 +106,24 @@ for name in db_password session_secret openai_api_key meta_app_id meta_app_secre
     fail "Secret $name fehlt oder ist leer"
   fi
 done
+
+if [ -n "${META_FACEBOOK_APP_ID:-}" ] || [ -n "${META_WHATSAPP_CONFIGURATION_ID:-}" ]; then
+  [ -n "${META_FACEBOOK_APP_ID:-}" ] &&
+    ok "Separate Meta-App-ID für Facebook und WhatsApp vorhanden" ||
+    fail "META_FACEBOOK_APP_ID fehlt für Facebook/WhatsApp"
+  facebook_secret="${META_FACEBOOK_APP_SECRET_FILE_HOST:-/dev/null}"
+  if [ -s "$facebook_secret" ]; then
+    mode="$(stat -c %a "$facebook_secret" 2>/dev/null || echo 999)"
+    case "$mode" in
+      400|440|600|640) ok "Separater Meta-App-Geheimcode vorhanden und eingeschränkt ($mode)" ;;
+      *) fail "Separater Meta-App-Geheimcode hat zu offene Rechte ($mode)" ;;
+    esac
+  else
+    fail "META_FACEBOOK_APP_SECRET_FILE_HOST fehlt oder ist leer"
+  fi
+else
+  ok "Facebook-/WhatsApp-App-Zugang bewusst noch nicht eingerichtet"
+fi
 
 check "Webanwendung erreichbar" curl -fsS "http://127.0.0.1:${HTTP_PORT:-8083}/health"
 check "Anmeldeseite erreichbar" sh -c "curl -fsS http://127.0.0.1:${HTTP_PORT:-8083}/login | grep -q csrf_token"

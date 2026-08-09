@@ -13,6 +13,7 @@ from app.channels.api import (
     FACEBOOK_REQUIRED_SCOPES,
     WHATSAPP_REQUIRED_SCOPES,
     ChannelApiError,
+    MetaGraphClient,
     MetaToken,
 )
 from app.channels.capabilities import capability_keys, status_label
@@ -53,13 +54,43 @@ def channel_settings() -> Settings:
         meta_production_enabled=True,
         facebook_channel_enabled=True,
         whatsapp_channel_enabled=True,
-        meta_app_id="app-1",
-        meta_app_secret="app-secret",
+        meta_app_id="instagram-app",
+        meta_app_secret="instagram-secret",
+        meta_facebook_app_id="channels-app",
+        meta_facebook_app_secret="channels-secret",
         meta_facebook_oauth_redirect_uri=(
             "https://meta.example.invalid/public/meta/channels/oauth/callback"
         ),
         meta_token_encryption_key=Fernet.generate_key().decode("ascii"),
     )
+
+
+def test_channel_client_never_falls_back_to_instagram_credentials():
+    settings = Settings(
+        _env_file=None,
+        meta_app_id="instagram-app",
+        meta_app_secret="instagram-secret",
+    )
+    client = MetaGraphClient(settings)
+
+    with pytest.raises(ChannelApiError, match="Facebook und WhatsApp"):
+        client.authorization_url(
+            state="state",
+            redirect_uri="https://example.invalid/callback",
+            channel_type="whatsapp",
+        )
+
+
+def test_channel_client_uses_dedicated_meta_app_id():
+    settings = channel_settings()
+    url = MetaGraphClient(settings).authorization_url(
+        state="state",
+        redirect_uri="https://example.invalid/callback",
+        channel_type="whatsapp",
+    )
+
+    assert "client_id=channels-app" in url
+    assert "instagram-app" not in url
 
 
 def test_facebook_and_whatsapp_are_available_by_default():
@@ -535,7 +566,9 @@ def test_whatsapp_webhook_signature_and_opt_out_are_enforced(db, monkeypatch):
     body = b'{"object":"whatsapp_business_account"}'
     signature = (
         "sha256="
-        + hmac.new(settings.meta_app_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        + hmac.new(
+            settings.meta_facebook_app_secret.encode("utf-8"), body, hashlib.sha256
+        ).hexdigest()
     )
     _verify_signature(body, signature)
     with pytest.raises(Exception) as error:

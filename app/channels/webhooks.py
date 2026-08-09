@@ -27,7 +27,7 @@ settings = get_settings()
 
 
 def _verify_signature(body: bytes, supplied: str) -> None:
-    secret = settings.meta_facebook_app_secret or settings.meta_app_secret
+    secret = settings.meta_facebook_app_secret
     if not secret or not supplied.startswith("sha256="):
         raise HTTPException(403, "Webhook-Signatur fehlt")
     expected = "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()

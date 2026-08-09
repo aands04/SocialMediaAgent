@@ -4,6 +4,8 @@ if [ -r /run/secrets/session_secret ]; then export SESSION_SECRET="$(cat /run/se
 if [ -r /run/secrets/openai_api_key ]; then export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"; fi
 if [ -r /run/secrets/meta_app_id ]; then export META_APP_ID="$(cat /run/secrets/meta_app_id)"; fi
 if [ -r /run/secrets/meta_app_secret ]; then export META_APP_SECRET="$(cat /run/secrets/meta_app_secret)"; fi
+case "${ENVIRONMENT:-development}" in production|meta-test) unset META_FACEBOOK_APP_SECRET ;; esac
+if [ -s /run/secrets/meta_facebook_app_secret ]; then export META_FACEBOOK_APP_SECRET="$(cat /run/secrets/meta_facebook_app_secret)"; fi
 if [ -r /run/secrets/meta_token_encryption_key ]; then export META_TOKEN_ENCRYPTION_KEY="$(cat /run/secrets/meta_token_encryption_key)"; fi
 if [ -r /run/secrets/meta_webhook_verify_token ]; then export META_WEBHOOK_VERIFY_TOKEN="$(cat /run/secrets/meta_webhook_verify_token)"; fi
 if [ -s /run/secrets/smtp_password ]; then export SMTP_PASSWORD="$(cat /run/secrets/smtp_password)"; fi

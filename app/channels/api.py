@@ -54,15 +54,19 @@ class MetaGraphClient:
         self.base = f"{self.graph_host}/{settings.meta_graph_version}"
 
     def _app_id(self) -> str:
-        value = self.settings.meta_facebook_app_id or self.settings.meta_app_id
+        value = self.settings.meta_facebook_app_id
         if not value:
-            raise ChannelApiError("Meta-App-ID ist nicht eingerichtet")
+            raise ChannelApiError(
+                "Die Meta-App-ID für Facebook und WhatsApp ist nicht eingerichtet"
+            )
         return value
 
     def _app_secret(self) -> str:
-        value = self.settings.meta_facebook_app_secret or self.settings.meta_app_secret
+        value = self.settings.meta_facebook_app_secret
         if not value:
-            raise ChannelApiError("Meta-App-Secret ist nicht eingerichtet")
+            raise ChannelApiError(
+                "Der Meta-App-Geheimcode für Facebook und WhatsApp ist nicht eingerichtet"
+            )
         return value
 
     def authorization_url(self, *, state: str, redirect_uri: str, channel_type: str) -> str:
