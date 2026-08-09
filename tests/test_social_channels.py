@@ -26,7 +26,12 @@ from app.channels.oauth import (
     prepare_facebook_selection,
     start_channel_oauth,
 )
-from app.channels.webhooks import _process_whatsapp_payload, _verify_signature
+from app.channels.webhooks import (
+    _process_whatsapp_payload,
+    _resolve_whatsapp_connection,
+    _verify_signature,
+    _whatsapp_identifiers,
+)
 from app.config import Settings
 from app.meta.security import TokenCipher
 from app.models import (
@@ -587,6 +592,19 @@ def test_whatsapp_webhook_signature_and_opt_out_are_enforced(db, monkeypatch):
     )
     db.add(connection)
     db.flush()
+    club_id, connection_id = _resolve_whatsapp_connection(
+        db,
+        waba_id="waba-webhook",
+        phone_id="phone-webhook",
+    )
+    assert (club_id, connection_id) == (connection.club_id, connection.id)
+    with pytest.raises(Exception) as unknown_channel:
+        _resolve_whatsapp_connection(
+            db,
+            waba_id="waba-unbekannt",
+            phone_id="phone-unbekannt",
+        )
+    assert getattr(unknown_channel.value, "status_code", None) == 404
     recipient = WhatsAppRecipient(
         channel_connection_id=connection.id,
         normalized_phone="+49561123456",
@@ -630,3 +648,37 @@ def test_whatsapp_webhook_signature_and_opt_out_are_enforced(db, monkeypatch):
         )
     )
     assert audit is not None
+
+
+def test_whatsapp_webhook_rejects_mixed_tenant_identifiers_before_content():
+    payload = {
+        "entry": [
+            {
+                "id": "waba-club-a",
+                "changes": [
+                    {
+                        "value": {
+                            "metadata": {"phone_number_id": "phone-club-a"},
+                            "messages": [{"id": "message-a", "text": {"body": "Tor"}}],
+                        }
+                    }
+                ],
+            },
+            {
+                "id": "waba-club-b",
+                "changes": [
+                    {
+                        "value": {
+                            "metadata": {"phone_number_id": "phone-club-b"},
+                            "messages": [{"id": "message-b", "text": {"body": "Tor"}}],
+                        }
+                    }
+                ],
+            },
+        ]
+    }
+
+    with pytest.raises(Exception) as error:
+        _whatsapp_identifiers(payload)
+
+    assert getattr(error.value, "status_code", None) == 409

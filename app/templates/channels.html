@@ -181,6 +181,7 @@
           <option value="general" {% if item.message_type == 'general' %}selected{% endif %}>Noch nicht zugeordnet</option>
           <option value="announcement" {% if item.message_type == 'announcement' %}selected{% endif %}>Spielankündigung</option>
           <option value="result" {% if item.message_type == 'result' %}selected{% endif %}>Ergebnismeldung</option>
+          <option value="live_event" {% if item.message_type == 'live_event' %}selected{% endif %}>Live-Ereignis</option>
         </select>
       </label>
       <button>Zuordnung speichern</button>

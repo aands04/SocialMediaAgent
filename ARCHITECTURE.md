@@ -181,3 +181,16 @@ Verein. Für einen nicht konfigurierten Spielwochentag wird bewusst keine
 Ersatzzeit aus einem anderen Wochentag angenommen; die Ausgabe bleibt sichtbar
 und wird als manuell zu planen markiert. Details und Migrationsstrategie stehen
 in [`docs/MEDIA_VARIANTS_AND_RULES_PLAN.md`](docs/MEDIA_VARIANTS_AND_RULES_PLAN.md).
+
+## Live-Ereignisse
+
+`MatchEvent` ist die append-orientierte, mandantengebundene Quelle für
+Spielphasen, Tore, Karten, Wechsel, Unterbrechungen und Korrekturen.
+`LiveGameState` materialisiert ausschließlich bestätigte Ereignisse. Reporter,
+Mannschaftszuordnungen, Regeln und Auslieferungsentscheidungen sind eigenständige
+tenantgebundene Tabellen. Webhook-Eingänge aktivieren den Tenant-Scope erst nach
+eindeutiger Zuordnung von WABA/Telefonnummer-ID; Provider-Nachrichten-ID und
+Folgeentscheidung besitzen getrennte Idempotenzschlüssel. Externe
+Auslieferungen umgehen weder die bestehenden Kanal- und Not-Aus-Schalter noch
+Opt-in-, Template-, Freigabe- oder Quotenprüfungen. Details stehen in
+[`docs/LIVE_CENTER.md`](docs/LIVE_CENTER.md).

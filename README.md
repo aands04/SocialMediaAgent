@@ -249,3 +249,17 @@ Versionshistorie; Freigaben binden konkrete Text- und Medienversionen. Mehrere
 Ausgaben und flexible Veröffentlichungsslots werden getrennt konfiguriert. Die
 Bedienung, Abwärtskompatibilität und bewussten Grenzen beschreibt
 [`docs/MEDIA_VARIANTS_AND_RULES_PLAN.md`](docs/MEDIA_VARIANTS_AND_RULES_PLAN.md).
+
+## Live Center
+
+Das mandantengebundene **Live Center** erfasst Spielereignisse über das
+Dashboard oder über ausdrücklich freigegebene WhatsApp-Reporter. Eingehende
+Meta-Webhooks werden vor der Inhaltsverarbeitung signaturgeprüft und über die
+technische Telefonnummer-ID genau einem Verein zugeordnet. Ereignisse werden
+idempotent gespeichert, plausibilisiert und abhängig von Reporterrechten zur
+Bestätigung vorgelegt. Regeln für Dashboard, Instagram, Facebook und WhatsApp
+bleiben standardmäßig aus und respektieren Not-Aus, Kanal-, Freigabe- und
+Opt-in-Prüfungen. Einrichtung, Datenschutz, Providergrenzen und Rollout sind in
+[`docs/LIVE_CENTER.md`](docs/LIVE_CENTER.md) dokumentiert.
+Die WhatsApp-Einrichtung und der sichere Live-Versand sind in
+[`docs/WHATSAPP.md`](docs/WHATSAPP.md) beschrieben.

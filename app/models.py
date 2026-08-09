@@ -1201,6 +1201,66 @@ class WhatsAppRecipient(Base, Timestamped):
     provider_recipient_id: Mapped[str | None] = mapped_column(String(160))
 
 
+class WhatsAppAudience(Base, Timestamped):
+    """Tenant-owned WhatsApp target: official group or opt-in recipient list."""
+
+    __tablename__ = "whatsapp_audiences"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "channel_connection_id",
+            "name",
+            name="uq_whatsapp_audience_name",
+        ),
+        UniqueConstraint("id", "club_id", name="uq_whatsapp_audiences_id_club"),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "audience_type IN ('group','recipient_list')",
+            name="ck_whatsapp_audience_type",
+        ),
+        CheckConstraint(
+            "eligibility_status IN ('available','not_available','unknown','connection_error')",
+            name="ck_whatsapp_audience_eligibility",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str | None] = mapped_column(String(500))
+    audience_type: Mapped[str] = mapped_column(String(30), index=True)
+    external_group_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    eligibility_status: Mapped[str] = mapped_column(String(30), default="unknown")
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+
+class WhatsAppAudienceRecipient(Base):
+    __tablename__ = "whatsapp_audience_recipients"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["audience_id", "club_id"],
+            ["whatsapp_audiences.id", "whatsapp_audiences.club_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["recipient_id", "club_id"],
+            ["whatsapp_recipients.id", "whatsapp_recipients.club_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    audience_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    recipient_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+
+
 class WhatsAppMessageTemplate(Base, Timestamped):
     __tablename__ = "whatsapp_message_templates"
     __table_args__ = (
@@ -1302,6 +1362,361 @@ class MetaWebhookEvent(Base):
     status: Mapped[str] = mapped_column(String(30), default="received", index=True)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LiveReporter(Base, Timestamped):
+    """A tenant-owned person allowed to report events for selected teams."""
+
+    __tablename__ = "live_reporters"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_live_reporters_id_club"),
+        UniqueConstraint(
+            "club_id",
+            "channel_connection_id",
+            "normalized_phone",
+            name="uq_live_reporter_phone",
+        ),
+        ForeignKeyConstraint(
+            ["user_id", "club_id"],
+            ["users.id", "users.club_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["active_game_id", "club_id"],
+            ["games.id", "games.club_id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "user_id IS NOT NULL OR normalized_phone IS NOT NULL",
+            name="ck_live_reporter_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    user_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    channel_connection_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    normalized_phone: Mapped[str | None] = mapped_column(String(32), index=True)
+    display_name: Mapped[str] = mapped_column(String(160))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    all_teams: Mapped[bool] = mapped_column(Boolean, default=False)
+    trusted_auto_confirm: Mapped[bool] = mapped_column(Boolean, default=False)
+    may_correct: Mapped[bool] = mapped_column(Boolean, default=False)
+    allowed_event_types: Mapped[list] = mapped_column(JSON, default=list)
+    active_game_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    active_game_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LiveReporterTeam(Base):
+    __tablename__ = "live_reporter_teams"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["reporter_id", "club_id"],
+            ["live_reporters.id", "live_reporters.club_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"],
+            ["teams.id", "teams.club_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    reporter_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    team_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+
+
+class LiveGameState(Base, Timestamped):
+    """Materialized state derived from confirmed, immutable match events."""
+
+    __tablename__ = "live_game_states"
+    __table_args__ = (
+        UniqueConstraint("game_id", name="uq_live_game_state_game"),
+        UniqueConstraint("id", "club_id", name="uq_live_game_states_id_club"),
+        ForeignKeyConstraint(
+            ["game_id", "club_id"], ["games.id", "games.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="CASCADE"
+        ),
+        CheckConstraint("home_score >= 0 AND away_score >= 0", name="ck_live_score_nonnegative"),
+        CheckConstraint(
+            "phase IN ('scheduled','first_half','halftime','second_half','interrupted','finished','abandoned')",
+            name="ck_live_game_phase",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    game_id: Mapped[str] = mapped_column(String(36), index=True)
+    team_id: Mapped[str] = mapped_column(String(36), index=True)
+    phase: Mapped[str] = mapped_column(String(30), default="scheduled", index=True)
+    home_score: Mapped[int] = mapped_column(Integer, default=0)
+    away_score: Mapped[int] = mapped_column(Integer, default=0)
+    minute: Mapped[int | None] = mapped_column(Integer)
+    stoppage_minute: Mapped[int | None] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(40), default="dashboard")
+    last_event_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    last_event_sequence: Mapped[int] = mapped_column(Integer, default=0)
+    live_publishing_paused: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MatchEvent(Base, Timestamped):
+    """Neutral, append-only football event used by every input provider."""
+
+    __tablename__ = "match_events"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_match_events_id_club"),
+        UniqueConstraint("club_id", "idempotency_key", name="uq_match_events_idempotency"),
+        ForeignKeyConstraint(
+            ["game_id", "club_id"], ["games.id", "games.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["reporter_id", "club_id"],
+            ["live_reporters.id", "live_reporters.club_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["supersedes_event_id", "club_id"],
+            ["match_events.id", "match_events.club_id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "event_type IN ('kickoff','goal','opponent_goal','own_goal','penalty_scored','penalty_missed','yellow_card','second_yellow_card','red_card','substitution','halftime','second_half','fulltime','interruption','resume','abandoned','comment','score_correction','event_correction')",
+            name="ck_match_event_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending','confirmed','rejected','superseded')",
+            name="ck_match_event_status",
+        ),
+        CheckConstraint("minute IS NULL OR minute BETWEEN 0 AND 150", name="ck_match_event_minute"),
+        CheckConstraint(
+            "home_score_after IS NULL OR home_score_after >= 0",
+            name="ck_match_event_home_score",
+        ),
+        CheckConstraint(
+            "away_score_after IS NULL OR away_score_after >= 0",
+            name="ck_match_event_away_score",
+        ),
+        CheckConstraint("confidence BETWEEN 0 AND 1", name="ck_match_event_confidence"),
+        CheckConstraint("event_sequence >= 1", name="ck_match_event_sequence"),
+        CheckConstraint(
+            "team_side IS NULL OR team_side IN ('own','opponent','neutral')",
+            name="ck_match_event_team_side",
+        ),
+        UniqueConstraint(
+            "club_id", "game_id", "event_sequence", name="uq_match_event_sequence"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    game_id: Mapped[str] = mapped_column(String(36), index=True)
+    team_id: Mapped[str] = mapped_column(String(36), index=True)
+    reporter_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    channel_connection_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    provider: Mapped[str] = mapped_column(String(40), default="dashboard", index=True)
+    provider_event_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200))
+    event_sequence: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    team_side: Mapped[str | None] = mapped_column(String(20), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    minute: Mapped[int | None] = mapped_column(Integer)
+    stoppage_minute: Mapped[int | None] = mapped_column(Integer)
+    home_score_after: Mapped[int | None] = mapped_column(Integer)
+    away_score_after: Mapped[int | None] = mapped_column(Integer)
+    own_score_after: Mapped[int | None] = mapped_column(Integer)
+    opponent_score_after: Mapped[int | None] = mapped_column(Integer)
+    player_name: Mapped[str | None] = mapped_column(String(160))
+    player_id: Mapped[str | None] = mapped_column(String(36))
+    assist_name: Mapped[str | None] = mapped_column(String(160))
+    assist_player_id: Mapped[str | None] = mapped_column(String(36))
+    related_player_name: Mapped[str | None] = mapped_column(String(160))
+    card_color: Mapped[str | None] = mapped_column(String(20))
+    reason: Mapped[str | None] = mapped_column(String(250))
+    comment: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(Numeric(4, 3), default=1)
+    needs_confirmation: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    supersedes_event_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    raw_text_digest: Mapped[str | None] = mapped_column(String(64))
+    source_sender_digest: Mapped[str | None] = mapped_column(String(64))
+    sanitized_input: Mapped[str | None] = mapped_column(String(500))
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    corrected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    corrected_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class LiveEventRule(Base, Timestamped):
+    __tablename__ = "live_event_rules"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id", "team_id", "event_type", name="uq_live_event_rule_team_type"
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["whatsapp_audience_id", "club_id"],
+            ["whatsapp_audiences.id", "whatsapp_audiences.club_id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "delivery_mode IN ('off','manual','automatic')",
+            name="ck_live_event_rule_delivery_mode",
+        ),
+        CheckConstraint(
+            "audience_type IN ('dashboard','opt_in_recipients','eligible_group')",
+            name="ck_live_event_rule_audience",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    team_id: Mapped[str] = mapped_column(String(36), index=True)
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
+    delivery_mode: Mapped[str] = mapped_column(String(20), default="off")
+    audience_type: Mapped[str] = mapped_column(String(30), default="dashboard")
+    whatsapp_audience_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    channel_types: Mapped[list] = mapped_column(JSON, default=lambda: ["dashboard"])
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    require_confirmation: Mapped[bool] = mapped_column(Boolean, default=True)
+    settings: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class LiveEventDelivery(Base, Timestamped):
+    __tablename__ = "live_event_deliveries"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_live_event_deliveries_id_club"),
+        UniqueConstraint("club_id", "idempotency_key", name="uq_live_delivery_idempotency"),
+        ForeignKeyConstraint(
+            ["event_id", "club_id"],
+            ["match_events.id", "match_events.club_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["whatsapp_audience_id", "club_id"],
+            ["whatsapp_audiences.id", "whatsapp_audiences.club_id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "channel_type IN ('dashboard','instagram','facebook','whatsapp')",
+            name="ck_live_delivery_channel",
+        ),
+        CheckConstraint(
+            "status IN ('awaiting_approval','queued','processing','sent','delivered','failed','cancelled','blocked')",
+            name="ck_live_delivery_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    event_id: Mapped[str] = mapped_column(String(36), index=True)
+    rule_id: Mapped[str | None] = mapped_column(
+        ForeignKey("live_event_rules.id", ondelete="SET NULL"), index=True
+    )
+    channel_type: Mapped[str] = mapped_column(String(20), index=True)
+    channel_connection_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    whatsapp_audience_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    publication_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("publication_jobs.id", ondelete="SET NULL"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="awaiting_approval", index=True)
+    target: Mapped[str | None] = mapped_column(String(200))
+    message_snapshot: Mapped[str | None] = mapped_column(Text)
+    platform_id: Mapped[str | None] = mapped_column(String(200))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    idempotency_key: Mapped[str] = mapped_column(String(220))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LiveDeliveryAttempt(Base, Timestamped):
+    """One idempotent external send for a live-event delivery.
+
+    A recipient-list delivery can create one attempt per opted-in recipient.  A
+    group delivery uses a null recipient and the immutable provider group ID
+    stored on the audience.  Provider payloads and access tokens are never
+    persisted here.
+    """
+
+    __tablename__ = "live_delivery_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id", "idempotency_key", name="uq_live_delivery_attempt_idempotency"
+        ),
+        ForeignKeyConstraint(
+            ["delivery_id", "club_id"],
+            ["live_event_deliveries.id", "live_event_deliveries.club_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["recipient_id", "club_id"],
+            ["whatsapp_recipients.id", "whatsapp_recipients.club_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["template_id", "club_id"],
+            ["whatsapp_message_templates.id", "whatsapp_message_templates.club_id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('queued','processing','sent','delivered','read','failed','uncertain','cancelled')",
+            name="ck_live_delivery_attempt_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    delivery_id: Mapped[str] = mapped_column(String(36), index=True)
+    recipient_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    template_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    platform_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    error_category: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    sanitized_response: Mapped[dict] = mapped_column(JSON, default=dict)
+    idempotency_key: Mapped[str] = mapped_column(String(240))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class InstagramOAuthState(Base):
