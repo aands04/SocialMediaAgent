@@ -472,6 +472,41 @@ def test_ambiguous_openai_timeout_stops_after_one_automatic_retry(
     assert second.active_key is None
 
 
+def test_legacy_job_with_exhausted_budget_does_not_claim_an_automatic_retry(
+    db, monkeypatch, tmp_path
+):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    job.attempts = 8
+    db.commit()
+    monkeypatch.setattr(generation, "build_renderer", lambda settings: object())
+    monkeypatch.setattr(generation, "build_text_generator", lambda settings: object())
+    monkeypatch.setattr(
+        generation,
+        "create_post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ConnectionError("peer closed connection with Error code: 520")
+        ),
+    )
+
+    claimed = generation.claim_next(db, "worker-legacy")
+    result = generation.process_generation_job(
+        db,
+        claimed,
+        Settings(
+            text_generator_mode="openai",
+            openai_api_key="test",
+            generated_root=tmp_path,
+            media_root=tmp_path,
+        ),
+    )
+
+    assert result.status == GenerationJobStatus.MANUAL_REVIEW_REQUIRED
+    assert result.attempts == 9
+    assert "kein weiterer automatischer Wiederholungsversuch" in result.error_message
+    assert "auch beim begrenzten Wiederholungsversuch" not in result.error_message
+
+
 def test_ambiguous_openai_timeout_does_not_retry_after_usable_output(
     db, monkeypatch, tmp_path
 ):
@@ -526,10 +561,33 @@ def test_cancel_queued_job_and_manual_retry(db):
     generation.request_cancel(db, job)
     assert job.status == GenerationJobStatus.CANCELLED
     job.status = GenerationJobStatus.FAILED
+    job.attempts = 9
     db.commit()
-    generation.retry_job(db, job)
-    assert job.status == GenerationJobStatus.QUEUED
-    assert job.active_key == f"create:{game.id}:announcement"
+    retry = generation.retry_job(db, job, user)
+    assert retry.id != job.id
+    assert retry.status == GenerationJobStatus.QUEUED
+    assert retry.attempts == 0
+    assert retry.active_key == f"create:{game.id}:announcement"
+    assert retry.parameters["manual_retry_of_job_id"] == job.id
+    assert ":manual-retry:" in retry.idempotency_key
+    db.refresh(job)
+    assert job.status == GenerationJobStatus.FAILED
+    assert job.attempts == 9
+    assert job.active_key is None
+
+
+def test_manual_retry_is_blocked_after_usable_output(db):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    job.status = GenerationJobStatus.MANUAL_REVIEW_REQUIRED
+    job.completed_outputs = 1
+    job.active_key = None
+    db.commit()
+
+    with pytest.raises(ValueError, match="verwendbare Ausgabe"):
+        generation.retry_job(db, job, user)
+
+    assert db.scalar(select(GenerationJob).where(GenerationJob.id != job.id)) is None
 
 
 def test_worker_stops_when_club_is_suspended_after_claim(db, monkeypatch, tmp_path):

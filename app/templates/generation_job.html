@@ -25,7 +25,8 @@
   <p><strong>Status:</strong> <span class="badge">{{status_labels.get(item.status.value, item.status.value)}}</span></p>
   <p><strong>Phase:</strong> {{item.phase}}</p>
   <p><strong>Fortschritt:</strong> {{item.progress}} % · {{item.completed_outputs}} von {{item.planned_outputs}} Ausgaben</p>
-  <p><strong>Versuch:</strong> {{item.attempts}} von {{item.max_attempts}}</p>
+  <p><strong>Technische Ausführungen dieses Auftrags:</strong> {{item.attempts}}</p>
+  {% if item.parameters.get('manual_retry_of_job_id') %}<p><strong>Bewusst neu gestartet aus:</strong> <a href="/generation-jobs/{{item.parameters.get('manual_retry_of_job_id')}}">vorherigem Auftrag</a></p>{% endif %}
   <p><strong>Start:</strong> {{item.started_at|berlin}} · <strong>Geändert:</strong> {{item.updated_at|berlin}}</p>
   {% if item.error_message %}<div class="alert"><strong>{{error_labels.get(item.error_category, 'Hinweis')}}:</strong> {{item.error_message}}{% if item.status.value == 'retry_wait' %}<br><strong>Nächster frühester Versuch:</strong> {{item.available_at|berlin}}{% endif %}</div>{% endif %}
   {% if item.result_post_id %}<p><a class="button" href="/posts/{{item.result_post_id}}">Fertigen Beitrag öffnen</a></p>{% endif %}
@@ -35,6 +36,6 @@
 {% endif %}
 {% if item.status.value in ['failed','manual_review_required'] %}
 {% if item.status.value=='manual_review_required' %}<form method="post" action="/generation-jobs/{{item.id}}/review"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Prüfvermerk<input name="note" required></label><button>Manuelle Prüfung dokumentieren</button></form>{% endif %}
-<form method="post" action="/generation-jobs/{{item.id}}/retry"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Bewusst erneut anstoßen</button></form>
+<form method="post" action="/generation-jobs/{{item.id}}/retry"><input type="hidden" name="csrf_token" value="{{csrf}}"><button onclick="return confirm('Es wird ein neuer KI-Auftrag mit eigenem Wiederholungsbudget gestartet. Wirklich fortfahren?')">Neuen Auftrag bewusst starten</button></form>
 {% endif %}
 {% endblock %}
