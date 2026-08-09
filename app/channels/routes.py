@@ -140,7 +140,7 @@ def channel_setup(
             "csrf": csrf_token(request),
             "channel_type": channel_type,
             "channel_label": CHANNEL_LABELS[channel_type],
-            "meta_app_id": settings.meta_facebook_app_id or settings.meta_app_id,
+            "meta_app_id": settings.meta_facebook_app_id,
             "whatsapp_configuration_id": settings.meta_whatsapp_configuration_id,
             "meta_graph_version": settings.meta_graph_version,
             "facebook_available": settings.facebook_channel_enabled,

@@ -117,6 +117,8 @@ Mindestens relevant:
 
 ```env
 META_GRAPH_VERSION=v23.0
+META_FACEBOOK_APP_ID=ALLGEMEINE_META_APP_ID
+META_FACEBOOK_APP_SECRET_FILE_HOST=/etc/social-media-agent/production-secrets/meta_facebook_app_secret
 META_FACEBOOK_OAUTH_REDIRECT_URI=https://meta.example.org/public/meta/channels/oauth/callback
 META_WHATSAPP_CONFIGURATION_ID=
 FACEBOOK_CHANNEL_ENABLED=true
@@ -132,10 +134,18 @@ dürfen nicht als Freigabeworkflow für einzelne Vereine verwendet werden. OAuth
 WhatsApp Configuration ID, Webhook und Secrets müssen einmalig auf Plattformebene technisch
 bereitgestellt sein.
 
-`META_APP_ID`, `META_APP_SECRET`, `META_TOKEN_ENCRYPTION_KEY` und
-`META_WEBHOOK_VERIFY_TOKEN` werden ausschließlich als Secrets injiziert. Eigene optionale
-Facebook-App-Werte (`META_FACEBOOK_APP_ID`, `META_FACEBOOK_APP_SECRET`) sind möglich, wenn eine
-separate Meta-App verwendet wird.
+Die vorhandenen Werte `META_APP_ID` und `META_APP_SECRET` gehören ausschließlich zur
+Instagram-Integration. Facebook und WhatsApp verwenden zwingend die getrennte allgemeine
+Meta-App-Konfiguration `META_FACEBOOK_APP_ID` und `META_FACEBOOK_APP_SECRET`. Es gibt bewusst
+keinen stillen Rückfall auf die Instagram-App: Eine falsche App-Zuordnung würde das offizielle
+Facebook- beziehungsweise WhatsApp-Onboarding mit „Ungültige App-ID“ abbrechen.
+
+Die allgemeine Meta-App-ID darf als Konfigurationswert in der `.env` stehen. Der dazugehörige
+App-Geheimcode wird im Compose-Betrieb ausschließlich über
+`META_FACEBOOK_APP_SECRET_FILE_HOST` read-only nach
+`/run/secrets/meta_facebook_app_secret` eingebunden. Er darf weder in `.env` noch in Git,
+Browserausgaben, Logs oder Auditdetails erscheinen. `META_TOKEN_ENCRYPTION_KEY` und
+`META_WEBHOOK_VERIFY_TOKEN` werden ebenfalls ausschließlich als Secrets injiziert.
 
 Das Webhook-Verifizierungssecret wird im Compose-Betrieb über
 `META_WEBHOOK_VERIFY_TOKEN_FILE_HOST` read-only nach

@@ -52,6 +52,10 @@ services:
         target: /run/secrets/meta_webhook_verify_token
         read_only: true
       - type: bind
+        source: ${META_FACEBOOK_APP_SECRET_FILE_HOST:-/dev/null}
+        target: /run/secrets/meta_facebook_app_secret
+        read_only: true
+      - type: bind
         source: ${MEDIA_HOST_ROOT:?MEDIA_HOST_ROOT fehlt}
         target: /app/external-media
         read_only: true
