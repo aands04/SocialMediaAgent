@@ -6197,10 +6197,13 @@ def retry_generation_job(
         raise HTTPException(404)
     require(current, db, "generate", item.team_id)
     try:
-        retry_job(db, item)
+        retry = retry_job(db, item, current)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return redirect(f"/generation-jobs/{item.id}", "Auftrag wurde bewusst erneut eingereiht")
+    return redirect(
+        f"/generation-jobs/{retry.id}",
+        "Ein neuer Auftrag mit frischem Wiederholungsbudget wurde eingereiht",
+    )
 
 
 @router.post("/generation-jobs/{job_id}/review")

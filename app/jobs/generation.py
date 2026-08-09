@@ -1094,17 +1094,23 @@ def _is_retryable_external_failure(
     )
 
 
-def _has_usable_job_output(db: Session, job: GenerationJob) -> bool:
+def _has_completed_job_output(db: Session, job: GenerationJob) -> bool:
     if int(job.completed_outputs or 0) > 0:
         return True
-    if db.scalar(
-        select(UsageLedgerEntry.id)
-        .where(
-            UsageLedgerEntry.generation_job_id == job.id,
-            UsageLedgerEntry.status.in_(USABLE_USAGE_STATUSES),
+    return bool(
+        db.scalar(
+            select(UsageLedgerEntry.id)
+            .where(
+                UsageLedgerEntry.generation_job_id == job.id,
+                UsageLedgerEntry.status.in_(USABLE_USAGE_STATUSES),
+            )
+            .limit(1)
         )
-        .limit(1)
-    ):
+    )
+
+
+def _has_usable_job_output(db: Session, job: GenerationJob) -> bool:
+    if _has_completed_job_output(db, job):
         return True
     post_id = job.result_post_id or job.post_id
     post = db.get(Post, post_id) if post_id else None
@@ -1134,6 +1140,13 @@ def _discard_empty_partial_post(db: Session, job: GenerationJob) -> None:
 
 def _schedule_external_retry(db: Session, job: GenerationJob) -> None:
     retry_at = _now() + timedelta(seconds=EXTERNAL_RETRY_DELAY_SECONDS)
+    parameters = dict(job.parameters or {})
+    parameters["external_retry"] = {
+        "scheduled_at": _now().isoformat(),
+        "source_attempt": int(job.attempts or 0),
+        "max_total_attempts": EXTERNAL_RETRY_MAX_TOTAL_ATTEMPTS,
+    }
+    job.parameters = parameters
     job.status = GenerationJobStatus.RETRY_WAIT
     job.available_at = retry_at
     job.error_category = "external_service_temporarily_unavailable"
@@ -1571,11 +1584,22 @@ def process_generation_job(
                     "Bitte prüfen Sie den unvollständigen Beitrag."
                 )
             elif retryable_external:
-                message = (
-                    "Der KI-Dienst hat die Verbindung auch beim begrenzten "
-                    "Wiederholungsversuch unterbrochen. Bitte versuchen Sie den Auftrag "
-                    "später bewusst erneut."
-                )
+                retry_metadata = (job.parameters or {}).get("external_retry") or {}
+                retry_was_executed = bool(retry_metadata) and int(
+                    retry_metadata.get("source_attempt") or 0
+                ) < int(job.attempts or 0)
+                if retry_was_executed:
+                    message = (
+                        "Der KI-Dienst hat die Verbindung auch beim begrenzten "
+                        "Wiederholungsversuch unterbrochen. Bitte starten Sie später "
+                        "bewusst einen neuen Auftrag."
+                    )
+                else:
+                    message = (
+                        "Für diesen Auftrag war kein weiterer automatischer "
+                        "Wiederholungsversuch verfügbar. Starten Sie bei Bedarf bewusst "
+                        "einen neuen Auftrag mit frischem Wiederholungsbudget."
+                    )
             else:
                 message = str(exc)[:4000]
             _finish(db, job, status, category=category, message=message)
@@ -1607,7 +1631,7 @@ def request_cancel(db: Session, job: GenerationJob) -> None:
     db.commit()
 
 
-def retry_job(db: Session, job: GenerationJob) -> None:
+def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
     if job.status not in {
         GenerationJobStatus.FAILED,
         GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
@@ -1615,39 +1639,85 @@ def retry_job(db: Session, job: GenerationJob) -> None:
         raise ValueError(
             "Nur fehlgeschlagene oder unklare Aufträge können erneut gestartet werden."
         )
-    if job.job_type == GenerationJobType.CREATE_POST and job.result_post_id:
+    usable_output = (
+        _has_usable_job_output(db, job)
+        if job.job_type == GenerationJobType.CREATE_POST
+        else _has_completed_job_output(db, job)
+    )
+    if usable_output:
         raise ValueError(
-            "Es existiert bereits ein unvollständiger Teilbeitrag. Prüfen Sie ihn "
-            "manuell; eine kostenpflichtige Wiederholung wird nicht automatisch gestartet."
+            "Es wurde bereits mindestens eine verwendbare Ausgabe gespeichert. Prüfen Sie "
+            "den Teilbeitrag; ein neuer kostenpflichtiger Auftrag wird nicht gestartet."
         )
     game = db.get(Game, job.game_id)
     team = db.get(Team, job.team_id)
-    if game and team:
-        job.parameters = {
-            **(job.parameters or {}),
-            "logos": frozen_logo_set(db, game, team),
-        }
-    active_key = (
-        f"create:{job.game_id}:{job.post_type}"
-        if job.job_type == GenerationJobType.CREATE_POST
-        else f"rerender:{job.post_id}"
-    )
+    if not game or not team:
+        raise ValueError("Spiel oder Mannschaft ist nicht mehr vorhanden.")
+    logos = frozen_logo_set(db, game, team)
+    parameters = dict(job.parameters or {})
+    parameters.pop("external_retry", None)
+    root_key = str(parameters.get("manual_retry_root_key") or job.idempotency_key).split(
+        ":manual-retry:", 1
+    )[0]
+    parameters["manual_retry_root_key"] = root_key
+    parameters["manual_retry_of_job_id"] = job.id
+    parameters["manual_retry_requested_at"] = _now().isoformat()
+    parameters["logos"] = logos
+    if job.job_type == GenerationJobType.CREATE_POST:
+        active_key = (
+            root_key
+            if parameters.get("matchday_bundle_key")
+            else f"create:{job.game_id}:{job.post_type}"
+        )
+    else:
+        if not job.post_id:
+            raise ValueError("Der zu bearbeitende Beitrag ist nicht mehr vorhanden.")
+        active_key = f"rerender:{job.post_id}"
     competing = db.scalar(
         select(GenerationJob).where(
+            GenerationJob.club_id == job.club_id,
             GenerationJob.active_key == active_key,
             GenerationJob.id != job.id,
         )
     )
     if competing:
         raise ValueError("Für diesen Inhalt läuft bereits ein anderer Auftrag.")
-    job.status = GenerationJobStatus.QUEUED
-    job.phase = "preparing"
-    job.progress = 0
-    job.cancel_requested = False
-    job.error_category = None
-    job.error_message = None
-    job.completed_at = None
-    job.available_at = _now()
-    job.active_key = active_key
-    _audit(db, job, "generation.manual_retry")
+    retry_marker = hashlib.sha256(
+        f"{job.id}:{user.id}:{_now().isoformat()}".encode("utf-8")
+    ).hexdigest()[:20]
+    retry = GenerationJob(
+        club_id=job.club_id,
+        job_type=job.job_type,
+        game_id=job.game_id,
+        team_id=job.team_id,
+        post_id=job.post_id,
+        result_post_id=None,
+        post_type=job.post_type,
+        requested_by=user.id,
+        status=GenerationJobStatus.QUEUED,
+        phase="preparing",
+        progress=0,
+        planned_outputs=job.planned_outputs,
+        completed_outputs=0,
+        attempts=0,
+        max_attempts=job.max_attempts,
+        available_at=_now(),
+        cancel_requested=False,
+        idempotency_key=f"{root_key}:manual-retry:{retry_marker}",
+        active_key=active_key,
+        parameters=parameters,
+    )
+    db.add(retry)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValueError("Für diesen Inhalt wurde bereits ein neuer Auftrag gestartet.") from exc
+    _audit(
+        db,
+        retry,
+        "generation.manual_retry_queued",
+        {"source_job_id": job.id, "source_attempts": int(job.attempts or 0)},
+    )
     db.commit()
+    return retry
