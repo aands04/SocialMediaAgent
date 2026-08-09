@@ -182,8 +182,9 @@ def test_prompt_rejects_unknown_placeholders_and_resolves_latest_version(db):
 
 
 class FakeImageProvider(ImageProvider):
-    def __init__(self):
+    def __init__(self, output_format="PNG"):
         self.calls = []
+        self.output_format = output_format
 
     def generate(self, prompt, references, size, model, quality):
         self.calls.append(
@@ -198,7 +199,7 @@ class FakeImageProvider(ImageProvider):
         width, height = map(int, size.split("x"))
         image = Image.effect_noise((width, height), 90).convert("RGB")
         data = BytesIO()
-        image.save(data, "PNG")
+        image.save(data, self.output_format)
         return data.getvalue()
 
 
@@ -213,7 +214,7 @@ def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
     Image.new("RGB", (600, 900), "blue").save(player)
     Image.new("RGBA", (200, 200), (255, 255, 255, 255)).save(team_logo)
     Image.new("RGBA", (180, 210), (20, 180, 60, 255)).save(opponent_logo)
-    provider = FakeImageProvider()
+    provider = FakeImageProvider("WEBP")
     renderer = AIImageRenderer(tmp_path / "out", media, uploads, provider)
     prompt = builtin_prompt(
         "image",
@@ -239,7 +240,9 @@ def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
             "image_prompt": prompt,
         },
     )
-    assert Image.open(output).size == (1080, 1350)
+    with Image.open(output) as normalized:
+        assert normalized.size == (1080, 1350)
+        assert normalized.format == "PNG"
     assert provider.calls[0]["size"] == "1088x1360"
     assert provider.calls[0]["model"] == "gpt-image-2"
     assert "Referenzbild 3" in provider.calls[0]["prompt"]

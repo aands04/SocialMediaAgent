@@ -10,6 +10,8 @@ from PIL import Image, ImageOps
 from app.rendering.service import Renderer, RenderValidationError
 
 LOGO_REFERENCE_VERSION = "verified-media-ai-references-v2"
+OPENAI_IMAGE_OUTPUT_FORMAT = "webp"
+OPENAI_IMAGE_OUTPUT_COMPRESSION = 60
 
 REFERENCE_IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
@@ -66,7 +68,8 @@ class OpenAIImageProvider(ImageProvider):
                         "prompt": prompt,
                         "size": size,
                         "quality": quality,
-                        "output_format": "png",
+                        "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
+                        "output_compression": OPENAI_IMAGE_OUTPUT_COMPRESSION,
                     }
                     if not model.startswith("gpt-image-2"):
                         edit_options["input_fidelity"] = "high"
@@ -77,11 +80,12 @@ class OpenAIImageProvider(ImageProvider):
                     prompt=prompt,
                     size=size,
                     quality=quality,
-                    output_format="png",
+                    output_format=OPENAI_IMAGE_OUTPUT_FORMAT,
+                    output_compression=OPENAI_IMAGE_OUTPUT_COMPRESSION,
                 )
             encoded = response.data[0].b64_json
             if not encoded:
-                raise ImageGenerationError("Bild-API hat keine eingebetteten PNG-Daten geliefert")
+                raise ImageGenerationError("Bild-API hat keine eingebetteten Bilddaten geliefert")
             return base64.b64decode(encoded, validate=True)
         except ImageGenerationError:
             raise

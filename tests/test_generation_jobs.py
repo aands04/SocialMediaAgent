@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select
 
 from app.config import Settings
@@ -16,6 +17,8 @@ from app.models import (
     PostStatus,
     Role,
     Team,
+    UsageLedgerEntry,
+    UsageStatus,
     User,
 )
 from app.textgen.service import GeneratedText
@@ -197,6 +200,62 @@ def test_progress_text_generator_records_exact_provider_prompt(db):
     assert dispatch.prompt_name == "test-prompt"
     assert dispatch.prompt_version == 7
     assert dispatch.status == "completed"
+    usage = db.query(UsageLedgerEntry).one()
+    assert usage.idempotency_key == f"generation:{job.id}:attempt:1:text:1"
+
+
+def test_known_technical_retry_gets_a_new_billable_usage_reservation(db):
+    _, _team, _game, user = graph(db)
+    job = generation.enqueue_create(
+        db,
+        db.query(Game).one(),
+        db.query(Team).one(),
+        user,
+        "announcement",
+    )[0]
+
+    class Prompt:
+        rendered = "TESTPROMPT"
+        name = "test-prompt"
+        version = 1
+        model = "test-text-model"
+        template_id = None
+
+    class TextProvider:
+        is_ai = True
+
+        def __init__(self, fail):
+            self.fail = fail
+
+        def prepare_generate(self, data):
+            return data["text_prompt"].rendered, "test-prompt:v1", "test-text-model"
+
+        def generate(self, data):
+            if self.fail:
+                raise ConnectionError("peer closed connection")
+            return GeneratedText("Ergebnistext", "test-text-model", "test-prompt:v1")
+
+    job.attempts = 1
+    with pytest.raises(ConnectionError):
+        generation._ProgressTextGenerator(TextProvider(True), db, job).generate(
+            {"text_prompt": Prompt()}
+        )
+    generation._finalize_job_usage(db, job, None)
+    db.commit()
+
+    job.attempts = 2
+    result = generation._ProgressTextGenerator(TextProvider(False), db, job).generate(
+        {"text_prompt": Prompt()}
+    )
+    entries = db.query(UsageLedgerEntry).order_by(UsageLedgerEntry.created_at).all()
+
+    assert result.text == "Ergebnistext"
+    assert [entry.status for entry in entries] == [
+        UsageStatus.FAILED_TECHNICAL,
+        UsageStatus.COMPLETED_BILLABLE,
+    ]
+    assert entries[0].idempotency_key.endswith(":attempt:1:text:1")
+    assert entries[1].idempotency_key.endswith(":attempt:2:text:1")
 
 
 def test_grouped_dashboard_click_enqueues_one_coordinator_job(db):
@@ -345,7 +404,7 @@ def test_progress_renderer_records_exact_image_provider_prompt(db, tmp_path):
     assert dispatch.status == "completed"
 
 
-def test_ambiguous_openai_timeout_requires_manual_review(db, monkeypatch, tmp_path):
+def test_ambiguous_openai_timeout_schedules_one_delayed_retry(db, monkeypatch, tmp_path):
     _, team, game, user = graph(db)
     job, _ = generation.enqueue_create(db, game, team, user, "announcement")
     claimed = generation.claim_next(db, "worker-a")
@@ -368,8 +427,83 @@ def test_ambiguous_openai_timeout_requires_manual_review(db, monkeypatch, tmp_pa
             media_root=tmp_path,
         ),
     )
+    assert result.status == GenerationJobStatus.RETRY_WAIT
+    assert result.error_category == "external_service_temporarily_unavailable"
+    assert "frühestens in 60 Sekunden" in result.error_message
+    assert "upstream timed out" not in result.error_message
+    assert result.available_at >= datetime.now(timezone.utc) + timedelta(seconds=58)
+    assert result.active_key == f"create:{game.id}:announcement"
+
+
+def test_ambiguous_openai_timeout_stops_after_one_automatic_retry(
+    db, monkeypatch, tmp_path
+):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    monkeypatch.setattr(generation, "build_renderer", lambda settings: object())
+    monkeypatch.setattr(generation, "build_text_generator", lambda settings: object())
+    monkeypatch.setattr(
+        generation,
+        "create_post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ConnectionError("peer closed connection with Error code: 520")
+        ),
+    )
+    settings = Settings(
+        text_generator_mode="openai",
+        openai_api_key="test",
+        generated_root=tmp_path,
+        media_root=tmp_path,
+    )
+
+    claimed = generation.claim_next(db, "worker-a")
+    first = generation.process_generation_job(db, claimed, settings)
+    assert first.status == GenerationJobStatus.RETRY_WAIT
+    first.available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db.commit()
+
+    claimed = generation.claim_next(db, "worker-b")
+    second = generation.process_generation_job(db, claimed, settings)
+    assert second.status == GenerationJobStatus.MANUAL_REVIEW_REQUIRED
+    assert second.error_category == "ambiguous_external_response"
+    assert "begrenzten Wiederholungsversuch" in second.error_message
+    assert "Error code: 520" not in second.error_message
+    assert second.attempts == 2
+    assert second.active_key is None
+
+
+def test_ambiguous_openai_timeout_does_not_retry_after_usable_output(
+    db, monkeypatch, tmp_path
+):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    claimed = generation.claim_next(db, "worker-a")
+    job = db.get(GenerationJob, claimed)
+    job.completed_outputs = 1
+    db.commit()
+    monkeypatch.setattr(generation, "build_renderer", lambda settings: object())
+    monkeypatch.setattr(generation, "build_text_generator", lambda settings: object())
+    monkeypatch.setattr(
+        generation,
+        "create_post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ConnectionError("peer closed connection with Error code: 520")
+        ),
+    )
+
+    result = generation.process_generation_job(
+        db,
+        claimed,
+        Settings(
+            text_generator_mode="openai",
+            openai_api_key="test",
+            generated_root=tmp_path,
+            media_root=tmp_path,
+        ),
+    )
+
     assert result.status == GenerationJobStatus.MANUAL_REVIEW_REQUIRED
-    assert result.error_category == "ambiguous_external_response"
+    assert "doppelter Kosten" in result.error_message
     assert result.active_key is None
 
 

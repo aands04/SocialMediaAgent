@@ -63,6 +63,13 @@ TERMINAL_STATUSES = {
 }
 SAFE_RETRY_PHASES = {"preparing", "validating", "saving"}
 LEASE_SECONDS = 300
+EXTERNAL_RETRY_DELAY_SECONDS = 60
+EXTERNAL_RETRY_MAX_TOTAL_ATTEMPTS = 2
+USABLE_USAGE_STATUSES = {
+    UsageStatus.COMPLETED_BILLABLE,
+    UsageStatus.COMPLETED_NOT_BILLABLE,
+    UsageStatus.REJECTED_BY_USER,
+}
 
 
 class GenerationCancelled(RuntimeError):
@@ -194,7 +201,10 @@ class _ProgressTextGenerator:
             club_id=self.job.club_id,
             generation_type="text",
             quantity=1,
-            idempotency_key=f"generation:{self.job.id}:text:{self._calls}",
+            idempotency_key=(
+                f"generation:{self.job.id}:attempt:{max(1, int(self.job.attempts or 1))}:"
+                f"text:{self._calls}"
+            ),
             provider="openai",
             model=model,
             user_id=self.job.requested_by,
@@ -298,7 +308,10 @@ class _ProgressRenderer:
             club_id=self.job.club_id,
             generation_type="image",
             quantity=1,
-            idempotency_key=f"generation:{self.job.id}:image:{self._calls}",
+            idempotency_key=(
+                f"generation:{self.job.id}:attempt:{max(1, int(self.job.attempts or 1))}:"
+                f"image:{self._calls}"
+            ),
             provider="openai",
             model=model,
             user_id=self.job.requested_by,
@@ -1038,6 +1051,113 @@ def _finalize_job_usage(db: Session, job: GenerationJob, post_id: str | None) ->
             )
 
 
+def _exception_text(exc: Exception) -> str:
+    parts: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(parts) < 6:
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}".lower())
+        current = current.__cause__ or current.__context__
+    return " | ".join(parts)
+
+
+def _is_retryable_external_failure(
+    exc: Exception,
+    job: GenerationJob,
+    settings: Settings,
+) -> bool:
+    if not job.phase.startswith("generating_"):
+        return False
+    if not (
+        settings.text_generator_mode == "openai"
+        or settings.image_generator_mode == "openai"
+    ):
+        return False
+    text = _exception_text(exc)
+    return any(
+        marker in text
+        for marker in (
+            "timeout",
+            "timed out",
+            "connection",
+            "remoteprotocolerror",
+            "incomplete chunked read",
+            "incomplete message body",
+            "peer closed",
+            "error code: 500",
+            "error code: 502",
+            "error code: 503",
+            "error code: 504",
+            "error code: 520",
+        )
+    )
+
+
+def _has_usable_job_output(db: Session, job: GenerationJob) -> bool:
+    if int(job.completed_outputs or 0) > 0:
+        return True
+    if db.scalar(
+        select(UsageLedgerEntry.id)
+        .where(
+            UsageLedgerEntry.generation_job_id == job.id,
+            UsageLedgerEntry.status.in_(USABLE_USAGE_STATUSES),
+        )
+        .limit(1)
+    ):
+        return True
+    post_id = job.result_post_id or job.post_id
+    post = db.get(Post, post_id) if post_id else None
+    return bool(post and ((post.text or "").strip() or post.feed_path))
+
+
+def _discard_empty_partial_post(db: Session, job: GenerationJob) -> None:
+    """Remove only the empty shell committed with the provider reservation.
+
+    The player image remains reserved for the same game so the delayed retry
+    deterministically uses the identical verified reference image.
+    """
+    post_id = job.result_post_id or job.post_id
+    post = db.get(Post, post_id) if post_id else None
+    if not post or (post.text or "").strip() or post.feed_path:
+        return
+    has_publication = db.scalar(
+        select(PublicationJob.id).where(PublicationJob.post_id == post.id).limit(1)
+    )
+    if has_publication:
+        return
+    job.post_id = None
+    job.result_post_id = None
+    db.delete(post)
+    db.flush()
+
+
+def _schedule_external_retry(db: Session, job: GenerationJob) -> None:
+    retry_at = _now() + timedelta(seconds=EXTERNAL_RETRY_DELAY_SECONDS)
+    job.status = GenerationJobStatus.RETRY_WAIT
+    job.available_at = retry_at
+    job.error_category = "external_service_temporarily_unavailable"
+    job.error_message = (
+        "Der KI-Dienst hat die Verbindung während der Übertragung unterbrochen. "
+        "Da noch keine verwendbare Ausgabe gespeichert wurde, wird der Auftrag "
+        "automatisch frühestens in 60 Sekunden einmal erneut versucht."
+    )
+    job.locked_by = None
+    job.locked_at = None
+    job.lease_expires_at = None
+    _audit(
+        db,
+        job,
+        "generation.retry_scheduled",
+        {
+            "category": job.error_category,
+            "delay_seconds": EXTERNAL_RETRY_DELAY_SECONDS,
+            "attempt": job.attempts,
+        },
+    )
+    db.commit()
+
+
 def _check_cancel(db: Session, job: GenerationJob) -> None:
     db.refresh(job, attribute_names=["cancel_requested"])
     if job.cancel_requested:
@@ -1415,33 +1535,56 @@ def process_generation_job(
         db.rollback()
         job = db.get(GenerationJob, job_id)
         _capture_partial_post(db, job)
+        retryable_external = _is_retryable_external_failure(exc, job, settings)
+        usable_output = _has_usable_job_output(db, job)
         _finalize_job_usage(db, job, job.result_post_id)
-        text = str(exc)
-        ambiguous = (
-            job.phase.startswith("generating_")
-            and (
-                settings.text_generator_mode == "openai"
-                or settings.image_generator_mode == "openai"
+        can_retry_external = (
+            retryable_external
+            and not usable_output
+            and job.attempts < min(job.max_attempts, EXTERNAL_RETRY_MAX_TOTAL_ATTEMPTS)
+        )
+        if can_retry_external:
+            _discard_empty_partial_post(db, job)
+            _schedule_external_retry(db, job)
+            status = GenerationJobStatus.RETRY_WAIT
+            category = job.error_category
+        else:
+            status = (
+                GenerationJobStatus.MANUAL_REVIEW_REQUIRED
+                if retryable_external
+                else GenerationJobStatus.FAILED
             )
-            and any(
-                marker in text.lower()
-                for marker in ("timeout", "timed out", "connection", "unknown", "closed")
+            category = (
+                "ambiguous_external_response"
+                if retryable_external
+                else (
+                    "permission_changed"
+                    if isinstance(exc, PermissionError)
+                    else "generation_error"
+                )
             )
-        )
-        status = (
-            GenerationJobStatus.MANUAL_REVIEW_REQUIRED if ambiguous else GenerationJobStatus.FAILED
-        )
-        category = (
-            "ambiguous_external_response"
-            if ambiguous
-            else ("permission_changed" if isinstance(exc, PermissionError) else "generation_error")
-        )
-        _finish(db, job, status, category=category, message=text[:4000])
+            if retryable_external and usable_output:
+                message = (
+                    "Der KI-Dienst hat die Verbindung unterbrochen, nachdem bereits "
+                    "mindestens eine verwendbare Ausgabe gespeichert wurde. Zur Vermeidung "
+                    "doppelter Kosten wurde keine automatische Wiederholung gestartet. "
+                    "Bitte prüfen Sie den unvollständigen Beitrag."
+                )
+            elif retryable_external:
+                message = (
+                    "Der KI-Dienst hat die Verbindung auch beim begrenzten "
+                    "Wiederholungsversuch unterbrochen. Bitte versuchen Sie den Auftrag "
+                    "später bewusst erneut."
+                )
+            else:
+                message = str(exc)[:4000]
+            _finish(db, job, status, category=category, message=message)
         log.warning(
             "generation_job_failed",
             job_id=job.id,
             status=status.value,
             category=category,
+            exception_type=type(exc).__name__,
         )
     return db.get(GenerationJob, job_id)
 

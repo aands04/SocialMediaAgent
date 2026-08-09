@@ -25,7 +25,7 @@ def provider_with_mock_client():
     return provider
 
 
-def test_gpt_image_2_generate_uses_embedded_png_without_response_format():
+def test_gpt_image_2_generate_requests_compressed_webp_without_response_format():
     provider = provider_with_mock_client()
     provider.client.images.generate.return_value = image_response()
 
@@ -39,7 +39,8 @@ def test_gpt_image_2_generate_uses_embedded_png_without_response_format():
 
     assert result == PNG_BYTES
     options = provider.client.images.generate.call_args.kwargs
-    assert options["output_format"] == "png"
+    assert options["output_format"] == "webp"
+    assert options["output_compression"] == 60
     assert "response_format" not in options
     assert "input_fidelity" not in options
 
@@ -65,7 +66,8 @@ def test_gpt_image_2_edit_omits_unsupported_parameters(tmp_path):
 
     assert result == PNG_BYTES
     options = provider.client.images.edit.call_args.kwargs
-    assert options["output_format"] == "png"
+    assert options["output_format"] == "webp"
+    assert options["output_compression"] == 60
     assert "response_format" not in options
     assert "input_fidelity" not in options
     assert len(options["image"]) == 3
@@ -144,6 +146,7 @@ def test_older_gpt_image_edit_retains_high_input_fidelity(tmp_path):
 
     assert result == PNG_BYTES
     options = provider.client.images.edit.call_args.kwargs
-    assert options["output_format"] == "png"
+    assert options["output_format"] == "webp"
+    assert options["output_compression"] == 60
     assert options["input_fidelity"] == "high"
     assert "response_format" not in options
