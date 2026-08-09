@@ -4,6 +4,40 @@ from zoneinfo import ZoneInfo
 
 from openai import OpenAI
 
+INTERNAL_OUTPUT_MARKERS = (
+    "VERBINDLICHE, SERVERSEITIG VALIDIERTE VEREINSTEXTREGELN:",
+    "GESCHÜTZTE VEREINSANPASSUNG DES PLATFORMADMINS:",
+    "VERBINDLICHE FAKTENREGELN:",
+)
+
+
+def caption_contains_internal_rules(value: str | None) -> bool:
+    folded = str(value or "").casefold()
+    return any(marker.casefold() in folded for marker in INTERNAL_OUTPUT_MARKERS)
+
+
+def sanitize_generated_caption(value: str) -> str:
+    """Return only the user-facing caption and remove echoed internal rules.
+
+    Provider output is untrusted.  Even though the prompt explicitly requests
+    only the final caption, a model can echo protected server-side policy
+    sections.  Those sections must never become tenant-visible post content.
+    """
+
+    text = str(value or "").strip()
+    folded = text.casefold()
+    cut_at = len(text)
+    for marker in INTERNAL_OUTPUT_MARKERS:
+        index = folded.find(marker.casefold())
+        if index >= 0:
+            cut_at = min(cut_at, index)
+    text = text[:cut_at].rstrip(" \t\r\n-:")
+    if not text:
+        raise ValueError(
+            "Der KI-Dienst hat keinen verwendbaren öffentlichen Begleittext geliefert."
+        )
+    return text
+
 
 @dataclass
 class GeneratedText:
@@ -76,7 +110,7 @@ class OpenAITextGenerator(TextGenerator):
         rendered, version, model = self.prepare_generate(data)
         response = self.client.responses.create(model=model, input=rendered)
         return GeneratedText(
-            response.output_text,
+            sanitize_generated_caption(response.output_text),
             model,
             prompt_version=version,
             tokens=getattr(getattr(response, "usage", None), "total_tokens", None),
@@ -123,7 +157,7 @@ class OpenAITextGenerator(TextGenerator):
         rendered, version, model = self.prepare_revision(data, current_text, instruction)
         response = self.client.responses.create(model=model, input=rendered)
         return GeneratedText(
-            response.output_text,
+            sanitize_generated_caption(response.output_text),
             model,
             prompt_version=version,
             tokens=getattr(getattr(response, "usage", None), "total_tokens", None),

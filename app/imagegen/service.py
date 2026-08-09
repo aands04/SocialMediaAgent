@@ -197,6 +197,43 @@ class AIImageRenderer:
             "manual_logo_review_required": True,
         }
 
+    def _output_path(self, target: str, generation_job_id: str | None) -> tuple[Path, Path]:
+        requested_out = (self.root / target).resolve()
+        if requested_out != self.root and not requested_out.is_relative_to(self.root):
+            raise ImageGenerationError(
+                "Ausgabepfad liegt außerhalb des Render-Verzeichnisses"
+            )
+        out = requested_out
+        if generation_job_id:
+            job_digest = hashlib.sha256(
+                str(generation_job_id).encode("utf-8")
+            ).hexdigest()[:12]
+            out = requested_out.with_name(
+                f"{requested_out.stem}-job-{job_digest}{requested_out.suffix}"
+            )
+        return requested_out, out
+
+    def reusable_output(
+        self, target: str, generation_job_id: str | None, kind: str
+    ) -> Path | None:
+        """Return a validated provider result previously saved for this output.
+
+        The caller uses this before reserving another paid image generation.
+        """
+
+        _requested, candidate = self._output_path(target, generation_job_id)
+        if not candidate.is_file():
+            return None
+        try:
+            self.validate(candidate, kind)
+        except ImageGenerationError:
+            # An interrupted provider response can leave a truncated file. It
+            # is not a reusable output and must not block the one permitted
+            # replacement generation for this slot.
+            candidate.unlink(missing_ok=True)
+            return None
+        return candidate
+
     def render(self, kind: str, target: str, data: dict) -> Path:
         if kind not in self.sizes:
             raise ImageGenerationError("Unbekanntes Bildformat")
@@ -227,22 +264,23 @@ class AIImageRenderer:
         integration = self._reference_metadata(
             data, opponent_logo is not None, sponsor_items
         )
-        requested_out = (self.root / target).resolve()
-        out = requested_out
         generation_job_id = data.get("_generation_job_id")
-        if generation_job_id:
-            # Media versions are database counters and can point at a file
-            # left behind by a rolled-back or legacy render.  Scope the
-            # physical filename to the persistent job instead of trusting the
-            # version filename alone.  The stable digest also keeps retries of
-            # this exact job idempotent without exposing user-controlled text
-            # in a path.
-            job_digest = hashlib.sha256(str(generation_job_id).encode("utf-8")).hexdigest()[:12]
-            out = requested_out.with_name(
-                f"{requested_out.stem}-job-{job_digest}{requested_out.suffix}"
-            )
-        if out != self.root and not out.is_relative_to(self.root):
-            raise ImageGenerationError("Ausgabepfad liegt außerhalb des Render-Verzeichnisses")
+        requested_out, out = self._output_path(target, generation_job_id)
+        reuse_generation_job_id = data.get("_reuse_generation_job_id")
+        if reuse_generation_job_id:
+            reused = self.reusable_output(target, reuse_generation_job_id, kind)
+            if reused is not None:
+                self._metadata[str(reused)] = {
+                    "final_path": str(reused),
+                    "requested_path": str(requested_out),
+                    "generation_job_id": str(generation_job_id)
+                    if generation_job_id
+                    else None,
+                    "reused_from_generation_job_id": str(reuse_generation_job_id),
+                    "reused_final": True,
+                    "logo_integration": integration,
+                }
+                return reused
         out.parent.mkdir(parents=True, exist_ok=True)
         phase = data.get("_generation_phase")
         if out.is_file():

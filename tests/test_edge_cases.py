@@ -18,7 +18,7 @@ from app.models import (
     Team,
     User,
 )
-from app.posts.service import create_post, reserve_image
+from app.posts.service import PARTIAL_GENERATION_WARNING, create_post, reserve_image
 from app.publishing.service import DryRunPublisher, PublishError
 from app.publishing.worker import process_job
 from app.rendering.service import Renderer
@@ -48,6 +48,19 @@ def test_change_after_approval_requires_reapproval(db,tmp_path):
     _,team,game=setup(db,tmp_path); post=mark_verified_logo(create_post(db,game,team,FixtureTextGenerator(),Renderer(tmp_path/"o"))); post.critical_warnings=[]; user=approver(db); approve(db,post,user); old=post.version
     editor=User(email="e@x",password_hash="x",role=Role.EDITOR,all_teams=True); db.add(editor); db.commit(); edit_text(db,post,editor,"Geändert",old)
     assert post.status==PostStatus.REAPPROVAL and all(j.status==JobStatus.UNAPPROVED for j in db.query(PublicationJob).filter_by(post_id=post.id))
+
+
+def test_interrupted_partial_generation_cannot_be_approved(db, tmp_path):
+    _, team, game = setup(db, tmp_path)
+    post = mark_verified_logo(
+        create_post(db, game, team, FixtureTextGenerator(), Renderer(tmp_path / "o"))
+    )
+    post.critical_warnings = [PARTIAL_GENERATION_WARNING]
+    post.status = PostStatus.INCOMPLETE
+    db.commit()
+
+    with pytest.raises(ApprovalError, match="noch nicht vollständig erzeugt"):
+        approve(db, post, approver(db))
 
 
 def test_reapproval_clears_only_selected_resolved_warning(db, tmp_path):

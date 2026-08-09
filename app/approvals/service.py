@@ -18,6 +18,8 @@ from app.models import (
     User,
 )
 from app.posts.club_carousel import matchday_bundle_jobs
+from app.posts.service import PARTIAL_GENERATION_WARNING
+from app.textgen.service import caption_contains_internal_rules
 
 
 class ApprovalError(ValueError):
@@ -51,6 +53,14 @@ def approve(
     # approval. The legacy path columns are updated in the same transaction.
     freeze_publication_versions(db, post, selected)
     problems = []
+    if post.status == PostStatus.CREATING or PARTIAL_GENERATION_WARNING in (
+        post.critical_warnings or []
+    ):
+        problems.append("Der Beitrag ist noch nicht vollständig erzeugt")
+    if caption_contains_internal_rules(post.text):
+        problems.append(
+            "Der Begleittext enthält interne Generierungsregeln und muss neu erzeugt werden"
+        )
     if any(job.approval_status == "manual_schedule_required" for job in selected):
         problems.append("Mindestens eine Veröffentlichung benötigt noch einen manuellen Zeitpunkt")
     if any(job.approval_status == "bundle_wait" for job in selected):

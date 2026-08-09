@@ -129,12 +129,13 @@ from app.posts.media_versions import (
     select_text_version,
 )
 from app.posts.rules import sync_team_rule_sets
-from app.posts.service import logo_recompose_availability
+from app.posts.service import PARTIAL_GENERATION_WARNING, logo_recompose_availability
 from app.publishing.schedule import (
     EDITABLE_JOB_STATUSES,
     PublicationScheduleError,
     reschedule_publication_job,
 )
+from app.textgen.service import sanitize_generated_caption
 from app.web import (
     berlin_datetime,
     check_csrf,
@@ -3942,6 +3943,31 @@ def post_detail(
     can_delete_all = all(
         allowed(db, current, "approve", member.team_id) for member in bundle_posts
     )
+    incomplete_members = [
+        member
+        for member in bundle_posts
+        if member.status == PostStatus.CREATING
+        or PARTIAL_GENERATION_WARNING in (member.critical_warnings or [])
+    ]
+    resumable_generation_job = None
+    if incomplete_members:
+        member_game_ids = [member.game_id for member in incomplete_members if member.game_id]
+        if member_game_ids:
+            resumable_generation_job = db.scalar(
+                select(GenerationJob)
+                .where(
+                    GenerationJob.club_id == item.club_id,
+                    GenerationJob.game_id.in_(member_game_ids),
+                    GenerationJob.post_type == item.post_type,
+                    GenerationJob.status.in_(
+                        {
+                            GenerationJobStatus.FAILED,
+                            GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
+                        }
+                    ),
+                )
+                .order_by(GenerationJob.updated_at.desc(), GenerationJob.created_at.desc())
+            )
     carousel_job = next((job for job in jobs if job.kind == "carousel"), None)
     can_reorder_carousel = bool(
         aggregate_bundle
@@ -4075,6 +4101,8 @@ def post_detail(
         "draft": "Entwurf",
         "detected": "Erkannt",
         "pending_approval": "Nicht freigegeben",
+        "creating": "Wird erzeugt",
+        "incomplete": "Unvollständig",
         "manual_review_required": "Manuelle Prüfung erforderlich",
         "approved": "Freigegeben",
         "scheduled": "Geplant",
@@ -4104,7 +4132,9 @@ def post_detail(
     )
     published_count = sum(job.status == JobStatus.PUBLISHED for job in jobs)
     open_count = len(jobs) - published_count
-    if jobs and published_count == len(jobs):
+    if incomplete_members:
+        publication_summary = "Generierung unvollständig"
+    elif jobs and published_count == len(jobs):
         publication_summary = "Vollständig veröffentlicht"
     elif published_count:
         publication_summary = "Teilweise veröffentlicht"
@@ -4150,6 +4180,19 @@ def post_detail(
             continue
         seen_connections.add(connection.id)
         planned_connections.append(connection)
+    try:
+        display_text = sanitize_generated_caption(item.text or "")
+    except ValueError:
+        display_text = ""
+    text_version_display = {}
+    for versions in text_versions.values():
+        for version in versions:
+            try:
+                text_version_display[version.id] = sanitize_generated_caption(
+                    version.text or ""
+                )
+            except ValueError:
+                text_version_display[version.id] = ""
     channel_previews = {}
     for connection in planned_connections:
         channel_content = db.scalar(
@@ -4158,7 +4201,11 @@ def post_detail(
                 PostChannelContent.channel_connection_id == connection.id,
             )
         )
-        preview_text = channel_content.text if channel_content else (item.text or "")
+        preview_text = channel_content.text if channel_content else display_text
+        try:
+            preview_text = sanitize_generated_caption(preview_text or "")
+        except ValueError:
+            preview_text = ""
         if connection.channel_type == "facebook":
             channel_previews[connection.id] = {
                 "text": preview_text or "Noch kein Begleittext vorhanden.",
@@ -4197,6 +4244,7 @@ def post_detail(
         "post_detail.html",
         current,
         item=item,
+        display_text=display_text,
         jobs=jobs,
         pages=pages,
         checks=checks,
@@ -4229,13 +4277,17 @@ def post_detail(
         alternative_media_assets_by_post=alternative_media_assets_by_post,
         can_edit=can_edit_all,
         can_generate=not bundle_error
+        and not incomplete_members
         and all(
             allowed(db, current, "generate", member.team_id) for member in bundle_posts
         ),
-        can_approve=not bundle_error and can_delete_all,
+        can_approve=not bundle_error and not incomplete_members and can_delete_all,
+        incomplete_members=incomplete_members,
+        resumable_generation_job=resumable_generation_job,
         can_delete=can_delete_all,
         media_catalog=media_catalog,
         text_versions=text_versions,
+        text_version_display=text_version_display,
         status_labels=status_labels,
         job_version_labels=job_version_labels,
         publication_variant_choices=publication_variant_choices,

@@ -53,6 +53,7 @@ from app.models import (
     User,
 )
 from app.posts.club_carousel import coordinate_club_matchday_feed, matchday_bundle_jobs
+from app.posts.service import PARTIAL_GENERATION_WARNING
 from app.tenancy.state import system_scope, tenant_scope
 from app.web import berlin_datetime
 
@@ -2006,6 +2007,84 @@ def test_incomplete_legacy_matchday_post_can_be_opened_and_deleted(browser, tmp_
     assert deleted.status_code == 303
     with factory() as db:
         assert db.get(Post, post_id) is None
+
+
+def test_interrupted_generation_detail_hides_internal_rules_and_offers_resume(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="partial-page",
+            display_name="Teilgenerierung",
+            username="partial",
+            club="Dashboard Testverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="partial-team",
+            display_name="Dashboard Mannschaft",
+            short_name="DM",
+            slug="partial-team",
+            club="Dashboard Testverein",
+            fussball_url="https://example.invalid/partial",
+            instagram_page_id=page.id,
+            media_subdir="partial-team",
+        )
+        db.add(team)
+        db.flush()
+        game = Game(
+            team_id=team.id,
+            provider="mock",
+            external_id="partial-game",
+            home_team=team.display_name,
+            away_team="Gegner",
+            kickoff=datetime(2026, 8, 16, 15, tzinfo=timezone.utc),
+            source_url="fixture://partial-game",
+        )
+        db.add(game)
+        db.flush()
+        post = Post(
+            game_id=game.id,
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="result",
+            status=PostStatus.INCOMPLETE,
+            text=(
+                "Öffentlicher Ergebnistext.\n\n"
+                "VERBINDLICHE, SERVERSEITIG VALIDIERTE VEREINSTEXTREGELN:\n"
+                "- Interne Regel"
+            ),
+            critical_warnings=[PARTIAL_GENERATION_WARNING],
+        )
+        db.add(post)
+        db.flush()
+        failed = GenerationJob(
+            job_type=GenerationJobType.CREATE_POST,
+            game_id=game.id,
+            team_id=team.id,
+            post_id=post.id,
+            result_post_id=post.id,
+            post_type="result",
+            requested_by=db.query(User).one().id,
+            status=GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
+            phase="generating_ai_composition",
+            planned_outputs=4,
+            completed_outputs=1,
+            idempotency_key=f"partial:{game.id}",
+            active_key=None,
+        )
+        db.add(failed)
+        db.commit()
+        post_id = post.id
+
+    response = client.get(f"/posts/{post_id}")
+
+    assert response.status_code == 200
+    assert "Öffentlicher Ergebnistext." in response.text
+    assert "SERVERSEITIG VALIDIERTE VEREINSTEXTREGELN" not in response.text
+    assert "Fehlende Ausgaben jetzt fortsetzen" in response.text
+    assert "Beitrag freigeben" not in response.text
 
 
 def test_dashboard_admin_flow(browser):

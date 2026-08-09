@@ -160,6 +160,36 @@ def test_progress_renderer_passes_persistent_job_identity(db, tmp_path):
     assert inner.context["_generation_job_id"] == job.id
 
 
+def test_progress_renderer_reuses_valid_output_without_new_usage_reservation(db, tmp_path):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    existing = tmp_path / "existing.png"
+    existing.write_bytes(b"already-validated-by-provider")
+
+    class ReusableRenderer:
+        is_ai = True
+
+        def reusable_output(self, target, generation_job_id, kind):
+            assert target == "post/feed-v1.png"
+            assert generation_job_id == "previous-job"
+            assert kind == "feed"
+            return existing
+
+        def render(self, kind, relative_path, context):
+            assert context["_generation_job_id"] == job.id
+            assert context["_reuse_generation_job_id"] == "previous-job"
+            return existing
+
+    result = generation._ProgressRenderer(
+        ReusableRenderer(), db, job, reuse_generation_job_id="previous-job"
+    ).render("feed", "post/feed-v1.png", {})
+
+    assert result == existing
+    assert job.completed_outputs == 1
+    assert db.query(UsageLedgerEntry).count() == 0
+    assert db.query(AiPromptDispatch).count() == 0
+
+
 def test_progress_text_generator_records_exact_provider_prompt(db):
     _, _team, _game, user = graph(db)
     job = generation.enqueue_create(
@@ -507,7 +537,7 @@ def test_legacy_job_with_exhausted_budget_does_not_claim_an_automatic_retry(
     assert "auch beim begrenzten Wiederholungsversuch" not in result.error_message
 
 
-def test_ambiguous_openai_timeout_does_not_retry_after_usable_output(
+def test_ambiguous_openai_timeout_retries_only_missing_output_after_usable_output(
     db, monkeypatch, tmp_path
 ):
     _, team, game, user = graph(db)
@@ -537,9 +567,10 @@ def test_ambiguous_openai_timeout_does_not_retry_after_usable_output(
         ),
     )
 
-    assert result.status == GenerationJobStatus.MANUAL_REVIEW_REQUIRED
-    assert "doppelter Kosten" in result.error_message
-    assert result.active_key is None
+    assert result.status == GenerationJobStatus.RETRY_WAIT
+    assert "Bereits gespeicherte Ergebnisse bleiben erhalten" in result.error_message
+    assert result.completed_outputs == 1
+    assert result.active_key == f"create:{game.id}:announcement"
 
 
 def test_stale_job_during_costly_phase_is_not_retried(db):
@@ -588,6 +619,124 @@ def test_manual_retry_is_blocked_after_usable_output(db):
         generation.retry_job(db, job, user)
 
     assert db.scalar(select(GenerationJob).where(GenerationJob.id != job.id)) is None
+
+
+def test_manual_retry_continues_linked_incomplete_post_with_fresh_budget(db):
+    page, team, game, user = graph(db)
+    game.home_score = 2
+    game.away_score = 1
+    game.result_confirmed = True
+    db.commit()
+    job, _ = generation.enqueue_create(db, game, team, user, "result")
+    partial = Post(
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        post_type="result",
+        status=PostStatus.INCOMPLETE,
+        text="Ein bereits verwendbarer Ergebnistext",
+        critical_warnings=[generation.PARTIAL_GENERATION_WARNING],
+    )
+    db.add(partial)
+    db.flush()
+    job.status = GenerationJobStatus.MANUAL_REVIEW_REQUIRED
+    job.completed_outputs = 1
+    job.post_id = partial.id
+    job.result_post_id = partial.id
+    job.active_key = None
+    db.commit()
+
+    retry = generation.retry_job(db, job, user)
+
+    assert retry.post_id == partial.id
+    assert retry.parameters["resume_incomplete_post_id"] == partial.id
+    assert retry.parameters["resume_generation_job_id"] == job.id
+    assert retry.max_attempts >= retry.planned_outputs + 1
+    assert retry.completed_outputs == 0
+
+
+def test_partial_bundle_marks_every_member_and_can_resume_from_primary(db):
+    page, first_team, first_game, user = graph(db)
+    second_team = Team(
+        internal_name="jobs-bundle-two",
+        display_name="SV Jobs II",
+        short_name="SVJ II",
+        slug="jobs-bundle-two",
+        club=first_team.club,
+        fussball_url="https://www.fussball.de/jobs-bundle-two",
+        instagram_page_id=page.id,
+        media_subdir="jobs-bundle-two",
+    )
+    db.add(second_team)
+    db.flush()
+    second_game = Game(
+        team_id=second_team.id,
+        provider="mock",
+        external_id="generation-job-bundle-two",
+        home_team=second_team.display_name,
+        away_team="FC Test II",
+        kickoff=first_game.kickoff + timedelta(hours=2),
+        source_url="fixture://jobs-bundle-two",
+    )
+    db.add(second_game)
+    db.flush()
+    first_post = Post(
+        game_id=first_game.id,
+        team_id=first_team.id,
+        instagram_page_id=page.id,
+        post_type="announcement",
+        status=PostStatus.PENDING,
+        text="Bereits erzeugter gemeinsamer Begleittext",
+        feed_path="first/feed.png",
+    )
+    second_post = Post(
+        game_id=second_game.id,
+        team_id=second_team.id,
+        instagram_page_id=page.id,
+        post_type="announcement",
+        status=PostStatus.CREATING,
+        text="Bereits erzeugter gemeinsamer Begleittext",
+    )
+    db.add_all([first_post, second_post])
+    db.flush()
+    job = GenerationJob(
+        club_id=first_team.club_id,
+        job_type=generation.GenerationJobType.CREATE_POST,
+        game_id=first_game.id,
+        team_id=first_team.id,
+        requested_by=user.id,
+        post_type="announcement",
+        status=GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
+        phase="generating_ai_composition",
+        planned_outputs=4,
+        completed_outputs=2,
+        attempts=2,
+        max_attempts=3,
+        idempotency_key="bundle-partial-source",
+        parameters={
+            "matchday_bundle_key": "test-bundle",
+            "bundle_game_ids": [first_game.id, second_game.id],
+        },
+    )
+    db.add(job)
+    db.flush()
+
+    generation._capture_partial_post(db, job)
+    job.active_key = None
+    db.commit()
+
+    for post in (first_post, second_post):
+        db.refresh(post)
+        assert post.status == PostStatus.INCOMPLETE
+        assert generation.PARTIAL_GENERATION_WARNING in post.critical_warnings
+    assert job.result_post_id == first_post.id
+
+    retry = generation.retry_job(db, job, user)
+
+    assert retry.post_id == first_post.id
+    assert retry.parameters["resume_incomplete_post_id"] == first_post.id
+    assert retry.parameters["resume_generation_job_id"] == job.id
+    assert retry.parameters["bundle_game_ids"] == [first_game.id, second_game.id]
 
 
 def test_worker_stops_when_club_is_suspended_after_claim(db, monkeypatch, tmp_path):
