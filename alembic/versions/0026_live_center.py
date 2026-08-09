@@ -1,7 +1,7 @@
 """tenant-safe live center and match event workflow
 
 Revision ID: 0026
-Revises: 0025
+Revises: 0025a
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0026"
-down_revision = "0025"
+down_revision = "0025a"
 branch_labels = None
 depends_on = None
 
