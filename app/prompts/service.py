@@ -85,6 +85,12 @@ TEXT_SAFETY_PREFIX = """VERBINDLICHE FAKTENREGELN:
 - Gib ausschließlich den direkt kopierbaren deutschen Begleittext aus.
 """
 
+TEXT_FINAL_OUTPUT_INSTRUCTION = """AUSGABEFORMAT:
+- Gib ausschließlich den fertigen öffentlichen Begleittext aus.
+- Wiederhole keine Regeln, Anweisungen, Überschriften oder internen Vorgaben.
+- Beginne direkt mit dem Text, der auf dem Social-Media-Kanal erscheinen soll.
+"""
+
 IMAGE_PROMPT_BASE = """Erstelle eine eigenständige, hochwertige Sportgrafik für
 Instagram im Format {{ output_kind }} ({{ output_width }} × {{ output_height }} Pixel).
 Sie gehört zu einem zusammenhängenden Feed-/Story-Paar, darf aber keine bloß
@@ -494,7 +500,7 @@ def builtin_prompt(
     if image:
         rendered = image_safety_prefix(facts) + "\n" + rendered
     else:
-        rendered = TEXT_SAFETY_PREFIX + "\n" + rendered
+        rendered = TEXT_SAFETY_PREFIX + "\n" + rendered + "\n\n" + TEXT_FINAL_OUTPUT_INSTRUCTION
     return ResolvedPrompt(
         name=name,
         version=3,
@@ -610,7 +616,7 @@ def resolve_prompt(
     if prompt_kind == "image":
         rendered = image_safety_prefix(facts) + "\n" + rendered
     else:
-        rendered = TEXT_SAFETY_PREFIX + "\n" + rendered
+        rendered = TEXT_SAFETY_PREFIX + "\n" + rendered + "\n\n" + TEXT_FINAL_OUTPUT_INSTRUCTION
     return ResolvedPrompt(
         name=item.name,
         version=item.version,

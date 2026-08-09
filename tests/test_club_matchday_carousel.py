@@ -12,6 +12,7 @@ from app.models import (
     Game,
     InstagramPage,
     JobStatus,
+    MediaAsset,
     Post,
     PostStatus,
     PublicationJob,
@@ -26,7 +27,12 @@ from app.posts.club_carousel import (
     matchday_bundle_jobs,
     reorder_matchday_carousel,
 )
-from app.posts.service import create_matchday_bundle_posts, create_post, feed_time
+from app.posts.service import (
+    PARTIAL_GENERATION_WARNING,
+    create_matchday_bundle_posts,
+    create_post,
+    feed_time,
+)
 from app.prompts.service import ResolvedPrompt
 from app.publishing.service import DryRunPublisher, PublishError
 from app.publishing.worker import process_job
@@ -190,6 +196,67 @@ def test_result_detected_is_literal_and_creates_feed_and_story(db, tmp_path):
     assert sorted(job.kind for job in jobs) == ["feed", "story"]
     assert {job.scheduled_at.replace(tzinfo=timezone.utc) for job in jobs} == {detected}
     assert next(job for job in jobs if job.kind == "story").story_rule_id is None
+
+
+def test_interrupted_result_post_is_resumed_to_complete_feed_and_story(db, tmp_path):
+    page = _page(db)
+    team = _team(db, page, number=1, mode="separate")
+    game = _game(db, team, hour=13, number=1)
+    game.status = "finished"
+    game.result_confirmed = True
+    game.home_score = 4
+    game.away_score = 2
+    player = tmp_path / "result-player.jpg"
+    Image.new("RGB", (600, 900), "blue").save(player)
+    db.add(
+        MediaAsset(
+            team_id=team.id,
+            relative_path="result-player.jpg",
+            filename="result-player.jpg",
+            mime_type="image/jpeg",
+            size=player.stat().st_size,
+            checksum="1" * 64,
+            mtime=datetime.now(timezone.utc),
+        )
+    )
+    db.commit()
+    logos = {"team": {"id": "verified-team-logo"}, "opponent": None}
+    renderer = LocalRenderer(tmp_path / "resumed-result")
+    post = create_post(
+        db,
+        game,
+        team,
+        FixtureTextGenerator(),
+        renderer,
+        post_type="result",
+        logo_snapshot=logos,
+    )
+    original_id = post.id
+    original_text = post.text
+    original_version = post.version
+    post.status = PostStatus.INCOMPLETE
+    post.critical_warnings = [PARTIAL_GENERATION_WARNING]
+    db.commit()
+
+    resumed = create_post(
+        db,
+        game,
+        team,
+        FixtureTextGenerator(),
+        renderer,
+        post_type="result",
+        logo_snapshot=logos,
+    )
+    db.commit()
+
+    jobs = db.query(PublicationJob).filter_by(post_id=resumed.id).all()
+    assert resumed.id == original_id
+    assert resumed.text == original_text
+    assert resumed.version == original_version + 1
+    assert resumed.status == PostStatus.PENDING
+    assert PARTIAL_GENERATION_WARNING not in resumed.critical_warnings
+    assert sorted(job.kind for job in jobs) == ["feed", "story"]
+    assert all(Path(job.media_path).is_file() for job in jobs)
 
 
 def test_result_detected_publishes_immediately_after_manual_approval(db, tmp_path):

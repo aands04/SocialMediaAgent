@@ -29,6 +29,7 @@ from app.models import (
     MediaAsset,
     Post,
     PostStatus,
+    PostTextVersion,
     PublicationJob,
     PublicationMediaItem,
     PublicationRuleSlot,
@@ -42,11 +43,16 @@ from app.prompts.service import (
     resolve_prompt,
 )
 from app.rendering.service import Renderer, builtin_template
-from app.textgen.service import GeneratedText, TextGenerator
+from app.textgen.service import GeneratedText, TextGenerator, sanitize_generated_caption
 
 
 class RerenderConflict(ValueError):
     pass
+
+
+PARTIAL_GENERATION_WARNING = (
+    "Die Hintergrundgenerierung wurde unterbrochen; manuelle Prüfung erforderlich."
+)
 
 
 @dataclass(frozen=True)
@@ -588,17 +594,33 @@ def create_post(
         raise ValueError("Vorläufige Spiele sind für die Beitragserstellung gesperrt")
     existing = db.scalar(
         select(Post).where(
-            Post.game_id == game.id, Post.post_type == post_type, Post.active_key == "active"
+            Post.club_id == team.club_id,
+            Post.game_id == game.id,
+            Post.post_type == post_type,
+            Post.active_key == "active",
         )
     )
-    if existing:
+    resuming = bool(existing and existing.status == PostStatus.INCOMPLETE)
+    if existing and not resuming:
         return existing
     page = db.get(InstagramPage, team.instagram_page_id)
-    warnings = []
+    if not page or page.club_id != team.club_id:
+        raise ValueError("Die Instagram-Seite gehört nicht zu diesem Verein")
+    warnings = [
+        warning
+        for warning in ((existing.critical_warnings or []) if existing else [])
+        if warning != PARTIAL_GENERATION_WARNING
+    ]
     logos = logo_snapshot or frozen_logo_set(db, game, team)
     if not logos.get("team"):
         warnings.append("Eigenes Mannschaftslogo fehlt; der Beitrag darf nicht freigegeben werden")
-    asset = reserve_image(db, team.id, game.id)
+    asset = (
+        db.get(MediaAsset, existing.media_asset_id)
+        if resuming and existing.media_asset_id
+        else reserve_image(db, team.id, game.id)
+    )
+    if asset and (asset.club_id != team.club_id or asset.team_id != team.id):
+        raise ValueError("Das reservierte Spielerbild gehört nicht zu diesem Beitrag")
     if not asset:
         warnings.append("Kein unverbrauchtes Spielerbild; neutrale Vorlage verwendet")
     if getattr(renderer, "is_ai", False) and not asset:
@@ -629,15 +651,7 @@ def create_post(
         facts = {**feed_facts, "text_prompt": text_prompt}
     primary_font = facts["primary_font_asset"]
     secondary_font = facts["secondary_font_asset"]
-    post = Post(
-        game_id=game.id,
-        team_id=team.id,
-        instagram_page_id=page.id,
-        post_type=post_type,
-        status=PostStatus.CREATING,
-        media_asset_id=asset.id if asset else None,
-        critical_warnings=warnings,
-        design_snapshot={
+    initial_snapshot = {
             "mode": {
                 "image": "openai" if feed_prompt else "playwright",
                 "text": "openai" if text_prompt else "fixture",
@@ -660,12 +674,75 @@ def create_post(
             },
             "colors": team.colors,
             "matchday_bundle": matchday_bundle,
-        },
-    )
-    db.add(post)
-    db.flush()
-    text_result = generated_text or generator.generate(facts)
-    post.text = text_result.text
+        }
+    if resuming:
+        post = existing
+        existing_jobs = list(
+            db.scalars(
+                select(PublicationJob)
+                .where(PublicationJob.post_id == post.id)
+                .with_for_update()
+            )
+        )
+        if any(job.status == JobStatus.PUBLISHED for job in existing_jobs):
+            raise ValueError(
+                "Ein teilweise veröffentlichter Beitrag darf nicht automatisch fortgesetzt werden"
+            )
+        for publication in existing_jobs:
+            db.delete(publication)
+        post.status = PostStatus.CREATING
+        post.critical_warnings = warnings
+        post.instagram_page_id = page.id
+        post.media_asset_id = asset.id if asset else None
+        post.design_snapshot = {
+            **(post.design_snapshot or {}),
+            **initial_snapshot,
+            "continuation": {
+                "resumed": True,
+                "previous_status": PostStatus.INCOMPLETE.value,
+            },
+        }
+        post.version += 1
+        db.flush()
+    else:
+        post = Post(
+            game_id=game.id,
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type=post_type,
+            status=PostStatus.CREATING,
+            media_asset_id=asset.id if asset else None,
+            critical_warnings=warnings,
+            design_snapshot=initial_snapshot,
+        )
+        db.add(post)
+        db.flush()
+    if generated_text is not None:
+        text_result = generated_text
+    elif resuming and (post.text or "").strip():
+        try:
+            reusable_caption = sanitize_generated_caption(post.text)
+        except ValueError:
+            text_result = generator.generate(facts)
+        else:
+            text_result = GeneratedText(
+                reusable_caption,
+                "reused",
+                prompt_version="continued-existing-text",
+            )
+    else:
+        text_result = generator.generate(facts)
+    post.text = sanitize_generated_caption(text_result.text)
+    if resuming:
+        for version in db.scalars(
+            select(PostTextVersion).where(PostTextVersion.post_id == post.id)
+        ):
+            try:
+                sanitized_version = sanitize_generated_caption(version.text)
+            except ValueError:
+                sanitized_version = post.text
+            if version.text != sanitized_version:
+                version.text = sanitized_version
     post.design_snapshot = {
         **post.design_snapshot,
         "text_generation": {
@@ -1201,7 +1278,7 @@ def create_post(
         "stories": story_snapshots,
         "story_variants": story_variants,
     }
-    post.critical_warnings = warnings
+    post.critical_warnings = list(dict.fromkeys(warnings))
     post.status = PostStatus.INCOMPLETE if warnings else PostStatus.PENDING
     from app.posts.media_versions import synchronize_post_versions
 
@@ -1288,7 +1365,32 @@ def create_matchday_bundle_posts(
         match_lines.append(line)
     match_list = "\n".join(match_lines)
     shared_prompt = None
-    if getattr(generator, "is_ai", False):
+    existing_bundle_posts = list(
+        db.scalars(
+            select(Post).where(
+                Post.club_id == primary_team.club_id,
+                Post.game_id.in_([item.id for item in games]),
+                Post.post_type == post_type,
+                Post.active_key == "active",
+            )
+        )
+    )
+    reusable_text = None
+    for existing_post in existing_bundle_posts:
+        if not (existing_post.text or "").strip():
+            continue
+        try:
+            reusable_text = sanitize_generated_caption(existing_post.text)
+        except ValueError:
+            continue
+        break
+    if reusable_text:
+        shared_text = GeneratedText(
+            reusable_text,
+            "reused",
+            prompt_version="continued-matchday-text",
+        )
+    elif getattr(generator, "is_ai", False):
         prompt_name = primary_team.rules.get(
             f"text_prompt_{post_type}",
             primary_team.rules.get("text_prompt", f"default-text-{post_type}"),

@@ -28,7 +28,12 @@ from app.prompts.service import (
     validate_template,
     venue_display,
 )
-from app.textgen.service import FixtureTextGenerator, OpenAITextGenerator
+from app.textgen.service import (
+    FixtureTextGenerator,
+    OpenAITextGenerator,
+    caption_contains_internal_rules,
+    sanitize_generated_caption,
+)
 
 
 def facts(**updates):
@@ -631,3 +636,21 @@ def test_openai_text_generator_uses_resolved_prompt_without_live_request():
     assert result.text == "Kopierbarer Testtext"
     assert result.prompt_version == "default-text-announcement:v3"
     assert result.tokens == 42
+
+
+def test_generated_caption_strips_echoed_internal_rules():
+    leaked = (
+        "Was für ein Spieltag! ⚽\n\n"
+        "VERBINDLICHE, SERVERSEITIG VALIDIERTE VEREINSTEXTREGELN:\n"
+        "- Diese internen Regeln dürfen nicht veröffentlicht werden."
+    )
+
+    assert caption_contains_internal_rules(leaked) is True
+    assert sanitize_generated_caption(leaked) == "Was für ein Spieltag! ⚽"
+
+
+def test_generated_caption_rejects_rule_only_provider_output():
+    with pytest.raises(ValueError, match="keinen verwendbaren öffentlichen Begleittext"):
+        sanitize_generated_caption(
+            "VERBINDLICHE FAKTENREGELN:\n- Interne Anweisung"
+        )

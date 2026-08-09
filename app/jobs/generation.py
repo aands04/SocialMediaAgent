@@ -39,6 +39,7 @@ from app.models import (
 )
 from app.posts.club_carousel import ClubCarouselState, coordinate_club_matchday_feed
 from app.posts.service import (
+    PARTIAL_GENERATION_WARNING,
     RerenderConflict,
     create_matchday_bundle_posts,
     create_post,
@@ -64,7 +65,6 @@ TERMINAL_STATUSES = {
 SAFE_RETRY_PHASES = {"preparing", "validating", "saving"}
 LEASE_SECONDS = 300
 EXTERNAL_RETRY_DELAY_SECONDS = 60
-EXTERNAL_RETRY_MAX_TOTAL_ATTEMPTS = 2
 USABLE_USAGE_STATUSES = {
     UsageStatus.COMPLETED_BILLABLE,
     UsageStatus.COMPLETED_NOT_BILLABLE,
@@ -72,8 +72,23 @@ USABLE_USAGE_STATUSES = {
 }
 
 
+def _retry_attempt_budget(planned_outputs: int | None) -> int:
+    # One initial run, at most one external retry for the text response and at
+    # most one for every planned media output.  The per-output retry map below
+    # remains the authoritative guard against repeating the same paid slot.
+    return max(3, int(planned_outputs or 0) + 2)
+
+
 class GenerationCancelled(RuntimeError):
     pass
+
+
+def _mark_generation_output(exc: Exception, key: str) -> None:
+    try:
+        if not getattr(exc, "generation_output_key", None):
+            exc.generation_output_key = key
+    except (AttributeError, TypeError):
+        return
 
 
 def _automatically_approve_created_outputs(
@@ -260,6 +275,7 @@ class _ProgressTextGenerator:
         try:
             result = self.inner.generate(facts)
         except Exception as exc:
+            _mark_generation_output(exc, "text")
             self._failed_provider(dispatch, exc)
             raise
         self._after_provider(usage, dispatch)
@@ -287,12 +303,20 @@ class _ProgressTextGenerator:
 
 
 class _ProgressRenderer:
-    def __init__(self, inner, db: Session, job: GenerationJob):
+    def __init__(
+        self,
+        inner,
+        db: Session,
+        job: GenerationJob,
+        *,
+        reuse_generation_job_id: str | None = None,
+    ):
         self.inner = inner
         self.db = db
         self.job = job
         self.is_ai = getattr(inner, "is_ai", False)
         self._calls = 0
+        self.reuse_generation_job_id = reuse_generation_job_id or job.id
 
     def _before_provider(
         self, kind: str, context: dict
@@ -357,6 +381,7 @@ class _ProgressRenderer:
             # later rerender job must never adopt an older file that happens
             # to use the same media version path.
             "_generation_job_id": self.job.id,
+            "_reuse_generation_job_id": self.reuse_generation_job_id,
             "_generation_phase": lambda name: _phase(
                 self.db,
                 self.job,
@@ -365,10 +390,26 @@ class _ProgressRenderer:
                 completed,
             ),
         }
+        reusable = getattr(self.inner, "reusable_output", None)
+        if self.is_ai and callable(reusable):
+            existing = reusable(
+                relative_path,
+                self.reuse_generation_job_id,
+                kind,
+            )
+            if existing is not None:
+                path = self.inner.render(kind, relative_path, render_context)
+                completed += 1
+                progress = 20 + int(
+                    65 * completed / max(1, self.job.planned_outputs)
+                )
+                _phase(self.db, self.job, phase, progress, completed)
+                return path
         usage, dispatch = self._before_provider(kind, context)
         try:
             path = self.inner.render(kind, relative_path, render_context)
         except Exception as exc:
+            _mark_generation_output(exc, f"{kind}:{relative_path}")
             if dispatch:
                 dispatch.status = "failed"
                 dispatch.error_summary = type(exc).__name__
@@ -487,6 +528,7 @@ def enqueue_create(
     existing_job = db.scalar(select(GenerationJob).where(GenerationJob.idempotency_key == key))
     if existing_job:
         return existing_job, None
+    planned_outputs = _feed_count(team, post_type) + _story_count(db, team, post_type)
     job = GenerationJob(
         job_type=GenerationJobType.CREATE_POST,
         game_id=game.id,
@@ -495,7 +537,8 @@ def enqueue_create(
         requested_by=user.id,
         status=GenerationJobStatus.QUEUED,
         phase="preparing",
-        planned_outputs=_feed_count(team, post_type) + _story_count(db, team, post_type),
+        planned_outputs=planned_outputs,
+        max_attempts=_retry_attempt_budget(planned_outputs),
         idempotency_key=key,
         active_key=key,
         parameters={"post_type": post_type, "logos": frozen_logo_set(db, game, team)},
@@ -589,6 +632,7 @@ def enqueue_bundle_create(
         status=GenerationJobStatus.QUEUED,
         phase="preparing",
         planned_outputs=planned_outputs,
+        max_attempts=_retry_attempt_budget(planned_outputs),
         idempotency_key=key,
         active_key=key,
         parameters={
@@ -1000,24 +1044,52 @@ def _finish(
     db.commit()
 
 
-def _capture_partial_post(db: Session, job: GenerationJob) -> None:
-    if job.job_type != GenerationJobType.CREATE_POST or job.result_post_id:
-        return
-    post = db.scalar(
-        select(Post).where(
-            Post.game_id == job.game_id,
-            Post.post_type == job.post_type,
-            Post.active_key == "active",
+def _created_posts_for_job(db: Session, job: GenerationJob) -> list[Post]:
+    if job.job_type != GenerationJobType.CREATE_POST:
+        return []
+    parameters = dict(job.parameters or {})
+    game_ids = [
+        str(item).strip()
+        for item in (parameters.get("bundle_game_ids") or [])
+        if str(item).strip()
+    ]
+    if not game_ids:
+        game_ids = [job.game_id]
+    posts = list(
+        db.scalars(
+            select(Post).where(
+                Post.club_id == job.club_id,
+                Post.game_id.in_(game_ids),
+                Post.post_type == job.post_type,
+                Post.active_key == "active",
+            )
         )
     )
-    if not post:
+    by_game = {post.game_id: post for post in posts}
+    return [by_game[game_id] for game_id in game_ids if game_id in by_game]
+
+
+def _capture_partial_post(db: Session, job: GenerationJob) -> None:
+    if job.job_type != GenerationJobType.CREATE_POST:
         return
-    job.post_id = post.id
-    job.result_post_id = post.id
-    if post.status == PostStatus.CREATING:
+    posts = _created_posts_for_job(db, job)
+    if not posts:
+        return
+
+    # A matchday bundle is one logical contribution.  If one member fails,
+    # every member remains blocked until the continuation has reconstructed
+    # the complete feed/carousel and all stories.  Existing provider outputs
+    # remain on disk and are reused by the continuation job.
+    primary = next((post for post in posts if post.game_id == job.game_id), posts[0])
+    job.post_id = primary.id
+    job.result_post_id = primary.id
+    for post in posts:
         post.status = PostStatus.INCOMPLETE
-        warning = "Die Hintergrundgenerierung wurde unterbrochen; manuelle Prüfung erforderlich."
-        post.critical_warnings = list(dict.fromkeys([*(post.critical_warnings or []), warning]))
+        post.critical_warnings = list(
+            dict.fromkeys(
+                [*(post.critical_warnings or []), PARTIAL_GENERATION_WARNING]
+            )
+        )
 
 
 def _finalize_job_usage(db: Session, job: GenerationJob, post_id: str | None) -> None:
@@ -1138,13 +1210,27 @@ def _discard_empty_partial_post(db: Session, job: GenerationJob) -> None:
     db.flush()
 
 
-def _schedule_external_retry(db: Session, job: GenerationJob) -> None:
+def _external_output_key(exc: Exception, job: GenerationJob) -> str:
+    explicit = str(getattr(exc, "generation_output_key", "") or "").strip()
+    return explicit[:500] or f"phase:{job.phase}"
+
+
+def _schedule_external_retry(
+    db: Session,
+    job: GenerationJob,
+    *,
+    output_key: str,
+) -> None:
     retry_at = _now() + timedelta(seconds=EXTERNAL_RETRY_DELAY_SECONDS)
     parameters = dict(job.parameters or {})
+    retries = dict(parameters.get("external_output_retries") or {})
+    retries[output_key] = int(retries.get(output_key) or 0) + 1
+    parameters["external_output_retries"] = retries
     parameters["external_retry"] = {
         "scheduled_at": _now().isoformat(),
         "source_attempt": int(job.attempts or 0),
-        "max_total_attempts": EXTERNAL_RETRY_MAX_TOTAL_ATTEMPTS,
+        "output_key": output_key,
+        "max_retries_for_output": 1,
     }
     job.parameters = parameters
     job.status = GenerationJobStatus.RETRY_WAIT
@@ -1152,8 +1238,8 @@ def _schedule_external_retry(db: Session, job: GenerationJob) -> None:
     job.error_category = "external_service_temporarily_unavailable"
     job.error_message = (
         "Der KI-Dienst hat die Verbindung während der Übertragung unterbrochen. "
-        "Da noch keine verwendbare Ausgabe gespeichert wurde, wird der Auftrag "
-        "automatisch frühestens in 60 Sekunden einmal erneut versucht."
+        "Bereits gespeicherte Ergebnisse bleiben erhalten; nur die fehlende Ausgabe "
+        "wird automatisch frühestens in 60 Sekunden einmal erneut versucht."
     )
     job.locked_by = None
     job.locked_at = None
@@ -1166,6 +1252,7 @@ def _schedule_external_retry(db: Session, job: GenerationJob) -> None:
             "category": job.error_category,
             "delay_seconds": EXTERNAL_RETRY_DELAY_SECONDS,
             "attempt": job.attempts,
+            "output_key": output_key,
         },
     )
     db.commit()
@@ -1273,12 +1360,22 @@ def process_generation_job(
                 validate_frozen_file(team_logo, settings.upload_root)
                 validate_frozen_file(opponent_logo, settings.upload_root)
             _phase(db, job, "preparing", 5)
+            if job.attempts > 1 or parameters.get("resume_incomplete_post_id"):
+                job.completed_outputs = 0
+                db.commit()
             posts = create_matchday_bundle_posts(
                 db,
                 bundle_games,
                 bundle_teams,
                 _ProgressTextGenerator(build_text_generator(settings), db, job),
-                _ProgressRenderer(build_renderer(settings), db, job),
+                _ProgressRenderer(
+                    build_renderer(settings),
+                    db,
+                    job,
+                    reuse_generation_job_id=parameters.get(
+                        "resume_generation_job_id"
+                    ),
+                ),
                 job.post_type,
                 logos_by_game,
                 str(parameters.get("matchday_bundle_key") or job.id),
@@ -1336,7 +1433,17 @@ def process_generation_job(
             validate_frozen_file(opponent_logo, settings.upload_root)
         _phase(db, job, "preparing", 5)
         if job.job_type == GenerationJobType.CREATE_POST:
-            renderer = _ProgressRenderer(build_renderer(settings), db, job)
+            if job.attempts > 1 or parameters.get("resume_incomplete_post_id"):
+                job.completed_outputs = 0
+                db.commit()
+            renderer = _ProgressRenderer(
+                build_renderer(settings),
+                db,
+                job,
+                reuse_generation_job_id=parameters.get(
+                    "resume_generation_job_id"
+                ),
+            )
             _phase(db, job, "generating_text", 10)
             post = create_post(
                 db,
@@ -1550,15 +1657,20 @@ def process_generation_job(
         _capture_partial_post(db, job)
         retryable_external = _is_retryable_external_failure(exc, job, settings)
         usable_output = _has_usable_job_output(db, job)
+        output_key = _external_output_key(exc, job)
+        retry_counts = dict(
+            (job.parameters or {}).get("external_output_retries") or {}
+        )
         _finalize_job_usage(db, job, job.result_post_id)
         can_retry_external = (
             retryable_external
-            and not usable_output
-            and job.attempts < min(job.max_attempts, EXTERNAL_RETRY_MAX_TOTAL_ATTEMPTS)
+            and int(retry_counts.get(output_key) or 0) < 1
+            and job.attempts < job.max_attempts
         )
         if can_retry_external:
-            _discard_empty_partial_post(db, job)
-            _schedule_external_retry(db, job)
+            if not usable_output:
+                _discard_empty_partial_post(db, job)
+            _schedule_external_retry(db, job, output_key=output_key)
             status = GenerationJobStatus.RETRY_WAIT
             category = job.error_category
         else:
@@ -1578,10 +1690,10 @@ def process_generation_job(
             )
             if retryable_external and usable_output:
                 message = (
-                    "Der KI-Dienst hat die Verbindung unterbrochen, nachdem bereits "
-                    "mindestens eine verwendbare Ausgabe gespeichert wurde. Zur Vermeidung "
-                    "doppelter Kosten wurde keine automatische Wiederholung gestartet. "
-                    "Bitte prüfen Sie den unvollständigen Beitrag."
+                    "Der KI-Dienst hat die Verbindung für dieselbe fehlende Ausgabe auch "
+                    "beim begrenzten Wiederholungsversuch unterbrochen. Bereits gespeicherte "
+                    "Texte und Bilder bleiben erhalten. Bitte setzen Sie den unvollständigen "
+                    "Beitrag später bewusst fort."
                 )
             elif retryable_external:
                 retry_metadata = (job.parameters or {}).get("external_retry") or {}
@@ -1639,12 +1751,33 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
         raise ValueError(
             "Nur fehlgeschlagene oder unklare Aufträge können erneut gestartet werden."
         )
+    created_posts = _created_posts_for_job(db, job)
+    partial_post = next(
+        (
+            post
+            for post in created_posts
+            if post.id == (job.result_post_id or job.post_id)
+        ),
+        created_posts[0] if created_posts else None,
+    )
+    interrupted_posts = [
+        post
+        for post in created_posts
+        if post.status == PostStatus.CREATING
+        or PARTIAL_GENERATION_WARNING in (post.critical_warnings or [])
+    ]
+    resumable_partial = bool(
+        partial_post
+        and partial_post.club_id == job.club_id
+        and partial_post.team_id == job.team_id
+        and interrupted_posts
+    )
     usable_output = (
         _has_usable_job_output(db, job)
         if job.job_type == GenerationJobType.CREATE_POST
         else _has_completed_job_output(db, job)
     )
-    if usable_output:
+    if usable_output and not resumable_partial:
         raise ValueError(
             "Es wurde bereits mindestens eine verwendbare Ausgabe gespeichert. Prüfen Sie "
             "den Teilbeitrag; ein neuer kostenpflichtiger Auftrag wird nicht gestartet."
@@ -1663,6 +1796,9 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
     parameters["manual_retry_of_job_id"] = job.id
     parameters["manual_retry_requested_at"] = _now().isoformat()
     parameters["logos"] = logos
+    if resumable_partial:
+        parameters["resume_incomplete_post_id"] = partial_post.id
+        parameters["resume_generation_job_id"] = job.id
     if job.job_type == GenerationJobType.CREATE_POST:
         active_key = (
             root_key
@@ -1690,7 +1826,7 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
         job_type=job.job_type,
         game_id=job.game_id,
         team_id=job.team_id,
-        post_id=job.post_id,
+        post_id=partial_post.id if resumable_partial else job.post_id,
         result_post_id=None,
         post_type=job.post_type,
         requested_by=user.id,
@@ -1700,7 +1836,7 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
         planned_outputs=job.planned_outputs,
         completed_outputs=0,
         attempts=0,
-        max_attempts=job.max_attempts,
+        max_attempts=max(job.max_attempts, _retry_attempt_budget(job.planned_outputs)),
         available_at=_now(),
         cancel_requested=False,
         idempotency_key=f"{root_key}:manual-retry:{retry_marker}",
