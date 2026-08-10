@@ -254,21 +254,25 @@ class OpenAIImageProvider(ImageProvider):
                     }
                     for _name, image_bytes, mime_type, _size in payloads
                 )
+                image_tool = {
+                    "type": "image_generation",
+                    "action": "edit",
+                    "model": model,
+                    "size": _responses_image_size(size),
+                    "quality": quality,
+                    "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
+                    "output_compression": OPENAI_IMAGE_OUTPUT_COMPRESSION,
+                }
+                # GPT Image 2 always processes reference images with high
+                # fidelity.  Its API contract rejects input_fidelity instead
+                # of accepting an explicit value.  Older GPT Image models
+                # still need the option to preserve logos and player details.
+                if not model.startswith("gpt-image-2"):
+                    image_tool["input_fidelity"] = "high"
                 response = self.client.responses.create(
                     model=self.responses_model,
                     input=[{"role": "user", "content": content}],
-                    tools=[
-                        {
-                            "type": "image_generation",
-                            "action": "edit",
-                            "model": model,
-                            "input_fidelity": "high",
-                            "size": _responses_image_size(size),
-                            "quality": quality,
-                            "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
-                            "output_compression": OPENAI_IMAGE_OUTPUT_COMPRESSION,
-                        }
-                    ],
+                    tools=[image_tool],
                     tool_choice={"type": "image_generation"},
                     store=False,
                 )

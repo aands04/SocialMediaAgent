@@ -103,7 +103,7 @@ def test_gpt_image_2_references_use_responses_image_tool(tmp_path):
     assert tool["output_format"] == "webp"
     assert tool["output_compression"] == 60
     assert tool["size"] == "1024x1536"
-    assert tool["input_fidelity"] == "high"
+    assert "input_fidelity" not in tool
     content = options["input"][0]["content"]
     assert "3 getrennte Eingabebilder" in content[0]["text"]
     assert len(content) == 4
@@ -228,6 +228,7 @@ def test_responses_reference_request_is_valid_json_not_multipart(tmp_path):
     payload = captured["payload"]
     assert isinstance(payload, dict)
     assert payload["tool_choice"] == {"type": "image_generation"}
+    assert "input_fidelity" not in payload["tools"][0]
     assert len(payload["input"][0]["content"]) == 3
 
 
