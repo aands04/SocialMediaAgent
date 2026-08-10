@@ -862,6 +862,83 @@ def test_openai_text_generator_falls_back_to_chat_after_responses_520():
     assert captured["verbosity"] == "low"
 
 
+def test_openai_text_transport_diagnostics_exclude_content(monkeypatch):
+    prompt = builtin_prompt("text", "announcement", "none", facts())
+    generator = OpenAITextGenerator("test-key", "unused")
+    error = RuntimeError("SECRET PROVIDER BODY")
+    error.status_code = 520
+
+    class Responses:
+        def create(self, **_options):
+            raise error
+
+    class Completions:
+        def create(self, **_options):
+            return type(
+                "Completion",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message", (), {"content": "Geprüfter Text"}
+                                )()
+                            },
+                        )()
+                    ],
+                    "usage": type("Usage", (), {"total_tokens": 21})(),
+                    "_request_id": "req_chat_safe",
+                },
+            )()
+
+    class CapturingLog:
+        def __init__(self):
+            self.events = []
+
+        def info(self, event, **fields):
+            self.events.append({"level": "info", "event": event, **fields})
+
+        def warning(self, event, **fields):
+            self.events.append({"level": "warning", "event": event, **fields})
+
+    generator.client = type(
+        "Client",
+        (),
+        {
+            "responses": Responses(),
+            "chat": type("Chat", (), {"completions": Completions()})(),
+        },
+    )()
+    captured = CapturingLog()
+    monkeypatch.setattr("app.textgen.service.log", captured)
+
+    result = generator.generate({"text_prompt": prompt})
+
+    assert result.text == "Geprüfter Text"
+    assert {item["operation_id"] for item in captured.events} == {
+        captured.events[0]["operation_id"]
+    }
+    assert any(
+        item["event"] == "openai_text_request_failed"
+        and item["transport"] == "responses.create"
+        and item["provider_status_code"] == 520
+        for item in captured.events
+    )
+    assert any(
+        item["event"] == "openai_text_request_succeeded"
+        and item["transport"] == "chat.completions"
+        and item["provider_request_id"] == "req_chat_safe"
+        for item in captured.events
+    )
+    serialized = repr(captured.events)
+    assert prompt.rendered not in serialized
+    assert "SECRET PROVIDER BODY" not in serialized
+    assert "Geprüfter Text" not in serialized
+
+
 def test_openai_text_generator_does_not_fallback_after_authentication_error():
     prompt = builtin_prompt("text", "announcement", "none", facts())
     generator = OpenAITextGenerator("test-key", "unused")

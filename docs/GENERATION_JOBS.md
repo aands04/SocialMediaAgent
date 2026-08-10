@@ -58,5 +58,27 @@ Auftrag. Ein Lauf über 15 Minuten wird als auffällig markiert. Für die Diagno
 zusätzlich Worker-Logs und die Felder `phase`, `locked_by`, `locked_at`,
 `lease_expires_at`, `attempts`, `error_category` und `error_message` prüfen.
 
+OpenAI-Aufrufe erzeugen zusätzlich rein technische, strukturierte Ereignisse:
+
+- `openai_image_request_started`, `openai_image_request_succeeded` und
+  `openai_image_request_failed` unterscheiden `images.edit`, `images.generate`
+  und `responses.image_generation`.
+- `openai_image_fallback_selected` dokumentiert den Wechsel auf den begrenzten
+  offiziellen Alternativtransport.
+- `openai_text_request_started`, `openai_text_request_completed`,
+  `openai_text_request_succeeded` und `openai_text_request_failed`
+  unterscheiden Responses und Chat Completions.
+- `openai_text_fallback_selected` nennt ausschließlich den technischen Grund
+  des Transportwechsels.
+
+Eine zufällige `operation_id` verbindet Primäraufruf und Fallback. Pro Aufruf
+werden API-Pfad, Modell, Zielformat, Laufzeit, bereinigte Request-ID und bei
+Bildaufträgen nur Anzahl, Gesamtgröße, MIME-Typen und Abmessungen der
+normalisierten Referenzen protokolliert. `generation_job_failed` ergänzt
+Ausgabeschlüssel, Jobphase, Versuchs- und Fortschrittszähler sowie dieselbe
+Transportdiagnose. Prompts, Texte, Bilddaten, Dateinamen, lokale Pfade, Tokens,
+Secrets und rohe Anbieterfehler werden ausdrücklich nicht in diese Logs
+geschrieben.
+
 Mehrere Worker dürfen mit derselben Datenbank betrieben werden; ein zusätzlicher
 Broker oder ein weiterer Microservice ist nicht erforderlich.

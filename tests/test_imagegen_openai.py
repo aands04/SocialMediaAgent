@@ -36,6 +36,17 @@ def provider_with_mock_client():
     return provider
 
 
+class CapturingLog:
+    def __init__(self):
+        self.events = []
+
+    def info(self, event, **fields):
+        self.events.append({"level": "info", "event": event, **fields})
+
+    def warning(self, event, **fields):
+        self.events.append({"level": "warning", "event": event, **fields})
+
+
 def write_reference(path, *, alpha=False, size=(64, 48)):
     mode = "RGBA" if alpha else "RGB"
     color = (10, 70, 140, 180) if alpha else (10, 70, 140)
@@ -423,3 +434,88 @@ def test_provider_exposes_only_safe_transport_diagnostics(tmp_path):
         "KI-Bildgenerierung fehlgeschlagen (HTTP 520, Request-ID req_123injected)"
     )
     assert "internal body" not in str(raised.value)
+
+
+def test_image_transport_logs_only_safe_metadata(monkeypatch, tmp_path):
+    reference = tmp_path / "secret-player-name.webp"
+    write_reference(reference)
+    provider = provider_with_mock_client()
+    error = RuntimeError("secret raw upstream response")
+    error.status_code = 503
+    error.request_id = "req_safe"
+    provider.client.images.edit.side_effect = error
+    captured = CapturingLog()
+    monkeypatch.setattr("app.imagegen.service.log", captured)
+
+    with pytest.raises(ImageGenerationError) as raised:
+        provider.generate(
+            prompt="SECRET PROMPT MUST NEVER BE LOGGED",
+            references=[reference],
+            size="1088x1360",
+            model="gpt-image-2",
+            quality="medium",
+        )
+
+    failed = next(
+        item for item in captured.events if item["event"] == "openai_image_request_failed"
+    )
+    assert failed["transport"] == "images.edit"
+    assert failed["provider_status_code"] == 503
+    assert failed["provider_request_id"] == "req_safe"
+    assert failed["reference_count"] == 1
+    assert failed["reference_mime_types"] == ("image/jpeg",)
+    assert failed["duration_ms"] >= 0
+    assert raised.value.provider_operation_id == failed["operation_id"]
+    assert raised.value.provider_transport == "images.edit"
+    assert raised.value.provider_duration_ms is not None
+    serialized = repr(captured.events)
+    assert "SECRET PROMPT" not in serialized
+    assert "secret-player-name" not in serialized
+    assert "secret raw upstream response" not in serialized
+
+
+def test_image_fallback_uses_same_diagnostic_operation_id(monkeypatch, tmp_path):
+    reference = tmp_path / "player.jpg"
+    write_reference(reference)
+    provider = provider_with_mock_client()
+    error = RuntimeError("upstream 520")
+    error.status_code = 520
+    provider.client.images.edit.side_effect = error
+    provider.client.responses.create.return_value = responses_image_response()
+    captured = CapturingLog()
+    monkeypatch.setattr("app.imagegen.service.log", captured)
+
+    assert (
+        provider.generate(
+            prompt="Fallback-Diagnose",
+            references=[reference],
+            size="1088x1360",
+            model="gpt-image-2",
+            quality="medium",
+        )
+        == PNG_BYTES
+    )
+
+    relevant = [
+        item
+        for item in captured.events
+        if item["event"]
+        in {
+            "openai_image_request_started",
+            "openai_image_request_failed",
+            "openai_image_fallback_selected",
+            "openai_image_request_succeeded",
+        }
+    ]
+    assert {item["operation_id"] for item in relevant} == {relevant[0]["operation_id"]}
+    assert any(
+        item["event"] == "openai_image_fallback_selected"
+        and item["to_transport"] == "responses.image_generation"
+        for item in relevant
+    )
+    assert any(
+        item["event"] == "openai_image_request_succeeded"
+        and item["transport"] == "responses.image_generation"
+        and item["fallback_used"] is True
+        for item in relevant
+    )

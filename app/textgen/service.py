@@ -1,8 +1,13 @@
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import structlog
 from openai import OpenAI
+
+log = structlog.get_logger()
 
 OPENAI_TEXT_MAX_OUTPUT_TOKENS = 1600
 
@@ -104,6 +109,47 @@ class OpenAITextGenerator(TextGenerator):
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
         return status_code if isinstance(status_code, int) else None
 
+    @staticmethod
+    def _safe_request_id(value: object) -> str | None:
+        if value is None:
+            return None
+        candidate = "".join(
+            character
+            for character in str(value).strip()[:200]
+            if character.isalnum() or character in {"-", "_", ".", ":"}
+        )
+        return candidate or None
+
+    @classmethod
+    def _provider_request_id(cls, value: object) -> str | None:
+        request_id = getattr(value, "request_id", None) or getattr(value, "_request_id", None)
+        if not request_id:
+            response = getattr(value, "response", None)
+            headers = getattr(response, "headers", None)
+            if headers:
+                request_id = headers.get("x-request-id")
+        return cls._safe_request_id(request_id)
+
+    @staticmethod
+    def _attach_transport_diagnostics(
+        exc: Exception,
+        *,
+        operation_id: str,
+        transport: str,
+        duration_ms: int,
+        fallback_used: bool,
+    ) -> None:
+        for name, value in (
+            ("provider_operation_id", operation_id),
+            ("provider_transport", transport),
+            ("provider_duration_ms", duration_ms),
+            ("provider_fallback_used", fallback_used),
+        ):
+            try:
+                setattr(exc, name, value)
+            except (AttributeError, TypeError):
+                pass
+
     @classmethod
     def _can_use_transport_fallback(cls, exc: Exception) -> bool:
         status_code = cls._provider_status_code(exc)
@@ -139,7 +185,14 @@ class OpenAITextGenerator(TextGenerator):
     def _usage_tokens(response) -> int | None:
         return getattr(getattr(response, "usage", None), "total_tokens", None)
 
-    def _chat_completion(self, rendered: str, model: str) -> tuple[str, int | None]:
+    def _chat_completion(
+        self,
+        rendered: str,
+        model: str,
+        *,
+        operation_id: str,
+        fallback_reason: str,
+    ) -> tuple[str, int | None]:
         options = {
             "model": model,
             "messages": [{"role": "user", "content": rendered}],
@@ -148,16 +201,56 @@ class OpenAITextGenerator(TextGenerator):
         if model.startswith("gpt-5"):
             options["reasoning_effort"] = "low"
             options["verbosity"] = "low"
-        completion = self.client.chat.completions.create(**options)
+        context = {
+            "operation_id": operation_id,
+            "transport": "chat.completions",
+            "model": model,
+            "input_chars": len(rendered),
+            "max_output_tokens": OPENAI_TEXT_MAX_OUTPUT_TOKENS,
+            "fallback_used": True,
+            "fallback_reason": fallback_reason,
+        }
+        log.info("openai_text_request_started", **context)
+        started = time.perf_counter()
+        try:
+            completion = self.client.chat.completions.create(**options)
+        except Exception as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            self._attach_transport_diagnostics(
+                exc,
+                operation_id=operation_id,
+                transport="chat.completions",
+                duration_ms=duration_ms,
+                fallback_used=True,
+            )
+            log.warning(
+                "openai_text_request_failed",
+                **context,
+                duration_ms=duration_ms,
+                exception_type=type(exc).__name__,
+                provider_status_code=self._provider_status_code(exc),
+                provider_request_id=self._provider_request_id(exc),
+            )
+            raise
         choices = list(getattr(completion, "choices", None) or [])
         content = (
             getattr(getattr(choices[0], "message", None), "content", None) if choices else None
         )
         if not isinstance(content, str) or not content.strip():
             raise ValueError("Der KI-Dienst hat keinen verwendbaren Begleittext geliefert.")
-        return content, self._usage_tokens(completion)
+        tokens = self._usage_tokens(completion)
+        log.info(
+            "openai_text_request_succeeded",
+            **context,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            provider_request_id=self._provider_request_id(completion),
+            output_chars=len(content),
+            total_tokens=tokens,
+        )
+        return content, tokens
 
     def _request_text(self, rendered: str, model: str) -> tuple[str, int | None]:
+        operation_id = uuid.uuid4().hex
         options = {
             "model": model,
             "input": rendered,
@@ -166,23 +259,92 @@ class OpenAITextGenerator(TextGenerator):
         if model.startswith("gpt-5"):
             options["reasoning"] = {"effort": "low"}
             options["text"] = {"verbosity": "low"}
+        context = {
+            "operation_id": operation_id,
+            "transport": "responses.create",
+            "model": model,
+            "input_chars": len(rendered),
+            "max_output_tokens": OPENAI_TEXT_MAX_OUTPUT_TOKENS,
+            "fallback_used": False,
+        }
+        log.info("openai_text_request_started", **context)
+        started = time.perf_counter()
         try:
             response = self.client.responses.create(**options)
         except Exception as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            self._attach_transport_diagnostics(
+                exc,
+                operation_id=operation_id,
+                transport="responses.create",
+                duration_ms=duration_ms,
+                fallback_used=False,
+            )
+            log.warning(
+                "openai_text_request_failed",
+                **context,
+                duration_ms=duration_ms,
+                exception_type=type(exc).__name__,
+                provider_status_code=self._provider_status_code(exc),
+                provider_request_id=self._provider_request_id(exc),
+            )
             if not self._can_use_transport_fallback(exc):
                 raise
-            return self._chat_completion(rendered, model)
+            log.info(
+                "openai_text_fallback_selected",
+                operation_id=operation_id,
+                from_transport="responses.create",
+                to_transport="chat.completions",
+                reason="retryable_transport_error",
+                provider_status_code=self._provider_status_code(exc),
+                provider_request_id=self._provider_request_id(exc),
+            )
+            return self._chat_completion(
+                rendered,
+                model,
+                operation_id=operation_id,
+                fallback_reason="retryable_transport_error",
+            )
 
         status = str(getattr(response, "status", "") or "").casefold()
         output_text = getattr(response, "output_text", None)
+        incomplete_reason = self._incomplete_reason(response)
+        log.info(
+            "openai_text_request_completed",
+            **context,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            provider_request_id=self._provider_request_id(response),
+            response_status=status or None,
+            incomplete_reason=incomplete_reason,
+            output_chars=len(output_text) if isinstance(output_text, str) else 0,
+            total_tokens=self._usage_tokens(response),
+        )
         if (not status or status == "completed") and isinstance(output_text, str):
             if output_text.strip():
                 return output_text, self._usage_tokens(response)
-        if status == "incomplete" and self._incomplete_reason(response) == "max_output_tokens":
-            return self._chat_completion(rendered, model)
-        if not output_text:
-            return self._chat_completion(rendered, model)
-        raise ValueError("Der KI-Dienst hat die Texterstellung nicht vollständig abgeschlossen.")
+        if status == "incomplete" and incomplete_reason == "max_output_tokens":
+            fallback_reason = "max_output_tokens"
+        elif not output_text:
+            fallback_reason = "missing_output_text"
+        else:
+            raise ValueError(
+                "Der KI-Dienst hat die Texterstellung nicht vollständig abgeschlossen."
+            )
+        log.info(
+            "openai_text_fallback_selected",
+            operation_id=operation_id,
+            from_transport="responses.create",
+            to_transport="chat.completions",
+            reason=fallback_reason,
+            provider_status_code=None,
+            provider_request_id=self._provider_request_id(response),
+        )
+        return self._chat_completion(
+            rendered,
+            model,
+            operation_id=operation_id,
+            fallback_reason=fallback_reason,
+        )
 
     def prepare_generate(self, data: dict) -> tuple[str, str, str]:
         prompt = data.get("text_prompt")

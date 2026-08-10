@@ -1,14 +1,19 @@
 import base64
 import hashlib
+import time
+import uuid
 from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
+import structlog
 from openai import OpenAI
 from PIL import Image, ImageOps
 
 from app.rendering.service import Renderer, RenderValidationError
+
+log = structlog.get_logger()
 
 LOGO_REFERENCE_VERSION = "verified-media-ai-references-v2"
 OPENAI_IMAGE_OUTPUT_FORMAT = "png"
@@ -51,6 +56,10 @@ class ImageGenerationError(RenderValidationError):
         provider_reference_total_bytes: int | None = None,
         provider_reference_mime_types: tuple[str, ...] = (),
         provider_reference_dimensions: tuple[str, ...] = (),
+        provider_operation_id: str | None = None,
+        provider_transport: str | None = None,
+        provider_duration_ms: int | None = None,
+        provider_fallback_used: bool = False,
     ):
         super().__init__(message)
         self.provider_status_code = provider_status_code
@@ -59,6 +68,10 @@ class ImageGenerationError(RenderValidationError):
         self.provider_reference_total_bytes = provider_reference_total_bytes
         self.provider_reference_mime_types = provider_reference_mime_types
         self.provider_reference_dimensions = provider_reference_dimensions
+        self.provider_operation_id = provider_operation_id
+        self.provider_transport = provider_transport
+        self.provider_duration_ms = provider_duration_ms
+        self.provider_fallback_used = provider_fallback_used
 
 
 def _safe_provider_request_id(value: object) -> str | None:
@@ -86,6 +99,34 @@ def _provider_error_metadata(exc: Exception) -> tuple[int | None, str | None]:
         if headers:
             request_id = headers.get("x-request-id")
     return status_code, _safe_provider_request_id(request_id)
+
+
+def _provider_response_request_id(response: object) -> str | None:
+    return _safe_provider_request_id(
+        getattr(response, "_request_id", None) or getattr(response, "request_id", None)
+    )
+
+
+def _attach_provider_diagnostics(
+    exc: Exception,
+    *,
+    operation_id: str,
+    transport: str,
+    duration_ms: int,
+    fallback_used: bool,
+) -> None:
+    """Attach only non-sensitive transport metadata for the persistent job log."""
+
+    for name, value in (
+        ("provider_operation_id", operation_id),
+        ("provider_transport", transport),
+        ("provider_duration_ms", duration_ms),
+        ("provider_fallback_used", fallback_used),
+    ):
+        try:
+            setattr(exc, name, value)
+        except (AttributeError, TypeError):
+            pass
 
 
 def _has_alpha(image: Image.Image) -> bool:
@@ -311,6 +352,78 @@ class OpenAIImageProvider(ImageProvider):
         self.client = OpenAI(api_key=api_key, max_retries=0)
         self.responses_model = responses_model
 
+    @staticmethod
+    def _request_context(
+        *,
+        operation_id: str,
+        transport: str,
+        model: str,
+        requested_size: str,
+        provider_size: str,
+        quality: str,
+        prompt_chars: int,
+        diagnostics: ReferenceUploadDiagnostics | None,
+        fallback_used: bool,
+    ) -> dict[str, object]:
+        return {
+            "operation_id": operation_id,
+            "transport": transport,
+            "model": model,
+            "requested_size": requested_size,
+            "provider_size": provider_size,
+            "quality": quality,
+            "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
+            "prompt_chars": prompt_chars,
+            "reference_count": diagnostics.count if diagnostics else 0,
+            "reference_total_bytes": diagnostics.total_bytes if diagnostics else 0,
+            "reference_mime_types": diagnostics.mime_types if diagnostics else (),
+            "reference_dimensions": diagnostics.dimensions if diagnostics else (),
+            "fallback_used": fallback_used,
+        }
+
+    def _execute_provider_request(
+        self,
+        *,
+        context: dict[str, object],
+        request,
+        extract,
+    ) -> bytes:
+        """Run one API request with content-free structured diagnostics."""
+
+        log.info("openai_image_request_started", **context)
+        started = time.perf_counter()
+        try:
+            response = request()
+            result = extract(response)
+        except Exception as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000)
+            status_code, request_id = _provider_error_metadata(exc)
+            _attach_provider_diagnostics(
+                exc,
+                operation_id=str(context["operation_id"]),
+                transport=str(context["transport"]),
+                duration_ms=duration_ms,
+                fallback_used=bool(context["fallback_used"]),
+            )
+            log.warning(
+                "openai_image_request_failed",
+                **context,
+                duration_ms=duration_ms,
+                exception_type=type(exc).__name__,
+                provider_status_code=status_code,
+                provider_request_id=request_id,
+            )
+            raise
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        log.info(
+            "openai_image_request_succeeded",
+            **context,
+            duration_ms=duration_ms,
+            provider_request_id=_provider_response_request_id(response),
+            response_bytes=len(result),
+        )
+        return result
+
     def _responses_edit(
         self,
         *,
@@ -319,6 +432,8 @@ class OpenAIImageProvider(ImageProvider):
         size: str,
         model: str,
         quality: str,
+        operation_id: str,
+        diagnostics: ReferenceUploadDiagnostics,
     ) -> bytes:
         _name, image_bytes, mime_type, _dimensions = payload
         content = [
@@ -341,14 +456,28 @@ class OpenAIImageProvider(ImageProvider):
         }
         if not model.startswith("gpt-image-2"):
             image_tool["input_fidelity"] = "high"
-        response = self.client.responses.create(
-            model=self.responses_model,
-            input=[{"role": "user", "content": content}],
-            tools=[image_tool],
-            tool_choice={"type": "image_generation"},
-            store=False,
+        context = self._request_context(
+            operation_id=operation_id,
+            transport="responses.image_generation",
+            model=model,
+            requested_size=size,
+            provider_size=str(image_tool["size"]),
+            quality=quality,
+            prompt_chars=len(prompt),
+            diagnostics=diagnostics,
+            fallback_used=True,
         )
-        return _response_image_bytes(response)
+        return self._execute_provider_request(
+            context=context,
+            request=lambda: self.client.responses.create(
+                model=self.responses_model,
+                input=[{"role": "user", "content": content}],
+                tools=[image_tool],
+                tool_choice={"type": "image_generation"},
+                store=False,
+            ),
+            extract=_response_image_bytes,
+        )
 
     def generate(
         self,
@@ -359,6 +488,7 @@ class OpenAIImageProvider(ImageProvider):
         quality: str,
     ) -> bytes:
         reference_diagnostics: ReferenceUploadDiagnostics | None = None
+        operation_id = uuid.uuid4().hex
         try:
             if references:
                 payloads = [
@@ -398,30 +528,75 @@ class OpenAIImageProvider(ImageProvider):
                     # still accept it.
                     if not model.startswith("gpt-image-2"):
                         edit_options["input_fidelity"] = "high"
+                    context = self._request_context(
+                        operation_id=operation_id,
+                        transport="images.edit",
+                        model=model,
+                        requested_size=size,
+                        provider_size=str(edit_options["size"]),
+                        quality=quality,
+                        prompt_chars=len(str(edit_options["prompt"])),
+                        diagnostics=reference_diagnostics,
+                        fallback_used=False,
+                    )
                     try:
-                        response = self.client.images.edit(**edit_options)
+                        return self._execute_provider_request(
+                            context=context,
+                            request=lambda: self.client.images.edit(**edit_options),
+                            extract=lambda response: base64.b64decode(
+                                response.data[0].b64_json, validate=True
+                            ),
+                        )
                     except Exception as edit_exc:
                         if not _may_fallback_to_responses(edit_exc, len(payloads)):
                             raise
+                        status_code, request_id = _provider_error_metadata(edit_exc)
+                        log.info(
+                            "openai_image_fallback_selected",
+                            operation_id=operation_id,
+                            from_transport="images.edit",
+                            to_transport="responses.image_generation",
+                            reason="unassigned_http_520",
+                            provider_status_code=status_code,
+                            provider_request_id=request_id,
+                            reference_count=reference_diagnostics.count,
+                        )
                         return self._responses_edit(
                             prompt=edit_options["prompt"],
                             payload=payloads[0],
                             size=size,
                             model=model,
                             quality=quality,
+                            operation_id=operation_id,
+                            diagnostics=reference_diagnostics,
                         )
             else:
-                response = self.client.images.generate(
+                provider_prompt = _provider_prompt(prompt, 0, size)
+                provider_size = _provider_image_size(size, model)
+                context = self._request_context(
+                    operation_id=operation_id,
+                    transport="images.generate",
                     model=model,
-                    prompt=_provider_prompt(prompt, 0, size),
-                    size=_provider_image_size(size, model),
+                    requested_size=size,
+                    provider_size=provider_size,
                     quality=quality,
-                    **_provider_output_options(),
+                    prompt_chars=len(provider_prompt),
+                    diagnostics=None,
+                    fallback_used=False,
                 )
-            encoded = response.data[0].b64_json
-            if not encoded:
-                raise ImageGenerationError("Bild-API hat keine eingebetteten Bilddaten geliefert")
-            return base64.b64decode(encoded, validate=True)
+                return self._execute_provider_request(
+                    context=context,
+                    request=lambda: self.client.images.generate(
+                        model=model,
+                        prompt=provider_prompt,
+                        size=provider_size,
+                        quality=quality,
+                        **_provider_output_options(),
+                    ),
+                    extract=lambda response: base64.b64decode(
+                        response.data[0].b64_json, validate=True
+                    ),
+                )
         except ImageGenerationError:
             raise
         except Exception as exc:
@@ -448,6 +623,10 @@ class OpenAIImageProvider(ImageProvider):
                 provider_reference_dimensions=(
                     reference_diagnostics.dimensions if reference_diagnostics else ()
                 ),
+                provider_operation_id=getattr(exc, "provider_operation_id", operation_id),
+                provider_transport=getattr(exc, "provider_transport", None),
+                provider_duration_ms=getattr(exc, "provider_duration_ms", None),
+                provider_fallback_used=bool(getattr(exc, "provider_fallback_used", False)),
             ) from exc
 
 
