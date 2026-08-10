@@ -1726,6 +1726,16 @@ def process_generation_job(
             provider_reference_total_bytes=getattr(exc, "provider_reference_total_bytes", None),
             provider_reference_mime_types=getattr(exc, "provider_reference_mime_types", ()),
             provider_reference_dimensions=getattr(exc, "provider_reference_dimensions", ()),
+            provider_operation_id=getattr(exc, "provider_operation_id", None),
+            provider_transport=getattr(exc, "provider_transport", None),
+            provider_duration_ms=getattr(exc, "provider_duration_ms", None),
+            provider_fallback_used=getattr(exc, "provider_fallback_used", False),
+            generation_output_key=getattr(exc, "generation_output_key", None),
+            job_phase=job.phase,
+            job_attempts=job.attempts,
+            job_max_attempts=job.max_attempts,
+            job_completed_outputs=job.completed_outputs,
+            job_planned_outputs=job.planned_outputs,
         )
     return db.get(GenerationJob, job_id)
 
