@@ -341,6 +341,9 @@ class _ProgressRenderer:
             prompt_version=prompt_version,
         )
         rendered_prompt = str(getattr(prompt, "rendered", ""))
+        provider_prompt = getattr(self.inner, "provider_prompt", None)
+        if callable(provider_prompt):
+            rendered_prompt = str(provider_prompt(context) or "")
         dispatch = (
             _record_prompt_dispatch(
                 self.db,

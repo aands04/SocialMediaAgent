@@ -9,8 +9,7 @@ from openai import OpenAI
 from PIL import Image
 
 from app.imagegen.service import (
-    REFERENCE_LOGO_MAX_EDGE,
-    REFERENCE_PLAYER_MAX_EDGE,
+    REFERENCE_BOARD_MAX_EDGE,
     ImageGenerationError,
     OpenAIImageProvider,
 )
@@ -88,12 +87,10 @@ def test_gpt_image_2_edit_omits_unsupported_parameters(tmp_path):
     assert options["output_compression"] == 60
     assert "response_format" not in options
     assert "input_fidelity" not in options
-    assert len(options["image"]) == 3
-    assert [item.name for item in options["image"]] == [
-        "reference-1.jpg",
-        "reference-2.png",
-        "reference-3.png",
-    ]
+    assert len(options["image"]) == 1
+    assert options["image"][0].name == "reference-board.png"
+    assert "Referenztafel mit 3 klar getrennten Feldern" in options["prompt"]
+    assert "ursprünglichen Referenzen 1 bis 3" in options["prompt"]
     assert all(item.closed for item in options["image"])
 
 
@@ -126,7 +123,7 @@ def test_edit_normalizes_player_reference_to_explicit_jpeg(tmp_path, filename):
     assert upload.closed
 
 
-def test_edit_normalizes_and_bounds_reference_images(tmp_path):
+def test_edit_combines_multiple_normalized_references_into_bounded_board(tmp_path):
     player = tmp_path / "player.jpg"
     logo = tmp_path / "logo.webp"
     write_reference(player, size=(3000, 1200))
@@ -150,18 +147,15 @@ def test_edit_normalizes_and_bounds_reference_images(tmp_path):
     )
 
     assert result == PNG_BYTES
-    assert [item[0] for item in captured] == ["reference-1.jpg", "reference-2.png"]
-    for index, (_name, content) in enumerate(captured, start=1):
-        with Image.open(BytesIO(content)) as image:
-            image.load()
-            expected_max_edge = REFERENCE_PLAYER_MAX_EDGE if index == 1 else REFERENCE_LOGO_MAX_EDGE
-            assert max(image.size) <= expected_max_edge
-            assert not image.getexif()
-    with Image.open(BytesIO(captured[1][1])) as logo_upload:
-        assert "A" in logo_upload.getbands()
+    assert [item[0] for item in captured] == ["reference-board.png"]
+    with Image.open(BytesIO(captured[0][1])) as board:
+        board.load()
+        assert max(board.size) <= REFERENCE_BOARD_MAX_EDGE
+        assert board.width > board.height
+        assert not board.getexif()
 
 
-def test_edit_sends_named_image_parts_with_explicit_sdk_mime_types(tmp_path):
+def test_edit_sends_reference_board_as_one_named_multipart_part(tmp_path):
     player = tmp_path / "player.jpg"
     logo = tmp_path / "logo.png"
     write_reference(player)
@@ -196,10 +190,28 @@ def test_edit_sends_named_image_parts_with_explicit_sdk_mime_types(tmp_path):
 
     body = captured["body"]
     assert isinstance(body, bytes)
-    assert b'name="image[]"; filename="reference-1.jpg"' in body
-    assert b"Content-Type: image/jpeg" in body
-    assert b'name="image[]"; filename="reference-2.png"' in body
+    assert b'name="image[]"; filename="reference-board.png"' in body
     assert b"Content-Type: image/png" in body
+    assert body.count(b'name="image[]"') == 1
+
+
+def test_single_reference_keeps_original_prompt_and_single_upload(tmp_path):
+    reference = tmp_path / "player.jpg"
+    write_reference(reference, size=(3000, 1200))
+    provider = provider_with_mock_client()
+    provider.client.images.edit.return_value = image_response()
+
+    provider.generate(
+        prompt="Unveränderter Einzelreferenz-Prompt",
+        references=[reference],
+        size="1088x1360",
+        model="gpt-image-2",
+        quality="medium",
+    )
+
+    options = provider.client.images.edit.call_args.kwargs
+    assert options["prompt"] == "Unveränderter Einzelreferenz-Prompt"
+    assert options["image"][0].name == "reference-1.jpg"
 
 
 def test_edit_rejects_unsupported_reference_format_before_api_call(tmp_path):
