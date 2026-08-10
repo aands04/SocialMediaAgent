@@ -250,6 +250,28 @@ def _reference_uploads(
     ]
 
 
+def _response_image_bytes(response: object) -> bytes:
+    for item in getattr(response, "output", ()) or ():
+        if getattr(item, "type", None) != "image_generation_call":
+            continue
+        encoded = getattr(item, "result", None)
+        if encoded:
+            return base64.b64decode(encoded, validate=True)
+    raise ImageGenerationError("Bild-Tool hat keine eingebetteten Bilddaten geliefert")
+
+
+def _may_fallback_to_responses(exc: Exception, reference_count: int) -> bool:
+    """Allow one official alternate transport for an unhandled upstream 520.
+
+    The fallback is deliberately restricted to a single reference and to a
+    response that never received an OpenAI request ID.  Authentication,
+    validation and quota errors must never be hidden by a second request.
+    """
+
+    status_code, request_id = _provider_error_metadata(exc)
+    return reference_count == 1 and status_code == 520 and request_id is None
+
+
 class ImageProvider:
     def generate(
         self,
@@ -263,11 +285,52 @@ class ImageProvider:
 
 
 class OpenAIImageProvider(ImageProvider):
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, *, responses_model: str = "gpt-5.4-mini"):
         # Keep provider retries under the generation job's persistent cost and
         # idempotency guard.  This also prevents an SDK-level retry from racing
         # with the worker's single delayed retry for the same output slot.
         self.client = OpenAI(api_key=api_key, max_retries=0)
+        self.responses_model = responses_model
+
+    def _responses_edit(
+        self,
+        *,
+        prompt: str,
+        payload: tuple[str, bytes, str, tuple[int, int]],
+        size: str,
+        model: str,
+        quality: str,
+    ) -> bytes:
+        _name, image_bytes, mime_type, _dimensions = payload
+        content = [
+            {"type": "input_text", "text": prompt},
+            {
+                "type": "input_image",
+                "image_url": (
+                    f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+                ),
+                "detail": "high",
+            },
+        ]
+        image_tool = {
+            "type": "image_generation",
+            "action": "edit",
+            "model": model,
+            "size": _provider_image_size(size),
+            "quality": quality,
+            "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
+            "output_compression": OPENAI_IMAGE_OUTPUT_COMPRESSION,
+        }
+        if not model.startswith("gpt-image-2"):
+            image_tool["input_fidelity"] = "high"
+        response = self.client.responses.create(
+            model=self.responses_model,
+            input=[{"role": "user", "content": content}],
+            tools=[image_tool],
+            tool_choice={"type": "image_generation"},
+            store=False,
+        )
+        return _response_image_bytes(response)
 
     def generate(
         self,
@@ -299,9 +362,14 @@ class OpenAIImageProvider(ImageProvider):
                 # Production repeatedly received an upstream HTTP 520 before
                 # an OpenAI request ID was assigned on that JSON transport.
                 with ExitStack() as stack:
+                    uploads = _reference_uploads(stack, payloads)
                     edit_options = {
                         "model": model,
-                        "image": _reference_uploads(stack, payloads),
+                        # The SDK accepts one file or a sequence.  Sending a
+                        # singleton as a file avoids serialising it as the
+                        # multi-image field `image[]`, which repeatedly failed
+                        # upstream before OpenAI assigned a request ID.
+                        "image": uploads[0] if len(uploads) == 1 else uploads,
                         "prompt": _provider_prompt(prompt, len(payloads), size),
                         "size": _provider_image_size(size),
                         "quality": quality,
@@ -313,7 +381,18 @@ class OpenAIImageProvider(ImageProvider):
                     # still accept it.
                     if not model.startswith("gpt-image-2"):
                         edit_options["input_fidelity"] = "high"
-                    response = self.client.images.edit(**edit_options)
+                    try:
+                        response = self.client.images.edit(**edit_options)
+                    except Exception as edit_exc:
+                        if not _may_fallback_to_responses(edit_exc, len(payloads)):
+                            raise
+                        return self._responses_edit(
+                            prompt=edit_options["prompt"],
+                            payload=payloads[0],
+                            size=size,
+                            model=model,
+                            quality=quality,
+                        )
             else:
                 response = self.client.images.generate(
                     model=model,
