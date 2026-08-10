@@ -13,10 +13,11 @@ from app.rendering.service import Renderer, RenderValidationError
 LOGO_REFERENCE_VERSION = "verified-media-ai-references-v2"
 OPENAI_IMAGE_OUTPUT_FORMAT = "webp"
 OPENAI_IMAGE_OUTPUT_COMPRESSION = 60
-REFERENCE_IMAGE_MAX_EDGE = 2048
+REFERENCE_PLAYER_MAX_EDGE = 1536
+REFERENCE_LOGO_MAX_EDGE = 1024
 REFERENCE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 REFERENCE_IMAGE_MAX_PIXELS = 40_000_000
-REFERENCE_PLAYER_JPEG_QUALITY = 92
+REFERENCE_PLAYER_JPEG_QUALITY = 90
 
 REFERENCE_IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
@@ -31,6 +32,14 @@ class ReferenceUploadDiagnostics(NamedTuple):
     total_bytes: int
     mime_types: tuple[str, ...]
     dimensions: tuple[str, ...]
+
+
+class _NamedUpload(BytesIO):
+    """In-memory file with a stable name for the SDK multipart encoder."""
+
+    def __init__(self, content: bytes, name: str):
+        super().__init__(content)
+        self.name = name
 
 
 class ImageGenerationError(RenderValidationError):
@@ -109,9 +118,10 @@ def _normalized_reference_bytes(
                 raise ImageGenerationError("Das Referenzbild überschreitet die sichere Pixelanzahl")
             source.load()
             normalized = ImageOps.exif_transpose(source)
-            if max(normalized.size) > REFERENCE_IMAGE_MAX_EDGE:
+            max_edge = REFERENCE_PLAYER_MAX_EDGE if position == 1 else REFERENCE_LOGO_MAX_EDGE
+            if max(normalized.size) > max_edge:
                 normalized.thumbnail(
-                    (REFERENCE_IMAGE_MAX_EDGE, REFERENCE_IMAGE_MAX_EDGE),
+                    (max_edge, max_edge),
                     Image.Resampling.LANCZOS,
                 )
             alpha = _has_alpha(normalized)
@@ -158,8 +168,8 @@ def _normalized_reference_bytes(
 def _reference_uploads(
     stack: ExitStack,
     references: list[Path],
-) -> tuple[list[tuple[str, BinaryIO, str]], ReferenceUploadDiagnostics]:
-    uploads: list[tuple[str, BinaryIO, str]] = []
+) -> tuple[list[BinaryIO], ReferenceUploadDiagnostics]:
+    uploads: list[BinaryIO] = []
     total_bytes = 0
     mime_types: list[str] = []
     dimensions: list[str] = []
@@ -168,8 +178,12 @@ def _reference_uploads(
             path,
             position=position,
         )
-        handle = stack.enter_context(BytesIO(content))
-        uploads.append((name, handle, mime_type))
+        # Match the official Python client example: pass named binary handles
+        # and let the SDK build image[] multipart parts.  Supplying nested
+        # tuples worked for many requests but repeatedly produced provider
+        # HTTP 520 responses for otherwise valid multi-reference edits.
+        handle = stack.enter_context(_NamedUpload(content, name))
+        uploads.append(handle)
         total_bytes += len(content)
         mime_types.append(mime_type)
         dimensions.append(f"{size[0]}x{size[1]}")
