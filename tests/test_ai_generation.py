@@ -10,7 +10,7 @@ from app.imagegen.service import (
     AIImageRenderer,
     ImageGenerationError,
     ImageProvider,
-    _fit_without_clipping,
+    _fit_full_bleed,
 )
 from app.logos.service import store_logo
 from app.models import (
@@ -70,7 +70,7 @@ def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     assert "Referenzbild 2" in prompt.rendered
     assert "kein drittes Referenzbild" in prompt.rendered
     assert "oben links und oben rechts" not in prompt.rendered
-    assert prompt.policy_version == "verified-media-ai-references-v3-safe-layout"
+    assert prompt.policy_version == "verified-media-ai-references-v4-full-bleed-safe-layout"
     assert "{{" not in prompt.rendered
 
 
@@ -211,28 +211,37 @@ class FakeImageProvider(ImageProvider):
         return data.getvalue()
 
 
-@pytest.mark.parametrize("target_size", [(1080, 1350), (1080, 1920)])
-def test_ai_format_conversion_preserves_all_four_source_edges(target_size):
-    source = Image.new("RGB", (1024, 1536), "#24334d")
+@pytest.mark.parametrize(
+    ("target_size", "edge_sample", "edge_color"),
+    [
+        ((1080, 1350), (5, 675), (255, 255, 0)),
+        ((1080, 1920), (540, 5), (255, 0, 0)),
+    ],
+)
+def test_ai_format_conversion_is_full_bleed_and_preserves_safe_area(
+    target_size, edge_sample, edge_color
+):
+    source = Image.new("RGB", (1024, 1536), "white")
     draw = ImageDraw.Draw(source)
-    marker_size = 120
+    draw.rectangle((0, 0, 160, 1536), fill=(255, 255, 0))
+    draw.rectangle((864, 0, 1024, 1536), fill=(0, 255, 0))
+    draw.rectangle((0, 0, 1024, 160), fill=(255, 0, 0))
+    draw.rectangle((0, 1376, 1024, 1536), fill=(0, 0, 255))
+
+    marker_size = 64
     markers = {
-        (255, 0, 0): (0, 0, marker_size, marker_size),
-        (0, 255, 0): (1024 - marker_size, 0, 1024, marker_size),
-        (0, 0, 255): (0, 1536 - marker_size, marker_size, 1536),
-        (255, 255, 0): (
-            1024 - marker_size,
-            1536 - marker_size,
-            1024,
-            1536,
-        ),
+        (255, 0, 255): (160, 160, 160 + marker_size, 160 + marker_size),
+        (0, 255, 255): (800, 160, 800 + marker_size, 160 + marker_size),
+        (128, 0, 128): (160, 1312, 160 + marker_size, 1312 + marker_size),
+        (255, 128, 0): (800, 1312, 800 + marker_size, 1312 + marker_size),
     }
     for color, box in markers.items():
         draw.rectangle(box, fill=color)
 
-    converted = _fit_without_clipping(source, target_size)
+    converted = _fit_full_bleed(source, target_size)
 
     assert converted.size == target_size
+    assert converted.getpixel(edge_sample) == edge_color
     colors = set(converted.get_flattened_data())
     assert set(markers).issubset(colors)
 
@@ -616,7 +625,7 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     assert post.design_snapshot["prompts"]["feed"]["version"] == 3
     assert (
         post.design_snapshot["prompts"]["feed"]["policy_version"]
-        == "verified-media-ai-references-v3-safe-layout"
+        == "verified-media-ai-references-v4-full-bleed-safe-layout"
     )
     prompt_snapshot = post.design_snapshot["prompts"]["feed"]
     assert "rendered" not in prompt_snapshot
