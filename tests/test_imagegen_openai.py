@@ -18,9 +18,21 @@ def image_response():
     )
 
 
+def responses_image_response():
+    return SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="image_generation_call",
+                result=base64.b64encode(PNG_BYTES).decode("ascii"),
+            )
+        ]
+    )
+
+
 def provider_with_mock_client():
     provider = OpenAIImageProvider.__new__(OpenAIImageProvider)
     provider.client = Mock()
+    provider.responses_model = "gpt-5.4-mini"
     return provider
 
 
@@ -116,8 +128,8 @@ def test_edit_normalizes_player_reference_to_explicit_jpeg(tmp_path, filename):
     )
 
     assert result == PNG_BYTES
-    uploads = provider.client.images.edit.call_args.kwargs["image"]
-    assert uploads[0].name == "reference-1.jpg"
+    upload = provider.client.images.edit.call_args.kwargs["image"]
+    assert upload.name == "reference-1.jpg"
 
 
 def test_edit_sends_multiple_normalized_references_as_separate_files(tmp_path):
@@ -187,6 +199,115 @@ def test_reference_request_uses_official_multipart_image_edit_endpoint(tmp_path)
     assert b'name="size"' in body
     assert b"1024x1536" in body
     assert b"input_fidelity" not in body
+
+
+def test_single_reference_uses_non_array_multipart_field(tmp_path):
+    player = tmp_path / "player.jpg"
+    write_reference(player)
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request):
+        captured["body"] = request.read()
+        return httpx.Response(
+            200,
+            request=request,
+            json={"data": [{"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")}]},
+        )
+
+    provider = OpenAIImageProvider.__new__(OpenAIImageProvider)
+    provider.client = OpenAI(
+        api_key="test",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.responses_model = "gpt-5.4-mini"
+
+    assert (
+        provider.generate(
+            prompt="Einzeldatei-Transport",
+            references=[player],
+            size="1088x1360",
+            model="gpt-image-2",
+            quality="medium",
+        )
+        == PNG_BYTES
+    )
+
+    body = captured["body"]
+    assert isinstance(body, bytes)
+    assert b'name="image"' in body
+    assert b'name="image[]"' not in body
+
+
+def test_single_reference_falls_back_to_responses_after_unassigned_520(tmp_path):
+    player = tmp_path / "player.jpg"
+    write_reference(player)
+    provider = provider_with_mock_client()
+    error = RuntimeError("upstream 520")
+    error.status_code = 520
+    provider.client.images.edit.side_effect = error
+    provider.client.responses.create.return_value = responses_image_response()
+
+    result = provider.generate(
+        prompt="Transport-Fallback",
+        references=[player],
+        size="1088x1360",
+        model="gpt-image-2",
+        quality="medium",
+    )
+
+    assert result == PNG_BYTES
+    provider.client.responses.create.assert_called_once()
+    options = provider.client.responses.create.call_args.kwargs
+    assert options["model"] == "gpt-5.4-mini"
+    assert options["tools"][0]["action"] == "edit"
+    assert options["tools"][0]["model"] == "gpt-image-2"
+    assert len(options["input"][0]["content"]) == 2
+    assert options["input"][0]["content"][1]["image_url"].startswith("data:image/jpeg;base64,")
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 429, 500, 503])
+def test_single_reference_does_not_fallback_for_other_provider_errors(tmp_path, status_code):
+    player = tmp_path / "player.jpg"
+    write_reference(player)
+    provider = provider_with_mock_client()
+    error = RuntimeError("provider error")
+    error.status_code = status_code
+    provider.client.images.edit.side_effect = error
+
+    with pytest.raises(ImageGenerationError) as raised:
+        provider.generate(
+            prompt="Kein Transport-Fallback",
+            references=[player],
+            size="1088x1360",
+            model="gpt-image-2",
+            quality="medium",
+        )
+
+    assert raised.value.provider_status_code == status_code
+    provider.client.responses.create.assert_not_called()
+
+
+def test_single_reference_does_not_fallback_when_520_has_request_id(tmp_path):
+    player = tmp_path / "player.jpg"
+    write_reference(player)
+    provider = provider_with_mock_client()
+    error = RuntimeError("assigned provider request")
+    error.status_code = 520
+    error.request_id = "req_assigned"
+    provider.client.images.edit.side_effect = error
+
+    with pytest.raises(ImageGenerationError) as raised:
+        provider.generate(
+            prompt="Kein zweiter Provider-Aufruf",
+            references=[player],
+            size="1088x1360",
+            model="gpt-image-2",
+            quality="medium",
+        )
+
+    assert raised.value.provider_request_id == "req_assigned"
+    provider.client.responses.create.assert_not_called()
 
 
 def test_single_reference_adds_safe_reference_instruction(tmp_path):
@@ -269,7 +390,7 @@ def test_provider_disables_sdk_retries_for_persistent_cost_guard(monkeypatch):
     openai = Mock()
     monkeypatch.setattr("app.imagegen.service.OpenAI", openai)
 
-    OpenAIImageProvider("secret")
+    OpenAIImageProvider("secret", responses_model="gpt-5.4-mini")
 
     openai.assert_called_once_with(api_key="secret", max_retries=0)
 
