@@ -202,7 +202,9 @@ def _provider_prompt(prompt: str, reference_count: int, size: str) -> str:
             f"TECHNISCHER REFERENZHINWEIS: Zusätzlich wurden {reference_count} "
             "getrennte Eingabebilder in der im Prompt beschriebenen Reihenfolge "
             "übergeben: zuerst das Spielerfoto, danach Mannschaftslogo, optionales "
-            "Gegnerlogo und optionale Sponsorenlogos. Verwende jedes Bild nur für "
+            "Gegnerlogo, optionale Sponsorenlogos und bei Ergebnismeldungen zuletzt "
+            "optional das frühere Ankündigungs-Feedbild als reine Layoutreferenz. "
+            "Verwende jedes Bild nur für "
             "seine genannte Rolle. Logos, Wappen und Sponsorzeichen müssen inhaltlich "
             "unverändert bleiben. Die Eingabebilder sind Referenzen und dürfen nicht "
             "als Collage oder technische Tafel im Ergebnis erscheinen."
@@ -413,6 +415,16 @@ class AIImageRenderer:
             )
         return path
 
+    def _result_layout_reference(self, value: str | None) -> Path | None:
+        """Resolve a tenant-selected generated image inside this renderer root."""
+
+        return Renderer._safe_file(
+            value,
+            (self.root,),
+            Renderer.image_types,
+            20 * 1024 * 1024,
+        )
+
     @staticmethod
     def provider_prompt(data: dict) -> str:
         """Return the exact prompt the lower-level provider will transmit."""
@@ -424,11 +436,17 @@ class AIImageRenderer:
         reference_count += len(
             [item for item in (data.get("sponsor_references") or []) if isinstance(item, dict)]
         )
+        reference_count += int(bool(data.get("result_layout_reference")))
         size = "1088x1920" if getattr(prompt, "media_kind", "") == "story" else "1088x1360"
         return _provider_prompt(rendered, reference_count, size)
 
     @staticmethod
-    def _reference_metadata(data: dict, opponent_present: bool, sponsors: list[dict]) -> dict:
+    def _reference_metadata(
+        data: dict,
+        opponent_present: bool,
+        sponsors: list[dict],
+        result_layout_present: bool,
+    ) -> dict:
         logos = data.get("logos") if isinstance(data.get("logos"), dict) else {}
         team = logos.get("team") if isinstance(logos.get("team"), dict) else {}
         opponent = logos.get("opponent") if isinstance(logos.get("opponent"), dict) else {}
@@ -463,12 +481,21 @@ class AIImageRenderer:
                     "placement": sponsor.get("placement"),
                 }
             )
+        if result_layout_present:
+            references.append(
+                {
+                    "position": len(references) + 1,
+                    "role": "announcement_feed_layout",
+                    "source_post_id": data.get("result_layout_reference_post_id"),
+                }
+            )
         return {
             "mode": "ai-reference",
             "version": LOGO_REFERENCE_VERSION,
             "reference_order": references,
             "opponent_text_fallback": not opponent_present,
             "sponsor_count": len(sponsors),
+            "result_layout_reference": result_layout_present,
             "fixed_logo_positions": False,
             "manual_logo_review_required": True,
         }
@@ -525,11 +552,19 @@ class AIImageRenderer:
             dict(item) for item in (data.get("sponsor_references") or []) if isinstance(item, dict)
         ]
         sponsor_paths = [self._sponsor_reference(item) for item in sponsor_items]
+        result_layout = self._result_layout_reference(data.get("result_layout_reference"))
         references = [player, team_logo]
         if opponent_logo:
             references.append(opponent_logo)
         references.extend(sponsor_paths)
-        integration = self._reference_metadata(data, opponent_logo is not None, sponsor_items)
+        if result_layout:
+            references.append(result_layout)
+        integration = self._reference_metadata(
+            data,
+            opponent_logo is not None,
+            sponsor_items,
+            result_layout is not None,
+        )
         generation_job_id = data.get("_generation_job_id")
         requested_out, out = self._output_path(target, generation_job_id)
         reuse_generation_job_id = data.get("_reuse_generation_job_id")

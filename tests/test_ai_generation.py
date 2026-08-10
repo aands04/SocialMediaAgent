@@ -18,6 +18,8 @@ from app.models import (
     Game,
     InstagramPage,
     MediaAsset,
+    Post,
+    PostStatus,
     PromptTemplate,
     Role,
     StoryRule,
@@ -70,7 +72,7 @@ def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     assert "Referenzbild 2" in prompt.rendered
     assert "kein drittes Referenzbild" in prompt.rendered
     assert "oben links und oben rechts" not in prompt.rendered
-    assert prompt.policy_version == "verified-media-ai-references-v4-full-bleed-safe-layout"
+    assert prompt.policy_version == "verified-media-ai-references-v5-result-layout-reference"
     assert "{{" not in prompt.rendered
 
 
@@ -87,7 +89,27 @@ def test_away_venue_requires_pitch_and_formats_only_place():
         venue_display(away | {"pitch": None})
 
 
-def test_post_facts_prefer_configured_home_venue_over_provider_name(db):
+def test_result_image_prompt_is_result_only_and_describes_layout_reference():
+    prompt = builtin_prompt(
+        "image",
+        "result",
+        "story",
+        facts(
+            score="5:1",
+            post_type="result",
+            result_layout_reference="/generated/announcement.png",
+        ),
+    )
+
+    assert "die Kennzeichnung ERGEBNIS" in prompt.rendered
+    assert "bestätigte Ergebnis 5:1" in prompt.rendered
+    assert "keine Ankündigungswörter" in prompt.rendered
+    assert "frühere, verifizierte Ankündigungs-Feedbild" in prompt.rendered
+    assert "Kennzeichnung: Heimspiel" not in prompt.rendered
+    assert "15:00 Uhr" not in prompt.rendered
+
+
+def test_post_facts_prefer_configured_home_venue_and_reuse_announcement_layout(db, tmp_path):
     page = InstagramPage(
         internal_name="venue-test",
         display_name="Venue Test",
@@ -153,6 +175,37 @@ def test_post_facts_prefer_configured_home_venue_over_provider_name(db):
     assert venue_display(prepared) == "Beispielstadion"
     assert "DejaVu Sans" in prepared["primary_font_family"]
     assert "Liberation Serif" in prepared["secondary_font_family"]
+
+    announcement_path = tmp_path / "generated" / "announcement-feed.png"
+    announcement_path.parent.mkdir()
+    Image.new("RGB", (1080, 1350), "navy").save(announcement_path)
+    announcement = Post(
+        club_id=team.club_id,
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        post_type="announcement",
+        status=PostStatus.PENDING,
+        feed_path=str(announcement_path),
+    )
+    db.add(announcement)
+    game.result_confirmed = True
+    game.home_score = 3
+    game.away_score = 1
+    db.commit()
+
+    result_facts = _facts(
+        db,
+        game,
+        team,
+        None,
+        "result",
+        {"team": {}, "opponent": {"fallback": True}},
+    )
+
+    assert result_facts["score"] == "3:1"
+    assert result_facts["result_layout_reference"] == str(announcement_path.resolve())
+    assert result_facts["result_layout_reference_post_id"] == announcement.id
 
 
 def test_prompt_rejects_unknown_placeholders_and_resolves_latest_version(db):
@@ -361,6 +414,57 @@ def test_ai_renderer_passes_verified_sponsor_as_compositional_reference(tmp_path
         "team_logo",
         "sponsor_logo",
     ]
+
+
+def test_result_renderer_appends_announcement_feed_as_layout_reference(tmp_path):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    output_root = tmp_path / "out"
+    media.mkdir()
+    uploads.mkdir()
+    output_root.mkdir()
+    player = media / "player.jpg"
+    team_logo = uploads / "team-logo.png"
+    announcement = output_root / "announcement" / "feed.png"
+    announcement.parent.mkdir()
+    Image.new("RGB", (600, 900), "blue").save(player)
+    Image.new("RGBA", (200, 200), "white").save(team_logo)
+    Image.new("RGB", (1080, 1350), "navy").save(announcement)
+    provider = FakeImageProvider()
+    renderer = AIImageRenderer(output_root, media, uploads, provider)
+    prompt_facts = facts(
+        score="5:1",
+        post_type="result",
+        team_logo=str(team_logo),
+        result_layout_reference=str(announcement),
+    )
+    prompt = builtin_prompt("image", "result", "feed", prompt_facts)
+
+    output = renderer.render(
+        "feed",
+        "result/feed.png",
+        {
+            **prompt_facts,
+            "player_image": str(player),
+            "logos": {"team": {"id": "team-1", "checksum": "a" * 64}},
+            "result_layout_reference_post_id": "announcement-post-1",
+            "image_prompt": prompt,
+        },
+    )
+
+    assert output.is_file()
+    assert provider.calls[0]["references"] == [
+        player.resolve(),
+        team_logo.resolve(),
+        announcement.resolve(),
+    ]
+    integration = renderer.metadata_for(output)["logo_integration"]
+    assert integration["result_layout_reference"] is True
+    assert integration["reference_order"][-1] == {
+        "position": 3,
+        "role": "announcement_feed_layout",
+        "source_post_id": "announcement-post-1",
+    }
 
 
 def test_ai_renderer_rejects_modified_sponsor_reference(tmp_path):
@@ -625,7 +729,7 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     assert post.design_snapshot["prompts"]["feed"]["version"] == 3
     assert (
         post.design_snapshot["prompts"]["feed"]["policy_version"]
-        == "verified-media-ai-references-v4-full-bleed-safe-layout"
+        == "verified-media-ai-references-v5-result-layout-reference"
     )
     prompt_snapshot = post.design_snapshot["prompts"]["feed"]
     assert "rendered" not in prompt_snapshot

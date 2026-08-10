@@ -54,7 +54,7 @@ DEFAULT_STYLE = (
     "Ausgabe soll eine eigenständige Komposition erhalten"
 )
 
-IMAGE_POLICY_VERSION = "verified-media-ai-references-v4-full-bleed-safe-layout"
+IMAGE_POLICY_VERSION = "verified-media-ai-references-v5-result-layout-reference"
 
 IMAGE_SAFETY_PREFIX = """VERBINDLICHE DATEN- UND MEDIENREGELN:
 - Verwende ausschließlich die nachfolgend angegebenen Spieldaten.
@@ -68,6 +68,7 @@ IMAGE_SAFETY_PREFIX = """VERBINDLICHE DATEN- UND MEDIENREGELN:
   müssen dem Referenzbild entsprechen; nicht neu zeichnen oder umgestalten.
 {opponent_logo_rule}
 {sponsor_logo_rules}
+{result_layout_reference_rule}
 - Die genaue Position aller Motive und Logos entsteht aus der Gesamtkomposition.
   Verwende keine starren Koordinaten, reservierten Eckflächen oder festen Logo-Boxen.
 - Erzeuge, zeichne oder rekonstruiere keine weiteren Vereinswappen, Logos,
@@ -112,12 +113,16 @@ Stilrichtung: {{ style_direction }}.
 Stelle diese Angaben klar, mobil lesbar und hierarchisch dar:
 1. {{ competition }}
 2. {{ home_team }} gegen {{ away_team }}
-3. {{ weekday }}, {{ date_de }}
+{% if score %}3. die Kennzeichnung ERGEBNIS
+4. das bestätigte Ergebnis {{ score }} als mit Abstand dominantes Ergebniselement
+5. optional klein: {{ weekday }}, {{ date_de }}
+{% else %}3. {{ weekday }}, {{ date_de }}
 4. {{ time_de }} Uhr
 5. {{ venue_display }}
-{% if score %}6. das bestätigte Ergebnis {{ score }} als dominantes Ergebniselement{% endif %}
+6. Kennzeichnung: {{ home_away }}
+{% endif %}
 
-Kennzeichnung: {{ home_away }}. Verwende höchstens zwei gut lesbare
+Verwende höchstens zwei gut lesbare
 Schriftstile. Halte im Story-Format deutliche Sicherheitsabstände oben und unten.
 Falls kein Gegnerlogo bereitgestellt ist, verwende dort ausschließlich eine
 neutrale typografische Lösung. Bewahre die Originalfarben des Trikots.
@@ -127,7 +132,14 @@ neutrale typografische Lösung. Bewahre die Originalfarben des Trikots.
 IMAGE_CONTENT_DIRECTIONS = {
     "announcement": "Zeige Vorfreude und den bevorstehenden Spieltermin; erfinde keinen Spielverlauf.",
     "reminder": "Vermittle, dass das Spiel unmittelbar bevorsteht; Datum und Uhrzeit müssen besonders schnell erfassbar sein.",
-    "result": "Rücke das bestätigte Ergebnis und die beiden Mannschaften in den Mittelpunkt; leite daraus keinen erfundenen Spielverlauf ab.",
+    "result": (
+        "Dies ist ausschließlich eine Ergebnismeldung nach Spielende. Verwende ERGEBNIS "
+        "als klare Überschrift und rücke das bestätigte Ergebnis sowie die beiden "
+        "Mannschaften in den Mittelpunkt. Verwende keine Ankündigungsbegriffe oder "
+        "Einladungen wie Heimspiel, Auswärtsspiel, Matchday, Spieltag, Komm vorbei, "
+        "Anstoß oder Jetzt unterstützen. Zeige keine Anstoßzeit und keinen Countdown. "
+        "Leite aus dem Ergebnis keinen erfundenen Spielverlauf ab."
+    ),
 }
 IMAGE_FORMAT_DIRECTIONS = {
     "feed": "Gestalte eine ausgewogene Feed-Komposition mit klarer Informationshierarchie für 4:5.",
@@ -482,9 +494,30 @@ def image_safety_prefix(facts: dict) -> str:
         if sponsor_lines
         else "- Es wurde kein verifiziertes Sponsorenlogo bereitgestellt. Erfinde kein Sponsorenzeichen."
     )
+    layout_reference_index = next_reference + len(sponsor_lines)
+    if facts.get("result_layout_reference"):
+        result_layout_reference_rule = (
+            f"- Referenzbild {layout_reference_index} ist das frühere, verifizierte "
+            "Ankündigungs-Feedbild genau dieses Spiels. Verwende es ausschließlich als "
+            "Stil-, Farb-, Hierarchie- und Kompositionsreferenz für die neue "
+            "Ergebnismeldung. Übernimm daraus keine Ankündigungswörter, Einladungen, "
+            "Datums-/Uhrzeit-Hervorhebungen oder sonstige veraltete Texte. Ersetze die "
+            "Ankündigungsbotschaft durch ERGEBNIS und das bestätigte Ergebnis. Personen "
+            "oder Logos aus diesem Layoutbild sind keine zusätzlichen Identitäts- oder "
+            "Logoquellen; dafür gelten weiterhin ausschließlich die zuvor einzeln "
+            "benannten Referenzbilder."
+        )
+    else:
+        result_layout_reference_rule = (
+            "- Es wurde kein früheres Ankündigungsbild als Layoutreferenz bereitgestellt. "
+            "Erzeuge die Ergebniskomposition aus den einzeln benannten Referenzbildern."
+            if facts.get("post_type") == "result"
+            else ""
+        )
     return IMAGE_SAFETY_PREFIX.format(
         opponent_logo_rule=opponent_logo_rule,
         sponsor_logo_rules=sponsor_logo_rules,
+        result_layout_reference_rule=result_layout_reference_rule,
     )
 
 
