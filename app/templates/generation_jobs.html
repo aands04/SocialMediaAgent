@@ -1,14 +1,25 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1>Generierungsaufträge</h1>
-<p>Text- und Bildgenerierungen laufen persistent im Worker. Mehrfaches Anklicken erzeugt keinen zweiten aktiven Auftrag.</p>
+<p>Text- und Bildgenerierungen laufen persistent im Worker. Pro Beitrag kann nur ein Auftrag gleichzeitig aktiv sein.</p>
+{% if show_history %}
+<p><a class="button secondary" href="/generation-jobs">Nur aktuelle Auftragsstände anzeigen</a></p>
+{% else %}
+<p>Bewusst neu gestartete Vorgänger werden hier zusammengefasst. <a href="/generation-jobs?history=1">Gesamten Verlauf anzeigen</a></p>
+{% endif %}
 <table>
   <tr><th>Auftrag</th><th>Mannschaft / Spiel</th><th>Status</th><th>Phase</th><th>Fortschritt</th><th>Geändert</th></tr>
   {% for item in items %}
   <tr>
-    <td><a href="/generation-jobs/{{item.id}}">{{item.job_type.value}}</a></td>
+    <td><a href="/generation-jobs/{{item.id}}">{{item.job_type.value}}</a><small>{{item.post_type}}</small></td>
     <td>{{teams.get(item.team_id).display_name if teams.get(item.team_id) else item.team_id}}<small>{{games.get(item.game_id).home_team if games.get(item.game_id) else ''}} – {{games.get(item.game_id).away_team if games.get(item.game_id) else ''}}</small></td>
-    <td><span class="badge">{{item.status.value}}</span></td><td>{{item.phase}}</td><td>{{item.progress}} % ({{item.completed_outputs}} / {{item.planned_outputs}})</td><td>{{item.updated_at|berlin}}</td>
+    <td>
+      {% if superseded_by.get(item.id) %}
+      <span class="badge">durch Folgeauftrag ersetzt</span><small><a href="/generation-jobs/{{superseded_by.get(item.id)}}">Folgeauftrag öffnen</a></small>
+      {% else %}
+      <span class="badge">{{item.status.value}}</span>
+      {% endif %}
+    </td><td>{{item.phase}}</td><td>{{item.progress}} % ({{item.completed_outputs}} / {{item.planned_outputs}})</td><td>{{item.updated_at|berlin}}</td>
   </tr>
   {% else %}<tr><td colspan="6">Noch keine Generierungsaufträge vorhanden.</td></tr>{% endfor %}
 </table>

@@ -165,6 +165,66 @@ def create_automation_team(factory, *, suffix: str, rules: dict | None = None):
         return team.id
 
 
+def test_generation_job_overview_collapses_manual_retry_history(browser):
+    client, factory = browser
+    team_id = create_automation_team(factory, suffix="job-history")
+    with factory() as db:
+        team = db.get(Team, team_id)
+        user = db.scalar(select(User).where(User.email == "admin@test.invalid"))
+        game = Game(
+            team_id=team.id,
+            provider="mock",
+            external_id="dashboard-job-history",
+            home_team=team.display_name,
+            away_team="FC Historie",
+            kickoff=datetime.now(timezone.utc) + timedelta(days=1),
+            source_url="fixture://dashboard-job-history",
+        )
+        db.add(game)
+        db.flush()
+        previous = GenerationJob(
+            job_type=GenerationJobType.CREATE_POST,
+            game_id=game.id,
+            team_id=team.id,
+            post_type="announcement",
+            requested_by=user.id,
+            status=GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
+            phase="generating_ai_composition",
+            idempotency_key="dashboard-job-history-previous",
+            active_key=None,
+        )
+        db.add(previous)
+        db.flush()
+        current = GenerationJob(
+            job_type=GenerationJobType.CREATE_POST,
+            game_id=game.id,
+            team_id=team.id,
+            post_type="announcement",
+            requested_by=user.id,
+            status=GenerationJobStatus.RETRY_WAIT,
+            phase="generating_ai_composition",
+            idempotency_key="dashboard-job-history-current",
+            active_key="dashboard-job-history-active",
+            parameters={"manual_retry_of_job_id": previous.id},
+        )
+        db.add(current)
+        db.commit()
+        previous_id = previous.id
+        current_id = current.id
+
+    overview = client.get("/generation-jobs")
+    assert overview.status_code == 200
+    assert f'/generation-jobs/{current_id}' in overview.text
+    assert f'/generation-jobs/{previous_id}' not in overview.text
+    assert "Gesamten Verlauf anzeigen" in overview.text
+
+    history = client.get("/generation-jobs?history=1")
+    assert history.status_code == 200
+    assert f'/generation-jobs/{current_id}' in history.text
+    assert f'/generation-jobs/{previous_id}' in history.text
+    assert "durch Folgeauftrag ersetzt" in history.text
+
+
 def test_publication_time_can_be_changed_from_post_detail(browser):
     client, factory = browser
     with factory() as db:

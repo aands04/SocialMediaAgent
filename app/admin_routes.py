@@ -6168,13 +6168,24 @@ def generate_game_post(
 
 @router.get("/generation-jobs", response_class=HTMLResponse)
 def generation_jobs(request: Request, current=Depends(current_user), db: Session = Depends(get_db)):
-    items = [
+    all_items = [
         item
         for item in db.scalars(
             select(GenerationJob).order_by(GenerationJob.created_at.desc()).limit(200)
         )
         if require_visible(db, current, item.team_id)
     ]
+    superseded_by = {
+        str((item.parameters or {}).get("manual_retry_of_job_id")): item.id
+        for item in all_items
+        if (item.parameters or {}).get("manual_retry_of_job_id")
+    }
+    show_history = request.query_params.get("history") == "1"
+    items = (
+        all_items
+        if show_history
+        else [item for item in all_items if item.id not in superseded_by]
+    )
     teams = {item.id: item for item in db.scalars(select(Team))}
     games_map = {item.id: item for item in db.scalars(select(Game))}
     return render(
@@ -6184,6 +6195,8 @@ def generation_jobs(request: Request, current=Depends(current_user), db: Session
         items=items,
         teams=teams,
         games=games_map,
+        show_history=show_history,
+        superseded_by=superseded_by,
         title="Generierungsaufträge",
     )
 
