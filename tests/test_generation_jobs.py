@@ -656,6 +656,14 @@ def test_manual_retry_continues_linked_incomplete_post_with_fresh_budget(db):
     job.post_id = partial.id
     job.result_post_id = partial.id
     job.active_key = None
+    job.parameters = {
+        **(job.parameters or {}),
+        "external_output_retries": {"image:story:2": 1},
+        "external_retry": {
+            "output_key": "image:story:2",
+            "source_attempt": 1,
+        },
+    }
     db.commit()
 
     retry = generation.retry_job(db, job, user)
@@ -665,6 +673,8 @@ def test_manual_retry_continues_linked_incomplete_post_with_fresh_budget(db):
     assert retry.parameters["resume_generation_job_id"] == job.id
     assert retry.max_attempts >= retry.planned_outputs + 1
     assert retry.completed_outputs == 0
+    assert "external_output_retries" not in retry.parameters
+    assert "external_retry" not in retry.parameters
 
 
 def test_partial_bundle_marks_every_member_and_can_resume_from_primary(db):

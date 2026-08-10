@@ -1704,6 +1704,10 @@ def process_generation_job(
             exception_type=type(exc).__name__,
             provider_status_code=getattr(exc, "provider_status_code", None),
             provider_request_id=getattr(exc, "provider_request_id", None),
+            provider_reference_count=getattr(exc, "provider_reference_count", None),
+            provider_reference_total_bytes=getattr(exc, "provider_reference_total_bytes", None),
+            provider_reference_mime_types=getattr(exc, "provider_reference_mime_types", ()),
+            provider_reference_dimensions=getattr(exc, "provider_reference_dimensions", ()),
         )
     return db.get(GenerationJob, job_id)
 
@@ -1768,6 +1772,10 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
     logos = frozen_logo_set(db, game, team)
     parameters = dict(job.parameters or {})
     parameters.pop("external_retry", None)
+    # A deliberate user restart is a new technical job and therefore receives
+    # one fresh application-level retry for each still-missing provider output.
+    # Completed outputs remain linked below and are reused without new cost.
+    parameters.pop("external_output_retries", None)
     root_key = str(parameters.get("manual_retry_root_key") or job.idempotency_key).split(
         ":manual-retry:", 1
     )[0]
