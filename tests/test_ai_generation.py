@@ -178,9 +178,7 @@ def test_prompt_rejects_unknown_placeholders_and_resolves_latest_version(db):
         ]
     )
     db.commit()
-    resolved = resolve_prompt(
-        db, "sve-feed", "image", "announcement", "feed", facts()
-    )
+    resolved = resolve_prompt(db, "sve-feed", "image", "announcement", "feed", facts())
     assert resolved.version == 2
     assert resolved.quality == "high"
     assert "Version zwei: Habichtswaldstadion" in resolved.rendered
@@ -258,10 +256,11 @@ def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
     ]
     metadata = renderer.metadata_for(output)
     assert metadata["logo_integration"]["mode"] == "ai-reference"
-    assert [
-        item["role"]
-        for item in metadata["logo_integration"]["reference_order"]
-    ] == ["player", "team_logo", "opponent_logo"]
+    assert [item["role"] for item in metadata["logo_integration"]["reference_order"]] == [
+        "player",
+        "team_logo",
+        "opponent_logo",
+    ]
     assert "ai_base_path" not in metadata
 
 
@@ -404,10 +403,7 @@ def test_ai_renderer_reuses_only_output_from_same_generation_job(tmp_path):
     assert "-job-" in first.name
     assert len(provider.calls) == 2
     assert renderer.metadata_for(repeated)["reused_final"] is True
-    assert (
-        renderer.metadata_for(repeated)["generation_job_id"]
-        == "rerender-job-1"
-    )
+    assert renderer.metadata_for(repeated)["generation_job_id"] == "rerender-job-1"
     assert Image.open(legacy_path).getpixel((0, 0)) == (255, 0, 0)
 
 
@@ -446,9 +442,7 @@ def test_ai_renderer_uses_text_fallback_without_opponent_logo(tmp_path):
         player.resolve(),
         team_logo.resolve(),
     ]
-    assert renderer.metadata_for(output)["logo_integration"][
-        "opponent_text_fallback"
-    ] is True
+    assert renderer.metadata_for(output)["logo_integration"]["opponent_text_fallback"] is True
     assert "Erfinde dafür kein Wappen" in prompt.rendered
 
 
@@ -457,18 +451,14 @@ def test_ai_renderer_refuses_missing_player(tmp_path):
     uploads = tmp_path / "uploads"
     media.mkdir()
     uploads.mkdir()
-    renderer = AIImageRenderer(
-        tmp_path / "out", media, uploads, FakeImageProvider()
-    )
+    renderer = AIImageRenderer(tmp_path / "out", media, uploads, FakeImageProvider())
     with pytest.raises(ValueError, match="Spielerbild"):
         renderer.render(
             "story",
             "post/story.png",
             {
                 "player_image": None,
-                "image_prompt": builtin_prompt(
-                    "image", "announcement", "story", facts()
-                ),
+                "image_prompt": builtin_prompt("image", "announcement", "story", facts()),
             },
         )
 
@@ -480,9 +470,7 @@ def test_ai_renderer_refuses_missing_verified_team_logo(tmp_path):
     uploads.mkdir()
     player = media / "player.jpg"
     Image.new("RGB", (600, 900), "blue").save(player)
-    renderer = AIImageRenderer(
-        tmp_path / "out", media, uploads, FakeImageProvider()
-    )
+    renderer = AIImageRenderer(tmp_path / "out", media, uploads, FakeImageProvider())
     with pytest.raises(ValueError, match="Mannschaftslogo"):
         renderer.render(
             "feed",
@@ -490,9 +478,7 @@ def test_ai_renderer_refuses_missing_verified_team_logo(tmp_path):
             {
                 "player_image": str(player),
                 "team_logo": None,
-                "image_prompt": builtin_prompt(
-                    "image", "announcement", "feed", facts()
-                ),
+                "image_prompt": builtin_prompt("image", "announcement", "feed", facts()),
             },
         )
 
@@ -607,10 +593,7 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     assert len(prompt_snapshot["template_checksum"]) == 64
     assert len(prompt_snapshot["rendered_checksum"]) == 64
     assert post.design_snapshot["stories"][0]["prompt"]["name"] == "default-image-story"
-    assert (
-        post.design_snapshot["media"]["feed"]["logo_integration"]["mode"]
-        == "ai-reference"
-    )
+    assert post.design_snapshot["media"]["feed"]["logo_integration"]["mode"] == "ai-reference"
     assert Image.open(post.feed_path).size == (1080, 1350)
 
 
@@ -619,9 +602,14 @@ def test_openai_text_generator_uses_resolved_prompt_without_live_request():
     generator = OpenAITextGenerator("test-key", "unused")
 
     class Responses:
-        def create(self, model, input):
+        def create(self, **options):
+            model = options["model"]
+            input = options["input"]
             assert model == prompt.model
             assert input == prompt.rendered
+            assert options["max_output_tokens"] == 1600
+            assert options["reasoning"] == {"effort": "low"}
+            assert options["text"] == {"verbosity": "low"}
             return type(
                 "Response",
                 (),
@@ -638,6 +626,131 @@ def test_openai_text_generator_uses_resolved_prompt_without_live_request():
     assert result.tokens == 42
 
 
+def test_openai_text_generator_falls_back_to_chat_after_responses_520():
+    prompt = builtin_prompt("text", "announcement", "none", facts())
+    generator = OpenAITextGenerator("test-key", "unused")
+    error = RuntimeError("provider body must not be exposed")
+    error.status_code = 520
+
+    class Responses:
+        def create(self, **_options):
+            raise error
+
+    captured = {}
+
+    class Completions:
+        def create(self, **options):
+            captured.update(options)
+            return type(
+                "Completion",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {"message": type("Message", (), {"content": "Fallback-Text"})()},
+                        )()
+                    ],
+                    "usage": type("Usage", (), {"total_tokens": 55})(),
+                },
+            )()
+
+    generator.client = type(
+        "Client",
+        (),
+        {
+            "responses": Responses(),
+            "chat": type("Chat", (), {"completions": Completions()})(),
+        },
+    )()
+
+    result = generator.generate({"text_prompt": prompt})
+
+    assert result.text == "Fallback-Text"
+    assert result.tokens == 55
+    assert captured["model"] == prompt.model
+    assert captured["messages"] == [{"role": "user", "content": prompt.rendered}]
+    assert captured["max_completion_tokens"] == 1600
+    assert captured["reasoning_effort"] == "low"
+    assert captured["verbosity"] == "low"
+
+
+def test_openai_text_generator_does_not_fallback_after_authentication_error():
+    prompt = builtin_prompt("text", "announcement", "none", facts())
+    generator = OpenAITextGenerator("test-key", "unused")
+    error = RuntimeError("sensitive provider response")
+    error.status_code = 401
+
+    class Responses:
+        def create(self, **_options):
+            raise error
+
+    class Completions:
+        def create(self, **_options):
+            raise AssertionError("Authentifizierungsfehler darf keinen zweiten API-Aufruf auslösen")
+
+    generator.client = type(
+        "Client",
+        (),
+        {
+            "responses": Responses(),
+            "chat": type("Chat", (), {"completions": Completions()})(),
+        },
+    )()
+
+    with pytest.raises(RuntimeError, match="sensitive provider response"):
+        generator.generate({"text_prompt": prompt})
+
+
+def test_openai_text_generator_falls_back_when_response_hits_output_limit():
+    prompt = builtin_prompt("text", "result", "none", facts(score="2:1"))
+    generator = OpenAITextGenerator("test-key", "unused")
+
+    class Responses:
+        def create(self, **_options):
+            return type(
+                "Response",
+                (),
+                {
+                    "status": "incomplete",
+                    "output_text": "",
+                    "incomplete_details": type("Incomplete", (), {"reason": "max_output_tokens"})(),
+                },
+            )()
+
+    class Completions:
+        def create(self, **_options):
+            return type(
+                "Completion",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {"message": type("Message", (), {"content": "Vollständiger Text"})()},
+                        )()
+                    ],
+                    "usage": type("Usage", (), {"total_tokens": 61})(),
+                },
+            )()
+
+    generator.client = type(
+        "Client",
+        (),
+        {
+            "responses": Responses(),
+            "chat": type("Chat", (), {"completions": Completions()})(),
+        },
+    )()
+
+    result = generator.generate({"text_prompt": prompt})
+
+    assert result.text == "Vollständiger Text"
+    assert result.tokens == 61
+
+
 def test_generated_caption_strips_echoed_internal_rules():
     leaked = (
         "Was für ein Spieltag! ⚽\n\n"
@@ -651,6 +764,4 @@ def test_generated_caption_strips_echoed_internal_rules():
 
 def test_generated_caption_rejects_rule_only_provider_output():
     with pytest.raises(ValueError, match="keinen verwendbaren öffentlichen Begleittext"):
-        sanitize_generated_caption(
-            "VERBINDLICHE FAKTENREGELN:\n- Interne Anweisung"
-        )
+        sanitize_generated_caption("VERBINDLICHE FAKTENREGELN:\n- Interne Anweisung")

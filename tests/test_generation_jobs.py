@@ -408,6 +408,10 @@ def test_progress_renderer_records_exact_image_provider_prompt(db, tmp_path):
     class ImageProvider:
         is_ai = True
 
+        def provider_prompt(self, context):
+            assert context["image_prompt"].rendered == Prompt.rendered
+            return f"{Prompt.rendered}\n\nTECHNISCHER REFERENZTAFEL-HINWEIS"
+
         def render(self, kind, relative_path, context):
             assert kind == "story"
             assert context["image_prompt"].rendered == Prompt.rendered
@@ -425,7 +429,7 @@ def test_progress_renderer_records_exact_image_provider_prompt(db, tmp_path):
     assert dispatch.generation_job_id == job.id
     assert dispatch.prompt_kind == "image"
     assert dispatch.media_kind == "story"
-    assert dispatch.rendered_prompt == Prompt.rendered
+    assert dispatch.rendered_prompt == (f"{Prompt.rendered}\n\nTECHNISCHER REFERENZTAFEL-HINWEIS")
     assert dispatch.prompt_name == "image-test-prompt"
     assert dispatch.prompt_version == 4
     assert dispatch.status == "completed"

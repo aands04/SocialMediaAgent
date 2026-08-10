@@ -2,11 +2,12 @@ import base64
 import hashlib
 from contextlib import ExitStack
 from io import BytesIO
+from math import ceil, sqrt
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
 from openai import OpenAI
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 from app.rendering.service import Renderer, RenderValidationError
 
@@ -18,6 +19,11 @@ REFERENCE_LOGO_MAX_EDGE = 1024
 REFERENCE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 REFERENCE_IMAGE_MAX_PIXELS = 40_000_000
 REFERENCE_PLAYER_JPEG_QUALITY = 90
+REFERENCE_BOARD_MAX_EDGE = 3072
+REFERENCE_BOARD_GAP = 32
+REFERENCE_BOARD_BACKGROUND = (239, 241, 245)
+REFERENCE_BOARD_CELL_BACKGROUND = (255, 255, 255)
+REFERENCE_BOARD_BORDER = (143, 151, 164)
 
 REFERENCE_IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
@@ -169,29 +175,109 @@ def _reference_uploads(
     stack: ExitStack,
     references: list[Path],
 ) -> tuple[list[BinaryIO], ReferenceUploadDiagnostics]:
-    uploads: list[BinaryIO] = []
+    payloads: list[tuple[str, bytes, str, tuple[int, int]]] = []
     total_bytes = 0
     mime_types: list[str] = []
     dimensions: list[str] = []
     for position, path in enumerate(references, start=1):
-        name, content, mime_type, size = _normalized_reference_bytes(
-            path,
-            position=position,
-        )
-        # Match the official Python client example: pass named binary handles
-        # and let the SDK build image[] multipart parts.  Supplying nested
-        # tuples worked for many requests but repeatedly produced provider
-        # HTTP 520 responses for otherwise valid multi-reference edits.
-        handle = stack.enter_context(_NamedUpload(content, name))
-        uploads.append(handle)
+        payload = _normalized_reference_bytes(path, position=position)
+        name, content, mime_type, size = payload
+        payloads.append(payload)
         total_bytes += len(content)
         mime_types.append(mime_type)
         dimensions.append(f"{size[0]}x{size[1]}")
-    return uploads, ReferenceUploadDiagnostics(
-        count=len(uploads),
+    diagnostics = ReferenceUploadDiagnostics(
+        count=len(payloads),
         total_bytes=total_bytes,
         mime_types=tuple(mime_types),
         dimensions=tuple(dimensions),
+    )
+    if len(payloads) == 1:
+        name, content, _mime_type, _size = payloads[0]
+        return [stack.enter_context(_NamedUpload(content, name))], diagnostics
+
+    # The Image API officially accepts multiple reference images.  In
+    # production, however, otherwise valid image[] multipart requests with a
+    # player photo and logo repeatedly returned provider HTTP 520.  Preserve
+    # every reference and its order in one neutral, lossless reference board.
+    # This keeps the request on the official edit endpoint while avoiding the
+    # failing multi-file transport path.
+    decoded: list[Image.Image] = []
+    try:
+        for _name, content, _mime_type, _size in payloads:
+            with Image.open(BytesIO(content)) as source:
+                source.load()
+                decoded.append(source.convert("RGBA"))
+
+        columns = max(1, min(3, ceil(sqrt(len(decoded)))))
+        rows = ceil(len(decoded) / columns)
+        widest = max(image.width for image in decoded)
+        tallest = max(image.height for image in decoded)
+        usable_width = REFERENCE_BOARD_MAX_EDGE - (columns + 1) * REFERENCE_BOARD_GAP
+        usable_height = REFERENCE_BOARD_MAX_EDGE - (rows + 1) * REFERENCE_BOARD_GAP
+        scale = min(
+            1.0,
+            usable_width / max(1, columns * widest),
+            usable_height / max(1, rows * tallest),
+        )
+        cell_width = max(1, int(widest * scale))
+        cell_height = max(1, int(tallest * scale))
+        board_width = columns * cell_width + (columns + 1) * REFERENCE_BOARD_GAP
+        board_height = rows * cell_height + (rows + 1) * REFERENCE_BOARD_GAP
+        with Image.new("RGB", (board_width, board_height), REFERENCE_BOARD_BACKGROUND) as board:
+            draw = ImageDraw.Draw(board)
+            for index, image in enumerate(decoded):
+                row, column = divmod(index, columns)
+                left = REFERENCE_BOARD_GAP + column * (cell_width + REFERENCE_BOARD_GAP)
+                top = REFERENCE_BOARD_GAP + row * (cell_height + REFERENCE_BOARD_GAP)
+                draw.rectangle(
+                    (left, top, left + cell_width - 1, top + cell_height - 1),
+                    fill=REFERENCE_BOARD_CELL_BACKGROUND,
+                    outline=REFERENCE_BOARD_BORDER,
+                    width=2,
+                )
+                with ImageOps.contain(
+                    image,
+                    (max(1, cell_width - 4), max(1, cell_height - 4)),
+                    method=Image.Resampling.LANCZOS,
+                ) as fitted:
+                    paste_left = left + (cell_width - fitted.width) // 2
+                    paste_top = top + (cell_height - fitted.height) // 2
+                    board.paste(fitted, (paste_left, paste_top), fitted)
+
+            buffer = BytesIO()
+            board.save(buffer, "PNG", optimize=True)
+            board_content = buffer.getvalue()
+            if len(board_content) > REFERENCE_IMAGE_MAX_BYTES:
+                buffer = BytesIO()
+                board.save(buffer, "WEBP", lossless=True, quality=100, method=6)
+                board_content = buffer.getvalue()
+                board_name = "reference-board.webp"
+            else:
+                board_name = "reference-board.png"
+        if len(board_content) > REFERENCE_IMAGE_MAX_BYTES:
+            raise ImageGenerationError(
+                "Die zusammengefassten Referenzbilder überschreiten die sichere Upload-Größe"
+            )
+        return [stack.enter_context(_NamedUpload(board_content, board_name))], diagnostics
+    finally:
+        for image in decoded:
+            image.close()
+
+
+def _reference_board_prompt(prompt: str, reference_count: int) -> str:
+    if reference_count <= 1:
+        return prompt
+    return (
+        f"{prompt}\n\n"
+        "TECHNISCHER REFERENZHINWEIS: Das einzige Eingabebild ist eine neutrale "
+        f"Referenztafel mit {reference_count} klar getrennten Feldern. Die Felder "
+        "entsprechen von links nach rechts und anschließend von oben nach unten "
+        "exakt den ursprünglichen Referenzen 1 bis "
+        f"{reference_count}. Verwende jedes Feld ausschließlich für die im Prompt "
+        "genannte Rolle. Übernimm Logos, Wappen und Sponsorzeichen inhaltlich "
+        "unverändert. Die Referenztafel selbst, ihre Trennlinien und ihr neutraler "
+        "Hintergrund dürfen im Ergebnis nicht erscheinen."
     )
 
 
@@ -231,7 +317,7 @@ class OpenAIImageProvider(ImageProvider):
                     edit_options = {
                         "model": model,
                         "image": files,
-                        "prompt": prompt,
+                        "prompt": _reference_board_prompt(prompt, len(references)),
                         "size": size,
                         "quality": quality,
                         "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
@@ -337,6 +423,19 @@ class AIImageRenderer:
                 f"Die Prüfsumme des Sponsorenlogos {item.get('name') or ''} stimmt nicht mehr"
             )
         return path
+
+    @staticmethod
+    def provider_prompt(data: dict) -> str:
+        """Return the exact prompt the lower-level provider will transmit."""
+
+        prompt = data.get("image_prompt")
+        rendered = str(getattr(prompt, "rendered", "") or "")
+        reference_count = int(bool(data.get("player_image"))) + int(bool(data.get("team_logo")))
+        reference_count += int(bool(data.get("opponent_logo")))
+        reference_count += len(
+            [item for item in (data.get("sponsor_references") or []) if isinstance(item, dict)]
+        )
+        return _reference_board_prompt(rendered, reference_count)
 
     @staticmethod
     def _reference_metadata(data: dict, opponent_present: bool, sponsors: list[dict]) -> dict:

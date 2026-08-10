@@ -4,6 +4,8 @@ from zoneinfo import ZoneInfo
 
 from openai import OpenAI
 
+OPENAI_TEXT_MAX_OUTPUT_TOKENS = 1600
+
 INTERNAL_OUTPUT_MARKERS = (
     "VERBINDLICHE, SERVERSEITIG VALIDIERTE VEREINSTEXTREGELN:",
     "GESCHÜTZTE VEREINSANPASSUNG DES PLATFORMADMINS:",
@@ -88,8 +90,99 @@ class OpenAITextGenerator(TextGenerator):
     is_ai = True
 
     def __init__(self, key: str, model: str):
-        self.client = OpenAI(api_key=key)
+        # Do not hide repeated provider requests inside the SDK.  This class
+        # can use the independently supported Chat Completions endpoint when
+        # Responses fails before returning usable text; the persistent job
+        # layer remains responsible for the one delayed retry after that.
+        self.client = OpenAI(api_key=key, max_retries=0)
         self.model = model
+
+    @staticmethod
+    def _provider_status_code(exc: Exception) -> int | None:
+        status_code = getattr(exc, "status_code", None)
+        if not isinstance(status_code, int):
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        return status_code if isinstance(status_code, int) else None
+
+    @classmethod
+    def _can_use_transport_fallback(cls, exc: Exception) -> bool:
+        status_code = cls._provider_status_code(exc)
+        if status_code is not None:
+            return 500 <= status_code <= 599
+        name = type(exc).__name__.casefold()
+        if name in {"internalservererror", "apiconnectionerror", "apitimeouterror"}:
+            return True
+        text = str(exc).casefold()
+        return any(
+            marker in text
+            for marker in (
+                "connection",
+                "timed out",
+                "timeout",
+                "incomplete chunked read",
+                "peer closed",
+                "error code: 500",
+                "error code: 502",
+                "error code: 503",
+                "error code: 504",
+                "error code: 520",
+            )
+        )
+
+    @staticmethod
+    def _incomplete_reason(response) -> str | None:
+        details = getattr(response, "incomplete_details", None)
+        reason = getattr(details, "reason", None)
+        return str(reason) if reason else None
+
+    @staticmethod
+    def _usage_tokens(response) -> int | None:
+        return getattr(getattr(response, "usage", None), "total_tokens", None)
+
+    def _chat_completion(self, rendered: str, model: str) -> tuple[str, int | None]:
+        options = {
+            "model": model,
+            "messages": [{"role": "user", "content": rendered}],
+            "max_completion_tokens": OPENAI_TEXT_MAX_OUTPUT_TOKENS,
+        }
+        if model.startswith("gpt-5"):
+            options["reasoning_effort"] = "low"
+            options["verbosity"] = "low"
+        completion = self.client.chat.completions.create(**options)
+        choices = list(getattr(completion, "choices", None) or [])
+        content = (
+            getattr(getattr(choices[0], "message", None), "content", None) if choices else None
+        )
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Der KI-Dienst hat keinen verwendbaren Begleittext geliefert.")
+        return content, self._usage_tokens(completion)
+
+    def _request_text(self, rendered: str, model: str) -> tuple[str, int | None]:
+        options = {
+            "model": model,
+            "input": rendered,
+            "max_output_tokens": OPENAI_TEXT_MAX_OUTPUT_TOKENS,
+        }
+        if model.startswith("gpt-5"):
+            options["reasoning"] = {"effort": "low"}
+            options["text"] = {"verbosity": "low"}
+        try:
+            response = self.client.responses.create(**options)
+        except Exception as exc:
+            if not self._can_use_transport_fallback(exc):
+                raise
+            return self._chat_completion(rendered, model)
+
+        status = str(getattr(response, "status", "") or "").casefold()
+        output_text = getattr(response, "output_text", None)
+        if (not status or status == "completed") and isinstance(output_text, str):
+            if output_text.strip():
+                return output_text, self._usage_tokens(response)
+        if status == "incomplete" and self._incomplete_reason(response) == "max_output_tokens":
+            return self._chat_completion(rendered, model)
+        if not output_text:
+            return self._chat_completion(rendered, model)
+        raise ValueError("Der KI-Dienst hat die Texterstellung nicht vollständig abgeschlossen.")
 
     def prepare_generate(self, data: dict) -> tuple[str, str, str]:
         prompt = data.get("text_prompt")
@@ -108,12 +201,12 @@ class OpenAITextGenerator(TextGenerator):
 
     def generate(self, data: dict) -> GeneratedText:
         rendered, version, model = self.prepare_generate(data)
-        response = self.client.responses.create(model=model, input=rendered)
+        output_text, tokens = self._request_text(rendered, model)
         return GeneratedText(
-            sanitize_generated_caption(response.output_text),
+            sanitize_generated_caption(output_text),
             model,
             prompt_version=version,
-            tokens=getattr(getattr(response, "usage", None), "total_tokens", None),
+            tokens=tokens,
             rendered_prompt=rendered,
         )
 
@@ -155,11 +248,11 @@ class OpenAITextGenerator(TextGenerator):
 
     def revise(self, data: dict, current_text: str, instruction: str) -> GeneratedText:
         rendered, version, model = self.prepare_revision(data, current_text, instruction)
-        response = self.client.responses.create(model=model, input=rendered)
+        output_text, tokens = self._request_text(rendered, model)
         return GeneratedText(
-            sanitize_generated_caption(response.output_text),
+            sanitize_generated_caption(output_text),
             model,
             prompt_version=version,
-            tokens=getattr(getattr(response, "usage", None), "total_tokens", None),
+            tokens=tokens,
             rendered_prompt=rendered,
         )
