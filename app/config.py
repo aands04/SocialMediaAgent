@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     upload_root: Path = Path("data/uploads")
     openai_model: str = "gpt-5-mini"
     openai_image_model: str = "gpt-image-2"
+    openai_image_tool_model: str = "gpt-5.4-mini"
     openai_image_quality: str = "medium"
     openai_api_key: str | None = None
     meta_graph_version: str = "v23.0"
