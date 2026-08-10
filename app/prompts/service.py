@@ -54,7 +54,42 @@ DEFAULT_STYLE = (
     "Ausgabe soll eine eigenständige Komposition erhalten"
 )
 
-IMAGE_POLICY_VERSION = "verified-media-ai-references-v5-result-layout-reference"
+IMAGE_POLICY_VERSION = "verified-media-ai-references-v6-result-image-edit"
+
+RESULT_IMAGE_EDIT_SAFETY_PREFIX = """VERBINDLICHER ERGEBNISBILD-UMBAU:
+- Referenzbild 1 ist die bereits geprüfte Ankündigungsgrafik genau dieses Spiels
+  und in diesem Ausgabeformat. Verwende ausschließlich dieses Bild als visuelle
+  Grundlage. Dies ist eine gezielte Bildbearbeitung, keine neue freie Komposition.
+- Bewahre alle vorhandenen realen Personen, Gesichter, Körper, Trikots, Logos,
+  Sponsorenzeichen, Hintergründe, Lichtstimmung, Farben, Bildausschnitt und
+  Motivpositionen so unverändert wie technisch möglich.
+- Füge keine Person, kein Logo, kein Wappen, kein Sponsorenzeichen und kein
+  zusätzliches Motiv hinzu. Entferne oder ersetze keine vorhandene Person und
+  tausche keine Identität aus.
+- Ändere ausschließlich die Informationshierarchie zur Ergebnismeldung:
+  Überschrift ERGEBNIS, exaktes Ergebnis, exakte Mannschaftsnamen und optional
+  klein das Spieldatum.
+- Entferne beziehungsweise ersetze Ankündigungstexte wie HEIMSPIEL,
+  AUSWÄRTSSPIEL, MATCHDAY, SPIELTAG, KOMM VORBEI, ANSTOSS, Uhrzeit und Spielort.
+- Stelle Ergebnis und Mannschaftsnamen vollständig innerhalb der Bildfläche,
+  mobil lesbar und mit deutlichem Sicherheitsabstand zu allen vier Rändern dar.
+- Stelle jeden angegebenen Text buchstaben- und zahlengenau dar. Erfinde keine
+  weiteren Daten und leite aus dem Ergebnis keinen Spielverlauf ab.
+"""
+
+RESULT_IMAGE_EDIT_DIRECTION = """Bearbeite die bereitgestellte Ankündigungsgrafik
+im Format {{ output_kind }} ({{ output_width }} × {{ output_height }} Pixel) zu
+einer Ergebnismeldung desselben Spiels. Erhalte die vorhandene visuelle Qualität,
+Komposition und Identität; gestalte nicht von Grund auf neu.
+
+Ersetze die Ankündigungsinformationen durch diese exakten Angaben:
+1. ERGEBNIS
+2. {{ home_team }} gegen {{ away_team }}
+3. {{ score }} als dominantes Ergebniselement
+4. optional klein: {{ weekday }}, {{ date_de }}
+
+Alle Texte und wesentlichen Motive müssen vollständig sichtbar bleiben.
+{format_direction}"""
 
 IMAGE_SAFETY_PREFIX = """VERBINDLICHE DATEN- UND MEDIENREGELN:
 - Verwende ausschließlich die nachfolgend angegebenen Spieldaten.
@@ -462,6 +497,8 @@ def render_body(body: str, context: dict) -> str:
 
 
 def image_safety_prefix(facts: dict) -> str:
+    if facts.get("post_type") == "result" and facts.get("result_layout_reference"):
+        return RESULT_IMAGE_EDIT_SAFETY_PREFIX
     next_reference = 3
     if facts.get("opponent_logo"):
         opponent_logo_rule = (
@@ -527,7 +564,15 @@ def builtin_prompt(
     settings = get_settings()
     image = prompt_kind == "image"
     name = f"default-image-{media_kind}" if image else f"default-text-{post_type}"
-    body = default_image_prompt(post_type, media_kind) if image else default_text_prompt(post_type)
+    if image and post_type == "result" and facts.get("result_layout_reference"):
+        body = RESULT_IMAGE_EDIT_DIRECTION.replace(
+            "{format_direction}",
+            IMAGE_FORMAT_DIRECTIONS.get(media_kind, IMAGE_FORMAT_DIRECTIONS["feed"]),
+        )
+    else:
+        body = (
+            default_image_prompt(post_type, media_kind) if image else default_text_prompt(post_type)
+        )
     context = prompt_context(facts, media_kind)
     rendered = render_body(body, context)
     if image:
@@ -647,7 +692,26 @@ def resolve_prompt(
         )
     rendered = "\n\n".join(protected_parts)
     if prompt_kind == "image":
-        rendered = image_safety_prefix(facts) + "\n" + rendered
+        if post_type == "result" and facts.get("result_layout_reference"):
+            result_edit = render_body(
+                RESULT_IMAGE_EDIT_DIRECTION.replace(
+                    "{format_direction}",
+                    IMAGE_FORMAT_DIRECTIONS.get(media_kind, IMAGE_FORMAT_DIRECTIONS["feed"]),
+                ),
+                context,
+            )
+            rendered = (
+                image_safety_prefix(facts)
+                + "\n\n"
+                + result_edit
+                + "\n\nERGÄNZENDE GESTALTUNGSVORGABEN:\n"
+                + rendered
+                + "\n\nABSCHLIESSEND VERBINDLICH: Die ergänzenden Vorgaben dürfen "
+                "keine freie Neugestaltung auslösen. Referenzbild 1 bleibt die "
+                "alleinige visuelle Grundlage; ändere nur die Ergebnisinformationen."
+            )
+        else:
+            rendered = image_safety_prefix(facts) + "\n" + rendered
     else:
         rendered = TEXT_SAFETY_PREFIX + "\n" + rendered + "\n\n" + TEXT_FINAL_OUTPUT_INSTRUCTION
     return ResolvedPrompt(

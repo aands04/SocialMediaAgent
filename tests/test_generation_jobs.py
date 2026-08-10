@@ -191,6 +191,33 @@ def test_progress_renderer_reuses_valid_output_without_new_usage_reservation(db,
     assert db.query(AiPromptDispatch).count() == 0
 
 
+def test_progress_renderer_does_not_double_count_reused_outputs_on_retry(db, tmp_path):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    job.planned_outputs = 2
+    job.completed_outputs = 2
+    db.commit()
+    existing = tmp_path / "existing.png"
+    existing.write_bytes(b"already-validated-by-provider")
+
+    class ReusableRenderer:
+        is_ai = True
+
+        def reusable_output(self, target, generation_job_id, kind):
+            return existing
+
+        def render(self, kind, relative_path, context):
+            return existing
+
+    renderer = generation._ProgressRenderer(ReusableRenderer(), db, job)
+    renderer.render("feed", "post/feed-v1.png", {})
+    renderer.render("story", "post/story-v1.png", {})
+
+    assert job.completed_outputs == 2
+    assert job.progress == 85
+    assert db.query(UsageLedgerEntry).count() == 0
+
+
 def test_progress_text_generator_records_exact_provider_prompt(db):
     _, _team, _game, user = graph(db)
     job = generation.enqueue_create(
@@ -435,7 +462,7 @@ def test_progress_renderer_records_exact_image_provider_prompt(db, tmp_path):
     assert dispatch.status == "completed"
 
 
-def test_ambiguous_openai_timeout_schedules_one_delayed_retry(db, monkeypatch, tmp_path):
+def test_ambiguous_openai_timeout_schedules_bounded_delayed_retry(db, monkeypatch, tmp_path):
     _, team, game, user = graph(db)
     job, _ = generation.enqueue_create(db, game, team, user, "announcement")
     claimed = generation.claim_next(db, "worker-a")
@@ -460,13 +487,13 @@ def test_ambiguous_openai_timeout_schedules_one_delayed_retry(db, monkeypatch, t
     )
     assert result.status == GenerationJobStatus.RETRY_WAIT
     assert result.error_category == "external_service_temporarily_unavailable"
-    assert "frühestens in 60 Sekunden" in result.error_message
+    assert "Versuch 1 von 3" in result.error_message
     assert "upstream timed out" not in result.error_message
     assert result.available_at >= datetime.now(timezone.utc) + timedelta(seconds=58)
     assert result.active_key == f"create:{game.id}:announcement"
 
 
-def test_ambiguous_openai_timeout_stops_after_one_automatic_retry(db, monkeypatch, tmp_path):
+def test_ambiguous_openai_timeout_stops_after_three_automatic_retries(db, monkeypatch, tmp_path):
     _, team, game, user = graph(db)
     job, _ = generation.enqueue_create(db, game, team, user, "announcement")
     monkeypatch.setattr(generation, "build_renderer", lambda settings: object())
@@ -491,13 +518,21 @@ def test_ambiguous_openai_timeout_stops_after_one_automatic_retry(db, monkeypatc
     first.available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     db.commit()
 
-    claimed = generation.claim_next(db, "worker-b")
-    second = generation.process_generation_job(db, claimed, settings)
+    second = None
+    for number in range(2, 5):
+        claimed = generation.claim_next(db, f"worker-{number}")
+        second = generation.process_generation_job(db, claimed, settings)
+        if number < 4:
+            assert second.status == GenerationJobStatus.RETRY_WAIT
+            assert f"Versuch {number} von 3" in second.error_message
+            second.available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.commit()
+
     assert second.status == GenerationJobStatus.MANUAL_REVIEW_REQUIRED
     assert second.error_category == "ambiguous_external_response"
-    assert "begrenzten Wiederholungsversuch" in second.error_message
+    assert "mehreren begrenzten Wiederholungsversuchen" in second.error_message
     assert "Error code: 520" not in second.error_message
-    assert second.attempts == 2
+    assert second.attempts == 4
     assert second.active_key is None
 
 
