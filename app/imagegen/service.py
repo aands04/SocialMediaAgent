@@ -200,14 +200,11 @@ def _provider_prompt(prompt: str, reference_count: int, size: str) -> str:
     if reference_count > 0:
         sections.append(
             f"TECHNISCHER REFERENZHINWEIS: Zusätzlich wurden {reference_count} "
-            "getrennte Eingabebilder in der im Prompt beschriebenen Reihenfolge "
-            "übergeben: zuerst das Spielerfoto, danach Mannschaftslogo, optionales "
-            "Gegnerlogo, optionale Sponsorenlogos und bei Ergebnismeldungen zuletzt "
-            "optional das frühere Ankündigungs-Feedbild als reine Layoutreferenz. "
-            "Verwende jedes Bild nur für "
-            "seine genannte Rolle. Logos, Wappen und Sponsorzeichen müssen inhaltlich "
-            "unverändert bleiben. Die Eingabebilder sind Referenzen und dürfen nicht "
-            "als Collage oder technische Tafel im Ergebnis erscheinen."
+            "getrennte Eingabebilder in der im fachlichen Prompt beschriebenen Reihenfolge "
+            "übergeben. Verwende jedes Bild ausschließlich für die dort genannte "
+            "Rolle. Logos, Wappen und Sponsorzeichen müssen inhaltlich unverändert "
+            "bleiben. Die Eingabebilder dürfen nicht als Collage oder technische "
+            "Tafel im Ergebnis erscheinen."
         )
     sections.append(_layout_safety_prompt(size))
     return "\n\n".join(sections)
@@ -431,12 +428,14 @@ class AIImageRenderer:
 
         prompt = data.get("image_prompt")
         rendered = str(getattr(prompt, "rendered", "") or "")
-        reference_count = int(bool(data.get("player_image"))) + int(bool(data.get("team_logo")))
-        reference_count += int(bool(data.get("opponent_logo")))
-        reference_count += len(
-            [item for item in (data.get("sponsor_references") or []) if isinstance(item, dict)]
-        )
-        reference_count += int(bool(data.get("result_layout_reference")))
+        if data.get("post_type") == "result" and data.get("result_layout_reference"):
+            reference_count = 1
+        else:
+            reference_count = int(bool(data.get("player_image"))) + int(bool(data.get("team_logo")))
+            reference_count += int(bool(data.get("opponent_logo")))
+            reference_count += len(
+                [item for item in (data.get("sponsor_references") or []) if isinstance(item, dict)]
+            )
         size = "1088x1920" if getattr(prompt, "media_kind", "") == "story" else "1088x1360"
         return _provider_prompt(rendered, reference_count, size)
 
@@ -447,6 +446,24 @@ class AIImageRenderer:
         sponsors: list[dict],
         result_layout_present: bool,
     ) -> dict:
+        if data.get("post_type") == "result" and result_layout_present:
+            return {
+                "mode": "ai-result-image-edit",
+                "version": LOGO_REFERENCE_VERSION,
+                "reference_order": [
+                    {
+                        "position": 1,
+                        "role": "same_fixture_announcement_layout",
+                        "source_post_id": data.get("result_layout_reference_post_id"),
+                        "source_media_kind": data.get("result_layout_reference_media_kind"),
+                        "source_variant": data.get("result_layout_reference_variant"),
+                    }
+                ],
+                "result_layout_reference": True,
+                "result_transform_mode": True,
+                "fixed_logo_positions": False,
+                "manual_logo_review_required": True,
+            }
         logos = data.get("logos") if isinstance(data.get("logos"), dict) else {}
         team = logos.get("team") if isinstance(logos.get("team"), dict) else {}
         opponent = logos.get("opponent") if isinstance(logos.get("opponent"), dict) else {}
@@ -537,28 +554,37 @@ class AIImageRenderer:
         prompt = data.get("image_prompt")
         if not prompt:
             raise ImageGenerationError("Gerenderter KI-Bildprompt fehlt")
-        player = self._player_reference(data.get("player_image"))
-        if not player:
-            raise ImageGenerationError(
-                "Für eine KI-Grafik ist ein verfügbares Spielerbild erforderlich"
-            )
-        team_logo = self._logo_reference(data.get("team_logo"))
-        if not team_logo:
-            raise ImageGenerationError(
-                "Für eine KI-Grafik ist ein verifiziertes Mannschaftslogo erforderlich"
-            )
-        opponent_logo = self._logo_reference(data.get("opponent_logo"))
-        sponsor_items = [
-            dict(item) for item in (data.get("sponsor_references") or []) if isinstance(item, dict)
-        ]
-        sponsor_paths = [self._sponsor_reference(item) for item in sponsor_items]
         result_layout = self._result_layout_reference(data.get("result_layout_reference"))
-        references = [player, team_logo]
-        if opponent_logo:
-            references.append(opponent_logo)
-        references.extend(sponsor_paths)
-        if result_layout:
-            references.append(result_layout)
+        result_transform = bool(data.get("post_type") == "result" and result_layout)
+        if result_transform:
+            # Continue from the already reviewed pre-match artwork. Supplying
+            # player and logo files again encouraged a redesign and made the
+            # multipart request larger and more fragile.
+            opponent_logo = None
+            sponsor_items = []
+            references = [result_layout]
+        else:
+            player = self._player_reference(data.get("player_image"))
+            if not player:
+                raise ImageGenerationError(
+                    "Für eine KI-Grafik ist ein verfügbares Spielerbild erforderlich"
+                )
+            team_logo = self._logo_reference(data.get("team_logo"))
+            if not team_logo:
+                raise ImageGenerationError(
+                    "Für eine KI-Grafik ist ein verifiziertes Mannschaftslogo erforderlich"
+                )
+            opponent_logo = self._logo_reference(data.get("opponent_logo"))
+            sponsor_items = [
+                dict(item)
+                for item in (data.get("sponsor_references") or [])
+                if isinstance(item, dict)
+            ]
+            sponsor_paths = [self._sponsor_reference(item) for item in sponsor_items]
+            references = [player, team_logo]
+            if opponent_logo:
+                references.append(opponent_logo)
+            references.extend(sponsor_paths)
         integration = self._reference_metadata(
             data,
             opponent_logo is not None,

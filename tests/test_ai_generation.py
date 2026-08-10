@@ -26,7 +26,7 @@ from app.models import (
     Team,
     User,
 )
-from app.posts.service import _facts, create_post
+from app.posts.service import _facts, _facts_for_media, create_post
 from app.prompts.service import (
     PromptValidationError,
     builtin_prompt,
@@ -72,7 +72,7 @@ def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     assert "Referenzbild 2" in prompt.rendered
     assert "kein drittes Referenzbild" in prompt.rendered
     assert "oben links und oben rechts" not in prompt.rendered
-    assert prompt.policy_version == "verified-media-ai-references-v5-result-layout-reference"
+    assert prompt.policy_version == "verified-media-ai-references-v6-result-image-edit"
     assert "{{" not in prompt.rendered
 
 
@@ -101,10 +101,11 @@ def test_result_image_prompt_is_result_only_and_describes_layout_reference():
         ),
     )
 
-    assert "die Kennzeichnung ERGEBNIS" in prompt.rendered
-    assert "bestätigte Ergebnis 5:1" in prompt.rendered
-    assert "keine Ankündigungswörter" in prompt.rendered
-    assert "frühere, verifizierte Ankündigungs-Feedbild" in prompt.rendered
+    assert "gezielte Bildbearbeitung, keine neue freie Komposition" in prompt.rendered
+    assert "5:1 als dominantes Ergebniselement" in prompt.rendered
+    assert "Ankündigungstexte" in prompt.rendered
+    assert "Referenzbild 1 ist die bereits geprüfte Ankündigungsgrafik" in prompt.rendered
+    assert "Füge keine Person, kein Logo" in prompt.rendered
     assert "Kennzeichnung: Heimspiel" not in prompt.rendered
     assert "15:00 Uhr" not in prompt.rendered
 
@@ -179,6 +180,10 @@ def test_post_facts_prefer_configured_home_venue_and_reuse_announcement_layout(d
     announcement_path = tmp_path / "generated" / "announcement-feed.png"
     announcement_path.parent.mkdir()
     Image.new("RGB", (1080, 1350), "navy").save(announcement_path)
+    story_one = announcement_path.parent / "announcement-story-1.png"
+    story_two = announcement_path.parent / "announcement-story-2.png"
+    Image.new("RGB", (1080, 1920), "blue").save(story_one)
+    Image.new("RGB", (1080, 1920), "white").save(story_two)
     announcement = Post(
         club_id=team.club_id,
         game_id=game.id,
@@ -187,6 +192,12 @@ def test_post_facts_prefer_configured_home_venue_and_reuse_announcement_layout(d
         post_type="announcement",
         status=PostStatus.PENDING,
         feed_path=str(announcement_path),
+        design_snapshot={
+            "story_variants": [
+                {"path": str(story_one), "variant_number": 1},
+                {"path": str(story_two), "variant_number": 2},
+            ]
+        },
     )
     db.add(announcement)
     game.result_confirmed = True
@@ -206,6 +217,15 @@ def test_post_facts_prefer_configured_home_venue_and_reuse_announcement_layout(d
     assert result_facts["score"] == "3:1"
     assert result_facts["result_layout_reference"] == str(announcement_path.resolve())
     assert result_facts["result_layout_reference_post_id"] == announcement.id
+    assert _facts_for_media(result_facts, "feed")["result_layout_reference"] == str(
+        announcement_path.resolve()
+    )
+    assert _facts_for_media(result_facts, "story", 1)["result_layout_reference"] == str(
+        story_one.resolve()
+    )
+    assert _facts_for_media(result_facts, "story", 2)["result_layout_reference"] == str(
+        story_two.resolve()
+    )
 
 
 def test_prompt_rejects_unknown_placeholders_and_resolves_latest_version(db):
@@ -416,7 +436,7 @@ def test_ai_renderer_passes_verified_sponsor_as_compositional_reference(tmp_path
     ]
 
 
-def test_result_renderer_appends_announcement_feed_as_layout_reference(tmp_path):
+def test_result_renderer_uses_announcement_as_sole_edit_reference(tmp_path):
     media = tmp_path / "media"
     uploads = tmp_path / "uploads"
     output_root = tmp_path / "out"
@@ -453,18 +473,19 @@ def test_result_renderer_appends_announcement_feed_as_layout_reference(tmp_path)
     )
 
     assert output.is_file()
-    assert provider.calls[0]["references"] == [
-        player.resolve(),
-        team_logo.resolve(),
-        announcement.resolve(),
-    ]
+    assert provider.calls[0]["references"] == [announcement.resolve()]
     integration = renderer.metadata_for(output)["logo_integration"]
     assert integration["result_layout_reference"] is True
-    assert integration["reference_order"][-1] == {
-        "position": 3,
-        "role": "announcement_feed_layout",
-        "source_post_id": "announcement-post-1",
-    }
+    assert integration["result_transform_mode"] is True
+    assert integration["reference_order"] == [
+        {
+            "position": 1,
+            "role": "same_fixture_announcement_layout",
+            "source_post_id": "announcement-post-1",
+            "source_media_kind": None,
+            "source_variant": None,
+        }
+    ]
 
 
 def test_ai_renderer_rejects_modified_sponsor_reference(tmp_path):
@@ -729,7 +750,7 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     assert post.design_snapshot["prompts"]["feed"]["version"] == 3
     assert (
         post.design_snapshot["prompts"]["feed"]["policy_version"]
-        == "verified-media-ai-references-v5-result-layout-reference"
+        == "verified-media-ai-references-v6-result-image-edit"
     )
     prompt_snapshot = post.design_snapshot["prompts"]["feed"]
     assert "rendered" not in prompt_snapshot

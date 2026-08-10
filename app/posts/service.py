@@ -378,16 +378,41 @@ def _normalize_design_snapshot(value: object) -> dict:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _facts_for_media(facts: dict, media_kind: str) -> dict:
+def _facts_for_media(
+    facts: dict,
+    media_kind: str,
+    variant_number: int = 1,
+) -> dict:
     by_media = facts.get("sponsor_references_by_media") or {}
-    return {
+    result = {
         **facts,
         "sponsor_references": list(by_media.get(media_kind) or []),
     }
+    layout_references = facts.get("result_layout_references") or {}
+    if media_kind == "story":
+        story_paths = list(layout_references.get("story") or [])
+        selected = (
+            story_paths[variant_number - 1]
+            if 1 <= variant_number <= len(story_paths)
+            else (story_paths[0] if story_paths else layout_references.get("feed"))
+        )
+    else:
+        selected = layout_references.get("feed")
+    if selected:
+        result["result_layout_reference"] = selected
+        result["result_layout_reference_media_kind"] = media_kind
+        result["result_layout_reference_variant"] = variant_number
+    return result
 
 
 def _result_layout_reference(db: Session, game: Game, team: Team) -> dict | None:
-    """Find this tenant's latest usable pre-match feed for the same fixture."""
+    """Find same-fixture pre-match media for a true result-image edit.
+
+    The feed is used for a result feed.  Existing story variants are preferred
+    for result stories so the provider does not have to invent a 9:16 layout
+    from a 4:5 source.  Every candidate is selected through tenant-bound rows
+    and is validated as a regular local file before it leaves this service.
+    """
 
     candidates = list(
         db.scalars(
@@ -417,8 +442,21 @@ def _result_layout_reference(db: Session, game: Game, team: Team) -> dict | None
     for candidate in candidates:
         path = Path(str(candidate.feed_path or "")).resolve()
         if path.is_file() and not path.is_symlink():
+            story_paths: list[str] = []
+            snapshot = candidate.design_snapshot or {}
+            for entry in snapshot.get("story_variants") or []:
+                if not isinstance(entry, dict):
+                    continue
+                story_path = Path(str(entry.get("path") or "")).resolve()
+                if (
+                    story_path.is_file()
+                    and not story_path.is_symlink()
+                    and str(story_path) not in story_paths
+                ):
+                    story_paths.append(str(story_path))
             return {
                 "path": str(path),
+                "story_paths": story_paths,
                 "post_id": candidate.id,
                 "post_type": candidate.post_type,
                 "feed_version": candidate.feed_version,
@@ -430,8 +468,7 @@ def _sponsor_snapshot(facts: dict) -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
     for media_kind, references in (facts.get("sponsor_references_by_media") or {}).items():
         result[media_kind] = [
-            {key: value for key, value in item.items() if key != "path"}
-            for item in references
+            {key: value for key, value in item.items() if key != "path"} for item in references
         ]
     return result
 
@@ -553,12 +590,10 @@ def _facts(
     )
     primary_standard_key = str(image_settings.get("primary_standard_font") or "system")
     secondary_standard_key = str(image_settings.get("secondary_standard_font") or "system")
-    primary_family = STANDARD_FONTS.get(primary_standard_key, STANDARD_FONTS["system"])[
+    primary_family = STANDARD_FONTS.get(primary_standard_key, STANDARD_FONTS["system"])["family"]
+    secondary_family = STANDARD_FONTS.get(secondary_standard_key, STANDARD_FONTS["system"])[
         "family"
     ]
-    secondary_family = STANDARD_FONTS.get(
-        secondary_standard_key, STANDARD_FONTS["system"]
-    )["family"]
     display_name, display_short = team_display_name(snapshot, team.id, team.display_name)
     sponsor_references_by_media = {
         media_kind: _resolve_sponsor_references(
@@ -587,8 +622,7 @@ def _facts(
         "post_type": post_type,
         "hashtags": text_settings.get("hashtags") or team.hashtags,
         "primary_color": image_settings.get("primary_color") or team.colors.get("primary"),
-        "secondary_color": image_settings.get("secondary_color")
-        or team.colors.get("secondary"),
+        "secondary_color": image_settings.get("secondary_color") or team.colors.get("secondary"),
         "style_direction": team.rules.get("style_direction"),
         "team_short": display_short or team.short_name,
         "home_label": text_settings.get("home_label") or "Heimspiel",
@@ -615,6 +649,10 @@ def _facts(
         layout_reference = _result_layout_reference(db, game, team)
         if layout_reference:
             facts["result_layout_reference"] = layout_reference["path"]
+            facts["result_layout_references"] = {
+                "feed": layout_reference["path"],
+                "story": layout_reference["story_paths"],
+            }
             facts["result_layout_reference_post_id"] = layout_reference["post_id"]
             facts["result_layout_reference_feed_version"] = layout_reference["feed_version"]
     if post_type == "result" and not game.result_confirmed:
@@ -680,9 +718,7 @@ def create_post(
             f"image_prompt_feed_{post_type}",
             team.rules.get("image_prompt_feed", "default-image-feed"),
         )
-        feed_prompt = resolve_prompt(
-            db, feed_prompt_name, "image", post_type, "feed", feed_facts
-        )
+        feed_prompt = resolve_prompt(db, feed_prompt_name, "image", post_type, "feed", feed_facts)
     if text_prompt_override is not None:
         text_prompt = text_prompt_override
         facts = {**feed_facts, "text_prompt": text_prompt}
@@ -690,43 +726,38 @@ def create_post(
         text_prompt_name = team.rules.get(
             f"text_prompt_{post_type}", team.rules.get("text_prompt", f"default-text-{post_type}")
         )
-        text_prompt = resolve_prompt(
-            db, text_prompt_name, "text", post_type, "none", feed_facts
-        )
+        text_prompt = resolve_prompt(db, text_prompt_name, "text", post_type, "none", feed_facts)
         facts = {**feed_facts, "text_prompt": text_prompt}
     primary_font = facts["primary_font_asset"]
     secondary_font = facts["secondary_font_asset"]
     initial_snapshot = {
-            "mode": {
-                "image": "openai" if feed_prompt else "playwright",
-                "text": "openai" if text_prompt else "fixture",
-                "manual_approval_required": True,
-            },
-            "feed": feed_design,
-            "prompts": {
-                "feed": feed_prompt.snapshot() if feed_prompt else None,
-                "text": text_prompt.snapshot() if text_prompt else None,
-            },
-            "stories": [],
-            "logos": logos,
-            "sponsors": _sponsor_snapshot(facts),
-            "media": {},
-            "fonts": {
-                "primary": primary_font
-                or {"family": facts["primary_font_family"], "fallback": True},
-                "secondary": secondary_font
-                or {"family": facts["secondary_font_family"], "fallback": True},
-            },
-            "colors": team.colors,
-            "matchday_bundle": matchday_bundle,
-        }
+        "mode": {
+            "image": "openai" if feed_prompt else "playwright",
+            "text": "openai" if text_prompt else "fixture",
+            "manual_approval_required": True,
+        },
+        "feed": feed_design,
+        "prompts": {
+            "feed": feed_prompt.snapshot() if feed_prompt else None,
+            "text": text_prompt.snapshot() if text_prompt else None,
+        },
+        "stories": [],
+        "logos": logos,
+        "sponsors": _sponsor_snapshot(facts),
+        "media": {},
+        "fonts": {
+            "primary": primary_font or {"family": facts["primary_font_family"], "fallback": True},
+            "secondary": secondary_font
+            or {"family": facts["secondary_font_family"], "fallback": True},
+        },
+        "colors": team.colors,
+        "matchday_bundle": matchday_bundle,
+    }
     if resuming:
         post = existing
         existing_jobs = list(
             db.scalars(
-                select(PublicationJob)
-                .where(PublicationJob.post_id == post.id)
-                .with_for_update()
+                select(PublicationJob).where(PublicationJob.post_id == post.id).with_for_update()
             )
         )
         if any(job.status == JobStatus.PUBLISHED for job in existing_jobs):
@@ -952,13 +983,9 @@ def create_post(
                 absolute_time=bool(
                     publication_slot and publication_slot.timing_model == "weekday_fixed"
                 ),
-                approval_status=(
-                    "manual_schedule_required" if manual_schedule else "unapproved"
-                ),
+                approval_status=("manual_schedule_required" if manual_schedule else "unapproved"),
                 status=JobStatus.DRAFT if manual_schedule else JobStatus.UNAPPROVED,
-                schedule_source=(
-                    "manual_required" if manual_schedule else rule_resolution.source
-                ),
+                schedule_source=("manual_required" if manual_schedule else rule_resolution.source),
                 publication_rule_slot_id=publication_slot.id if publication_slot else None,
                 idempotency_key=(
                     f"{post.id}:feed:rule:{publication_slot.id}:v1"
@@ -983,9 +1010,7 @@ def create_post(
             ),
             status=JobStatus.DRAFT if feed_requires_manual_schedule else JobStatus.UNAPPROVED,
             schedule_source=(
-                "manual_required"
-                if feed_requires_manual_schedule
-                else rule_resolution.source
+                "manual_required" if feed_requires_manual_schedule else rule_resolution.source
             ),
             publication_rule_slot_id=feed_rule_slot.id if feed_rule_slot else None,
             idempotency_key=f"{post.id}:{'carousel' if len(published_feed_paths) > 1 else 'feed'}:v1",
@@ -1021,13 +1046,9 @@ def create_post(
             .order_by(StoryRule.sort_order, StoryRule.created_at, StoryRule.id)
         ).all()
     )
-    structured_story_slots = [
-        slot for slot in rule_resolution.slots if slot.media_kind == "story"
-    ]
+    structured_story_slots = [slot for slot in rule_resolution.slots if slot.media_kind == "story"]
     if rule_resolution.rule_set:
-        story_output_count = max(
-            0, min(10, int(rule_resolution.rule_set.story_generation_count))
-        )
+        story_output_count = max(0, min(10, int(rule_resolution.rule_set.story_generation_count)))
         planned_rules = []
     else:
         planned_rules, story_output_count = _effective_story_rules(team, rules, post_type)
@@ -1062,6 +1083,7 @@ def create_post(
                     f"image_prompt_story_{post_type}",
                     team.rules.get("image_prompt_story", "default-image-story"),
                 )
+            story_facts = _facts_for_media(facts, "story", media_slot)
             story_prompt = (
                 resolve_prompt(
                     db,
@@ -1069,14 +1091,14 @@ def create_post(
                     "image",
                     post_type,
                     "story",
-                    _facts_for_media(facts, "story"),
+                    story_facts,
                 )
                 if getattr(renderer, "is_ai", False)
                 else None
             )
             story_prompt = prompt_for_variant(story_prompt, media_slot, story_output_count)
             render_context = {
-                **_facts_for_media(facts, "story"),
+                **story_facts,
                 "template": story_design,
                 "story_output_index": media_slot,
             }
@@ -1118,10 +1140,10 @@ def create_post(
                 approval_status=(
                     "manual_schedule_required" if story_requires_manual_schedule else "unapproved"
                 ),
-                status=(JobStatus.DRAFT if story_requires_manual_schedule else JobStatus.UNAPPROVED),
-                schedule_source=(
-                    "manual_required" if story_requires_manual_schedule else "rule"
+                status=(
+                    JobStatus.DRAFT if story_requires_manual_schedule else JobStatus.UNAPPROVED
                 ),
+                schedule_source=("manual_required" if story_requires_manual_schedule else "rule"),
                 publication_rule_slot_id=next(
                     (
                         slot.id
@@ -1142,11 +1164,7 @@ def create_post(
         if media_slot in rendered_slots:
             continue
         candidate_slot = next(
-            (
-                slot
-                for slot in structured_story_slots
-                if slot.variant_number == media_slot
-            ),
+            (slot for slot in structured_story_slots if slot.variant_number == media_slot),
             None,
         )
         source_rule = (
@@ -1175,6 +1193,7 @@ def create_post(
                 f"image_prompt_story_{post_type}",
                 team_rules.get("image_prompt_story", "default-image-story"),
             )
+        story_facts = _facts_for_media(facts, "story", media_slot)
         story_prompt = (
             resolve_prompt(
                 db,
@@ -1182,30 +1201,26 @@ def create_post(
                 "image",
                 post_type,
                 "story",
-                _facts_for_media(facts, "story"),
+                story_facts,
             )
             if getattr(renderer, "is_ai", False)
             else None
         )
         story_prompt = prompt_for_variant(story_prompt, media_slot, story_output_count)
         render_context = {
-            **_facts_for_media(facts, "story"),
+            **story_facts,
             "template": story_design,
             "story_output_index": media_slot,
         }
         if story_prompt:
             render_context["image_prompt"] = story_prompt
         path = str(
-            renderer.render(
-                "story", f"{post.id}/story-slot-{media_slot}-v1.png", render_context
-            )
+            renderer.render("story", f"{post.id}/story-slot-{media_slot}-v1.png", render_context)
         )
         rendered_slots[media_slot] = (path, story_design, story_prompt)
 
     if rule_resolution.rule_set:
-        effective_story_slots: list[PublicationRuleSlot | None] = list(
-            structured_story_slots
-        )
+        effective_story_slots: list[PublicationRuleSlot | None] = list(structured_story_slots)
         if (
             not effective_story_slots
             and rule_resolution.manual_schedule_required
@@ -1243,25 +1258,19 @@ def create_post(
                 else None
             )
             manual_schedule = at is None
-            legacy_rule_id = (
-                publication_slot.legacy_story_rule_id if publication_slot else None
-            )
+            legacy_rule_id = publication_slot.legacy_story_rule_id if publication_slot else None
             source_rule = db.get(StoryRule, legacy_rule_id) if legacy_rule_id else None
             story_snapshots.append(
                 {
                     "rule_id": legacy_rule_id,
-                    "publication_rule_slot_id": (
-                        publication_slot.id if publication_slot else None
-                    ),
+                    "publication_rule_slot_id": (publication_slot.id if publication_slot else None),
                     "media_slot": variant_number,
                     "path": path,
                     "template": story_design,
                     "prompt": story_prompt.snapshot() if story_prompt else None,
                     "media_version": 1,
                     "rendering": (
-                        renderer.metadata_for(path)
-                        if hasattr(renderer, "metadata_for")
-                        else {}
+                        renderer.metadata_for(path) if hasattr(renderer, "metadata_for") else {}
                     ),
                 }
             )
@@ -1281,21 +1290,16 @@ def create_post(
                     text_snapshot=(post.text if source_rule and source_rule.text_variant else None),
                     scheduled_at=at or _aware_utc(game.kickoff),
                     absolute_time=bool(
-                        publication_slot
-                        and publication_slot.timing_model == "weekday_fixed"
+                        publication_slot and publication_slot.timing_model == "weekday_fixed"
                     ),
                     approval_status=(
                         "manual_schedule_required" if manual_schedule else "unapproved"
                     ),
-                    status=(
-                        JobStatus.DRAFT if manual_schedule else JobStatus.UNAPPROVED
-                    ),
+                    status=(JobStatus.DRAFT if manual_schedule else JobStatus.UNAPPROVED),
                     schedule_source=(
                         "manual_required" if manual_schedule else rule_resolution.source
                     ),
-                    publication_rule_slot_id=(
-                        publication_slot.id if publication_slot else None
-                    ),
+                    publication_rule_slot_id=(publication_slot.id if publication_slot else None),
                     idempotency_key=(
                         f"{post.id}:story:rule:{publication_slot.id}:v1"
                         if publication_slot
@@ -1457,7 +1461,11 @@ def create_matchday_bundle_posts(
             }
         )
     else:
-        heading = "Ergebnisse des gemeinsamen Spieltags" if post_type == "result" else "Gemeinsamer Spieltag"
+        heading = (
+            "Ergebnisse des gemeinsamen Spieltags"
+            if post_type == "result"
+            else "Gemeinsamer Spieltag"
+        )
         hashtags = []
         for game in games:
             for tag in teams[game.team_id].hashtags or []:
@@ -1617,9 +1625,7 @@ def rerender_post(
         )
         feed_prompt = _revision_prompt(feed_prompt, revision_instruction)
         previous_feed_outputs = (old_snapshot.get("media") or {}).get("feed_outputs") or []
-        previous_feed_variants = (
-            (old_snapshot.get("media") or {}).get("feed_variants") or []
-        )
+        previous_feed_variants = (old_snapshot.get("media") or {}).get("feed_variants") or []
         structured_feed_variants = bool(
             f"{post.post_type}_feed_generation_count" in (team.rules or {})
             or (
@@ -1639,8 +1645,7 @@ def rerender_post(
         feed_output_count = max(1, len(previous_feed_outputs))
         selected_feed_positions = set(feed_positions or range(1, feed_output_count + 1))
         if not selected_feed_positions or any(
-            position < 1 or position > feed_output_count
-            for position in selected_feed_positions
+            position < 1 or position > feed_output_count for position in selected_feed_positions
         ):
             raise RerenderConflict("Ungültige Auswahl der Feed-Ausgaben")
         if any(job.kind == "carousel" for job in jobs) and feed_output_count == 1:
@@ -1703,9 +1708,7 @@ def rerender_post(
                         PublicationMediaItem.publication_job_id == job.id
                     )
                 )
-                for position, path_value in enumerate(
-                    feed_paths[:published_count], start=1
-                ):
+                for position, path_value in enumerate(feed_paths[:published_count], start=1):
                     media_path = Path(path_value)
                     payload = media_path.read_bytes()
                     with Image.open(media_path) as image:
@@ -1740,13 +1743,9 @@ def rerender_post(
         for publication in story_jobs.values():
             current_slot = None
             if publication.media_version_id:
-                current_version = db.get(
-                    GeneratedMediaVersion, publication.media_version_id
-                )
+                current_version = db.get(GeneratedMediaVersion, publication.media_version_id)
                 current_slot = (
-                    db.get(GeneratedMediaSlot, current_version.slot_id)
-                    if current_version
-                    else None
+                    db.get(GeneratedMediaSlot, current_version.slot_id) if current_version else None
                 )
             snapshot = snapshots.get(publication.story_rule_id, {})
             current_variant = (
@@ -1772,11 +1771,7 @@ def rerender_post(
                 active_story_rules[0] if active_story_rules else None,
             )
         )
-        template_name = (
-            rule.template
-            if rule
-            else str(candidate.get("template") or "default-story")
-        )
+        template_name = rule.template if rule else str(candidate.get("template") or "default-story")
         design = _design(db, template_name, post.post_type, "story")
         story_prompt_name = rule.prompt_template if rule else None
         if not story_prompt_name or story_prompt_name == "default-image-story":
@@ -1839,11 +1834,7 @@ def rerender_post(
                 },
             )
         )
-        rendering = (
-            renderer.metadata_for(path_value)
-            if hasattr(renderer, "metadata_for")
-            else {}
-        )
+        rendering = renderer.metadata_for(path_value) if hasattr(renderer, "metadata_for") else {}
         story_candidates[variant_number] = {
             **candidate,
             "path": path_value,
@@ -1861,8 +1852,7 @@ def rerender_post(
             publication.media_path = path_value
             publication.version += 1
             publication.idempotency_key = (
-                f"{post.id}:story:{publication.story_rule_id or variant_number}:"
-                f"v{next_version}"
+                f"{post.id}:story:{publication.story_rule_id or variant_number}:v{next_version}"
             )
             entry = dict(snapshots.get(publication.story_rule_id) or {})
             snapshots[publication.story_rule_id] = {
@@ -1910,9 +1900,7 @@ def rerender_post(
         "feed": feed_design,
         "prompts": prompt_snapshot,
         "stories": list(snapshots.values()),
-        "story_variants": [
-            story_candidates[number] for number in sorted(story_candidates)
-        ],
+        "story_variants": [story_candidates[number] for number in sorted(story_candidates)],
         "logos": logos,
         "sponsors": _sponsor_snapshot(facts),
         "media": media_snapshot,
@@ -1983,12 +1971,7 @@ def revise_post(
         raise ValueError("Bitte mindestens Begleittext oder Grafiken auswählen")
     if rerender_feed is None:
         rerender_feed = revise_graphics
-    if (
-        revise_graphics
-        and not rerender_feed
-        and not story_job_ids
-        and not story_variant_numbers
-    ):
+    if revise_graphics and not rerender_feed and not story_job_ids and not story_variant_numbers:
         raise ValueError("Bitte Feed oder mindestens eine Story auswählen")
     if revise_text and text_generator is None:
         raise ValueError("Textgenerator fehlt")
@@ -2315,10 +2298,12 @@ def reschedule_game(db: Session, game: Game, new_kickoff: datetime):
     affected_posts: set[str] = set()
     new_weekday = _aware_utc(new_kickoff).astimezone(BERLIN).weekday()
     for job in db.scalars(
-        select(PublicationJob).where(
+        select(PublicationJob)
+        .where(
             PublicationJob.game_id == game.id,
             PublicationJob.status.not_in([JobStatus.PUBLISHED, JobStatus.CANCELLED]),
-        ).with_for_update()
+        )
+        .with_for_update()
     ):
         affected_posts.add(job.post_id)
         if job.schedule_source == "manual":
@@ -2349,9 +2334,7 @@ def reschedule_game(db: Session, game: Game, new_kickoff: datetime):
                 )
             ]
             replacement = candidates[0] if candidates else None
-            scheduled_at = (
-                calculate_publication_time(replacement, game) if replacement else None
-            )
+            scheduled_at = calculate_publication_time(replacement, game) if replacement else None
             if replacement and scheduled_at:
                 job.publication_rule_slot_id = replacement.id
                 job.scheduled_at = scheduled_at
@@ -2383,9 +2366,7 @@ def reschedule_game(db: Session, game: Game, new_kickoff: datetime):
     for post in db.scalars(
         select(Post).where(
             Post.id.in_(affected_posts),
-            Post.status.in_(
-                [PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL]
-            ),
+            Post.status.in_([PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL]),
         )
     ):
         post.status = PostStatus.REAPPROVAL
