@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
 from openai import OpenAI
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageOps
 
 from app.rendering.service import Renderer, RenderValidationError
 
@@ -18,9 +18,6 @@ REFERENCE_LOGO_MAX_EDGE = 1024
 REFERENCE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 REFERENCE_IMAGE_MAX_PIXELS = 40_000_000
 REFERENCE_PLAYER_JPEG_QUALITY = 90
-FORMAT_BACKGROUND_BLUR_DIVISOR = 32
-FORMAT_BACKGROUND_BRIGHTNESS = 0.7
-
 REFERENCE_IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -191,9 +188,10 @@ def _layout_safety_prompt(size: str) -> str:
         "- Kein wichtiges Motiv und kein Buchstabe darf den Bildrand berühren oder "
         "angeschnitten sein. Dekorativer Hintergrund, Licht und Texturen dürfen bis "
         "an den Rand reichen.\n"
-        "- Die technische Bild-API verwendet ein abweichendes Hochformat. Die "
-        "Anwendung erhält deshalb den vollständigen Bildinhalt und erweitert nur "
-        "den Hintergrund auf das Zielformat; plane keine randbündigen Pflichtinhalte."
+        "- Die technische Bild-API verwendet ein abweichendes Hochformat. Für das "
+        "exakte Zielformat schneidet die Anwendung ausschließlich dekorative "
+        "Randflächen außerhalb des sicheren Bereichs ab. Gestalte den Hintergrund "
+        "vollflächig bis zum Rand und platziere dort keine Pflichtinhalte."
     )
 
 
@@ -213,37 +211,20 @@ def _provider_prompt(prompt: str, reference_count: int, size: str) -> str:
     return "\n\n".join(sections)
 
 
-def _fit_without_clipping(image: Image.Image, target_size: tuple[int, int]) -> Image.Image:
-    """Fit a provider canvas to Instagram dimensions without losing its edges.
+def _fit_full_bleed(image: Image.Image, target_size: tuple[int, int]) -> Image.Image:
+    """Fill the Instagram canvas while retaining the prompt-defined safe area.
 
-    GPT Image supports a small set of aspect ratios that do not exactly match
-    Instagram's 4:5 feed and 9:16 story canvases.  A cover crop silently removed
-    the top/bottom of feed images and the sides of stories.  Keep the full image
-    and fill the remaining strips with a subdued extension of its own background.
+    GPT Image's 2:3 portrait canvas differs from Instagram's 4:5 feed and 9:16
+    story ratios. The provider prompt reserves the inner region for mandatory
+    content, allowing only decorative outer pixels to be cropped here.
     """
 
-    source = image.convert("RGB")
-    target_width, target_height = target_size
-    source_ratio = source.width / max(source.height, 1)
-    target_ratio = target_width / max(target_height, 1)
-    if abs(source_ratio - target_ratio) < 0.001:
-        return source.resize(target_size, Image.Resampling.LANCZOS)
-
-    background = ImageOps.fit(
-        source,
+    return ImageOps.fit(
+        image.convert("RGB"),
         target_size,
         method=Image.Resampling.LANCZOS,
         centering=(0.5, 0.5),
     )
-    blur_radius = max(12, round(min(target_size) / FORMAT_BACKGROUND_BLUR_DIVISOR))
-    background = background.filter(ImageFilter.GaussianBlur(blur_radius))
-    background = ImageEnhance.Brightness(background).enhance(FORMAT_BACKGROUND_BRIGHTNESS)
-
-    foreground = ImageOps.contain(source, target_size, Image.Resampling.LANCZOS)
-    left = (target_width - foreground.width) // 2
-    top = (target_height - foreground.height) // 2
-    background.paste(foreground, (left, top))
-    return background
 
 
 def _provider_image_size(size: str) -> str:
@@ -589,7 +570,7 @@ class AIImageRenderer:
         try:
             with Image.open(BytesIO(raw)) as image:
                 image.load()
-                normalized = _fit_without_clipping(image, self.sizes[kind])
+                normalized = _fit_full_bleed(image, self.sizes[kind])
                 normalized.save(temporary, "PNG", optimize=True)
             self.validate(temporary, kind)
             temporary.replace(out)

@@ -54,7 +54,7 @@ DEFAULT_STYLE = (
     "Ausgabe soll eine eigenständige Komposition erhalten"
 )
 
-IMAGE_POLICY_VERSION = "verified-media-ai-references-v3-safe-layout"
+IMAGE_POLICY_VERSION = "verified-media-ai-references-v4-full-bleed-safe-layout"
 
 IMAGE_SAFETY_PREFIX = """VERBINDLICHE DATEN- UND MEDIENREGELN:
 - Verwende ausschließlich die nachfolgend angegebenen Spieldaten.
