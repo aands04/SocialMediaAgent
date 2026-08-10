@@ -161,6 +161,19 @@
       <details id="erweitert" class="branding-section branding-advanced">
         <summary><span><strong>5. Erweiterte Vorgaben</strong><small>Optionale Feinabstimmung für Feed, Story und besondere Gestaltungsregeln</small></span></summary>
         <div class="advanced-content">
+          <h3>Angaben auf Ergebnisbildern</h3>
+          <p>Lege fest, welche bestätigten Spieldaten beim Umbau der Ankündigungsgrafik zur Ergebnismeldung sichtbar sein dürfen. Ergebnis und Mannschaften sind immer erforderlich.</p>
+          <div class="checkbox-grid full-span">
+            <label><input type="checkbox" checked disabled> Ergebnis <span class="field-kind required">erforderlich</span></label>
+            <label><input type="checkbox" checked disabled> Mannschaften <span class="field-kind required">erforderlich</span></label>
+            {% for value,label in [('competition','Wettbewerb'),('date','Spieldatum'),('kickoff_time','Anstoßzeit'),('venue','Spielort'),('home_away','Heim-/Auswärtskennzeichnung')] %}
+            <label><input type="checkbox" name="result_image_fields" value="{{value}}" {% if value in image.result_image_fields %}checked{% endif %}> {{label}}</label>
+            {% endfor %}
+          </div>
+          <label class="full-span">Weitere Vorgabe für Ergebnisbilder <span class="field-kind optional">optional</span>
+            <textarea name="result_image_extra_rules" rows="3" maxlength="1200" placeholder="Beispiel: Das Ergebnis soll deutlich größer als die übrigen Angaben erscheinen.">{{image.result_image_extra_rules}}</textarea>
+            <small>Diese Ergänzung wird geprüft und nur als nachrangige Gestaltungsvorgabe verwendet. Spieldaten können damit nicht verändert oder erfunden werden.</small>
+          </label>
           <h3>Feed-Vorgaben</h3><p><strong>Format: 1080 × 1350 Pixel.</strong> Dieses Instagram-Hochformat ist fest vorgegeben.</p>
           <div class="branding-field-grid"><label>Maximale Textmenge<select name="feed_max_text_amount">{% for value,label in [('little','Wenig'),('normal','Normal'),('detailed','Ausführlich')] %}<option value="{{value}}" {% if image.feed_settings.max_text_amount==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label><div class="checkbox-grid"><label><input type="checkbox" name="feed_use_player_image" {% if image.feed_settings.use_player_image %}checked{% endif %}> Spielerbild verwenden</label><label><input type="checkbox" name="feed_show_sponsors" {% if image.feed_settings.show_sponsors %}checked{% endif %}> Sponsoren anzeigen</label><label><input type="checkbox" name="feed_show_club_logo" {% if image.feed_settings.show_club_logo %}checked{% endif %}> Vereinslogo anzeigen</label><label><input type="checkbox" name="feed_highlight_result" {% if image.feed_settings.highlight_result %}checked{% endif %}> Ergebnis hervorheben</label></div><label class="full-span">Weitere Feed-Vorgaben <span class="field-kind optional">optional</span><textarea name="feed_extra_rules" rows="3" maxlength="1200">{{image.feed_settings.extra_rules}}</textarea></label></div>
           <h3>Story-Vorgaben</h3><p><strong>Format: 1080 × 1920 Pixel.</strong> Die Sicherheitsbereiche halten Inhalte von Bedienelementen der Instagram-App fern.</p>

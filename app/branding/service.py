@@ -51,6 +51,15 @@ TEXT_LENGTHS = {"short", "medium", "detailed"}
 EMOJI_USAGE = {"none", "sparse", "normal", "frequent"}
 CTA_TYPES = {"support", "share", "comment", "attend", "none", "custom"}
 SPONSOR_PLACEMENTS = {"auto", "top", "bottom", "left", "right", "footer"}
+RESULT_IMAGE_FIELDS = {
+    "score",
+    "teams",
+    "competition",
+    "date",
+    "kickoff_time",
+    "venue",
+    "home_away",
+}
 
 # Browser- und Chromium-taugliche Standardschriften. Vereinsbenutzer wählen
 # ausschließlich einen stabilen Schlüssel; die serverseitig kontrollierte
@@ -134,6 +143,8 @@ SAFE_KEYS = {
     "story_rules",
     "feed_settings",
     "story_settings",
+    "result_image_fields",
+    "result_image_extra_rules",
     "image_text_amount",
     "player_background_ratio",
     "dynamics",
@@ -209,6 +220,8 @@ DEFAULT_IMAGE_SETTINGS = {
         "countdown_area": False,
         "extra_rules": "",
     },
+    "result_image_fields": ["score", "teams", "competition", "date", "venue"],
+    "result_image_extra_rules": "",
     "image_text_amount": "normal",
     "player_background_ratio": 60,
     "dynamics": "balanced",
@@ -244,7 +257,11 @@ DEFAULT_TEXT_SETTINGS = {
 
 
 def _text_limit(key: str) -> int:
-    return 1200 if key in {"feed_rules", "story_rules", "extra_rules"} else 500
+    return (
+        1200
+        if key in {"feed_rules", "story_rules", "extra_rules", "result_image_extra_rules"}
+        else 500
+    )
 
 
 def _validate_text(key: str, value: str) -> str:
@@ -376,6 +393,30 @@ def normalize_string_list(values: Iterable[str], *, maximum: int = 20) -> list[s
             seen.add(marker)
         if len(result) > maximum:
             raise BrandingValidationError("Zu viele Listeneinträge")
+    return result
+
+
+def normalize_result_image_fields(values: Iterable[str]) -> list[str]:
+    """Return a deterministic, validated result-image data selection.
+
+    Score and team names are intrinsic to a result graphic and therefore
+    cannot be disabled. Optional facts retain the order selected in the club
+    branding form without accepting arbitrary prompt fragments.
+    """
+
+    result = ["score", "teams"]
+    seen = set(result)
+    for raw in values:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if value not in RESULT_IMAGE_FIELDS:
+            raise BrandingValidationError(
+                f"Unbekannte Angabe für Ergebnisbilder: {value}"
+            )
+        if value not in seen:
+            result.append(value)
+            seen.add(value)
     return result
 
 
@@ -526,6 +567,12 @@ def validate_branding_settings(settings: dict | None, *, strict_choices: bool = 
             if not isinstance(value, list):
                 raise BrandingValidationError(f"{key} muss eine Liste sein")
             result[key] = normalize_string_list(value)
+        elif key == "result_image_fields":
+            if not isinstance(value, list):
+                raise BrandingValidationError(
+                    "Angaben für Ergebnisbilder müssen eine Auswahl sein"
+                )
+            result[key] = normalize_result_image_fields(value)
         elif key == "feed_settings":
             result[key] = _validate_feed_settings(value, strict_choices)
         elif key == "story_settings":

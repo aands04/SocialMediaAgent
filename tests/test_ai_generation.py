@@ -72,7 +72,7 @@ def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     assert "Referenzbild 2" in prompt.rendered
     assert "kein drittes Referenzbild" in prompt.rendered
     assert "oben links und oben rechts" not in prompt.rendered
-    assert prompt.policy_version == "verified-media-ai-references-v6-result-image-edit"
+    assert prompt.policy_version == "verified-media-ai-references-v7-configured-result-fields"
     assert "{{" not in prompt.rendered
 
 
@@ -98,16 +98,20 @@ def test_result_image_prompt_is_result_only_and_describes_layout_reference():
             score="5:1",
             post_type="result",
             result_layout_reference="/generated/announcement.png",
+            result_image_fields=["score", "teams", "venue"],
         ),
     )
 
     assert "gezielte Bildbearbeitung, keine neue freie Komposition" in prompt.rendered
-    assert "5:1 als dominantes Ergebniselement" in prompt.rendered
+    assert "Bestätigtes Ergebnis: 5:1" in prompt.rendered
     assert "Ankündigungstexte" in prompt.rendered
     assert "Referenzbild 1 ist die bereits geprüfte Ankündigungsgrafik" in prompt.rendered
     assert "Füge keine Person, kein Logo" in prompt.rendered
     assert "Kennzeichnung: Heimspiel" not in prompt.rendered
     assert "15:00 Uhr" not in prompt.rendered
+    assert "Spielort: Habichtswaldstadion" in prompt.rendered
+    assert "Wettbewerb: Kreisliga A" not in prompt.rendered
+    assert "Datum: Sonntag, 09.08.2026" not in prompt.rendered
 
 
 def test_post_facts_prefer_configured_home_venue_and_reuse_announcement_layout(db, tmp_path):
@@ -152,6 +156,7 @@ def test_post_facts_prefer_configured_home_venue_and_reuse_announcement_layout(d
                 image_settings={
                     "primary_standard_font": "dejavu-sans",
                     "secondary_standard_font": "liberation-serif",
+                    "result_image_fields": ["score", "teams", "date", "venue"],
                 },
                 text_settings={
                     "home_venue": "Sportanlage Beispielstadt",
@@ -217,6 +222,7 @@ def test_post_facts_prefer_configured_home_venue_and_reuse_announcement_layout(d
     assert result_facts["score"] == "3:1"
     assert result_facts["result_layout_reference"] == str(announcement_path.resolve())
     assert result_facts["result_layout_reference_post_id"] == announcement.id
+    assert result_facts["result_image_fields"] == ["score", "teams", "date", "venue"]
     assert _facts_for_media(result_facts, "feed")["result_layout_reference"] == str(
         announcement_path.resolve()
     )
@@ -224,7 +230,7 @@ def test_post_facts_prefer_configured_home_venue_and_reuse_announcement_layout(d
         story_one.resolve()
     )
     assert _facts_for_media(result_facts, "story", 2)["result_layout_reference"] == str(
-        story_two.resolve()
+        story_one.resolve()
     )
 
 
@@ -285,28 +291,43 @@ class FakeImageProvider(ImageProvider):
 
 
 @pytest.mark.parametrize(
-    ("target_size", "edge_sample", "edge_color"),
+    ("source_size", "target_size"),
     [
-        ((1080, 1350), (5, 675), (255, 255, 0)),
-        ((1080, 1920), (540, 5), (255, 0, 0)),
+        ((1088, 1360), (1080, 1350)),
+        ((1152, 2048), (1080, 1920)),
     ],
 )
-def test_ai_format_conversion_is_full_bleed_and_preserves_safe_area(
-    target_size, edge_sample, edge_color
-):
-    source = Image.new("RGB", (1024, 1536), "white")
+def test_ai_format_conversion_resizes_native_ratio_without_clipping(source_size, target_size):
+    source = Image.new("RGB", source_size, "white")
     draw = ImageDraw.Draw(source)
-    draw.rectangle((0, 0, 160, 1536), fill=(255, 255, 0))
-    draw.rectangle((864, 0, 1024, 1536), fill=(0, 255, 0))
-    draw.rectangle((0, 0, 1024, 160), fill=(255, 0, 0))
-    draw.rectangle((0, 1376, 1024, 1536), fill=(0, 0, 255))
+    width, height = source_size
+    border = min(width, height) // 8
+    draw.rectangle((0, 0, border, height), fill=(255, 255, 0))
+    draw.rectangle((width - border, 0, width, height), fill=(0, 255, 0))
+    draw.rectangle((0, 0, width, border), fill=(255, 0, 0))
+    draw.rectangle((0, height - border, width, height), fill=(0, 0, 255))
 
-    marker_size = 64
+    marker_size = max(16, border // 2)
     markers = {
-        (255, 0, 255): (160, 160, 160 + marker_size, 160 + marker_size),
-        (0, 255, 255): (800, 160, 800 + marker_size, 160 + marker_size),
-        (128, 0, 128): (160, 1312, 160 + marker_size, 1312 + marker_size),
-        (255, 128, 0): (800, 1312, 800 + marker_size, 1312 + marker_size),
+        (255, 0, 255): (border, border, border + marker_size, border + marker_size),
+        (0, 255, 255): (
+            width - border - marker_size,
+            border,
+            width - border,
+            border + marker_size,
+        ),
+        (128, 0, 128): (
+            border,
+            height - border - marker_size,
+            border + marker_size,
+            height - border,
+        ),
+        (255, 128, 0): (
+            width - border - marker_size,
+            height - border - marker_size,
+            width - border,
+            height - border,
+        ),
     }
     for color, box in markers.items():
         draw.rectangle(box, fill=color)
@@ -314,9 +335,9 @@ def test_ai_format_conversion_is_full_bleed_and_preserves_safe_area(
     converted = _fit_full_bleed(source, target_size)
 
     assert converted.size == target_size
-    assert converted.getpixel(edge_sample) == edge_color
     colors = set(converted.get_flattened_data())
     assert set(markers).issubset(colors)
+    assert {(255, 255, 0), (0, 255, 0), (255, 0, 0), (0, 0, 255)}.issubset(colors)
 
 
 def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
@@ -750,7 +771,7 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     assert post.design_snapshot["prompts"]["feed"]["version"] == 3
     assert (
         post.design_snapshot["prompts"]["feed"]["policy_version"]
-        == "verified-media-ai-references-v6-result-image-edit"
+        == "verified-media-ai-references-v7-configured-result-fields"
     )
     prompt_snapshot = post.design_snapshot["prompts"]["feed"]
     assert "rendered" not in prompt_snapshot

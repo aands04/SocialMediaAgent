@@ -49,7 +49,7 @@ def write_reference(path, *, alpha=False, size=(64, 48)):
     image.save(path, image_format)
 
 
-def test_gpt_image_2_generate_requests_supported_compressed_webp():
+def test_gpt_image_2_generate_requests_native_feed_ratio_as_png():
     provider = provider_with_mock_client()
     provider.client.images.generate.return_value = image_response()
 
@@ -63,9 +63,9 @@ def test_gpt_image_2_generate_requests_supported_compressed_webp():
 
     assert result == PNG_BYTES
     options = provider.client.images.generate.call_args.kwargs
-    assert options["output_format"] == "webp"
-    assert options["output_compression"] == 60
-    assert options["size"] == "1024x1536"
+    assert options["output_format"] == "png"
+    assert "output_compression" not in options
+    assert options["size"] == "1088x1360"
     assert "1080 × 1350 Pixel" in options["prompt"]
     assert "Kein wichtiges Motiv" in options["prompt"]
     assert "response_format" not in options
@@ -86,7 +86,7 @@ def test_gpt_image_2_references_use_dedicated_image_edit_endpoint(tmp_path):
     result = provider.generate(
         prompt="Testmotiv mit Spieler",
         references=references,
-        size="1088x1920",
+        size="1152x2048",
         model="gpt-image-2-2026-07-01",
         quality="medium",
     )
@@ -94,9 +94,9 @@ def test_gpt_image_2_references_use_dedicated_image_edit_endpoint(tmp_path):
     assert result == PNG_BYTES
     options = provider.client.images.edit.call_args.kwargs
     assert options["model"] == "gpt-image-2-2026-07-01"
-    assert options["output_format"] == "webp"
-    assert options["output_compression"] == 60
-    assert options["size"] == "1024x1536"
+    assert options["output_format"] == "png"
+    assert "output_compression" not in options
+    assert options["size"] == "1152x2048"
     assert "input_fidelity" not in options
     assert "3 getrennte Eingabebilder" in options["prompt"]
     assert "1080 × 1920 Pixel" in options["prompt"]
@@ -197,7 +197,7 @@ def test_reference_request_uses_official_multipart_image_edit_endpoint(tmp_path)
     assert b'filename="reference-1.jpg"' in body
     assert b'filename="reference-2.png"' in body
     assert b'name="size"' in body
-    assert b"1024x1536" in body
+    assert b"1088x1360" in body
     assert b"input_fidelity" not in body
 
 
@@ -381,8 +381,8 @@ def test_older_gpt_image_edit_uses_high_input_fidelity(tmp_path):
 
     assert result == PNG_BYTES
     options = provider.client.images.edit.call_args.kwargs
-    assert options["output_format"] == "webp"
-    assert options["output_compression"] == 60
+    assert options["output_format"] == "png"
+    assert "output_compression" not in options
     assert options["input_fidelity"] == "high"
 
 

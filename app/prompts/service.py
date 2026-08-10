@@ -46,6 +46,7 @@ ALLOWED_PLACEHOLDERS = {
     "own_team_display",
     "channel_type",
     "channel_name",
+    "result_fields_instruction",
 }
 
 DEFAULT_STYLE = (
@@ -54,7 +55,7 @@ DEFAULT_STYLE = (
     "Ausgabe soll eine eigenständige Komposition erhalten"
 )
 
-IMAGE_POLICY_VERSION = "verified-media-ai-references-v6-result-image-edit"
+IMAGE_POLICY_VERSION = "verified-media-ai-references-v7-configured-result-fields"
 
 RESULT_IMAGE_EDIT_SAFETY_PREFIX = """VERBINDLICHER ERGEBNISBILD-UMBAU:
 - Referenzbild 1 ist die bereits geprüfte Ankündigungsgrafik genau dieses Spiels
@@ -66,11 +67,11 @@ RESULT_IMAGE_EDIT_SAFETY_PREFIX = """VERBINDLICHER ERGEBNISBILD-UMBAU:
 - Füge keine Person, kein Logo, kein Wappen, kein Sponsorenzeichen und kein
   zusätzliches Motiv hinzu. Entferne oder ersetze keine vorhandene Person und
   tausche keine Identität aus.
-- Ändere ausschließlich die Informationshierarchie zur Ergebnismeldung:
-  Überschrift ERGEBNIS, exaktes Ergebnis, exakte Mannschaftsnamen und optional
-  klein das Spieldatum.
-- Entferne beziehungsweise ersetze Ankündigungstexte wie HEIMSPIEL,
-  AUSWÄRTSSPIEL, MATCHDAY, SPIELTAG, KOMM VORBEI, ANSTOSS, Uhrzeit und Spielort.
+- Ändere ausschließlich die Informationshierarchie zur Ergebnismeldung. Zeige
+  nur die nachfolgend serverseitig freigegebenen Ergebnisangaben. Ergebnis und
+  Mannschaftsnamen sind dabei immer erforderlich.
+- Entferne beziehungsweise ersetze alle Ankündigungstexte und alle Spielangaben,
+  die nicht ausdrücklich im freigegebenen Datenumfang genannt sind.
 - Stelle Ergebnis und Mannschaftsnamen vollständig innerhalb der Bildfläche,
   mobil lesbar und mit deutlichem Sicherheitsabstand zu allen vier Rändern dar.
 - Stelle jeden angegebenen Text buchstaben- und zahlengenau dar. Erfinde keine
@@ -82,11 +83,9 @@ im Format {{ output_kind }} ({{ output_width }} × {{ output_height }} Pixel) zu
 einer Ergebnismeldung desselben Spiels. Erhalte die vorhandene visuelle Qualität,
 Komposition und Identität; gestalte nicht von Grund auf neu.
 
-Ersetze die Ankündigungsinformationen durch diese exakten Angaben:
-1. ERGEBNIS
-2. {{ home_team }} gegen {{ away_team }}
-3. {{ score }} als dominantes Ergebniselement
-4. optional klein: {{ weekday }}, {{ date_de }}
+Ersetze die Ankündigungsinformationen ausschließlich durch diese exakten,
+serverseitig freigegebenen Angaben:
+{{ result_fields_instruction }}
 
 Alle Texte und wesentlichen Motive müssen vollständig sichtbar bleiben.
 {format_direction}"""
@@ -148,9 +147,8 @@ Stilrichtung: {{ style_direction }}.
 Stelle diese Angaben klar, mobil lesbar und hierarchisch dar:
 1. {{ competition }}
 2. {{ home_team }} gegen {{ away_team }}
-{% if score %}3. die Kennzeichnung ERGEBNIS
-4. das bestätigte Ergebnis {{ score }} als mit Abstand dominantes Ergebniselement
-5. optional klein: {{ weekday }}, {{ date_de }}
+{% if score %}3. ausschließlich diese serverseitig freigegebenen Ergebnisangaben:
+{{ result_fields_instruction }}
 {% else %}3. {{ weekday }}, {{ date_de }}
 4. {{ time_de }} Uhr
 5. {{ venue_display }}
@@ -458,7 +456,7 @@ def prompt_context(
         raise PromptValidationError("Unbekannter Zielkanal für die Textgenerierung")
     home_display = own_display if is_home else facts.get("home_team")
     away_display = facts.get("away_team") if is_home else own_display
-    return {
+    context = {
         "competition": competition,
         "home_team": home_display,
         "away_team": away_display,
@@ -486,6 +484,43 @@ def prompt_context(
         "channel_type": channel_type,
         "channel_name": channel_names[channel_type],
     }
+    selected_result_fields = list(
+        dict.fromkeys(
+            str(value)
+            for value in (
+                facts.get("result_image_fields")
+                or ["score", "teams", "competition", "date", "venue"]
+            )
+        )
+    )
+    selected_result_fields = [
+        "score",
+        "teams",
+        *(
+            value
+            for value in selected_result_fields
+            if value not in {"score", "teams"}
+        ),
+    ]
+    result_values = {
+        "score": f"Bestätigtes Ergebnis: {context['score']}",
+        "teams": f"Mannschaften: {context['home_team']} gegen {context['away_team']}",
+        "competition": f"Wettbewerb: {context['competition']}",
+        "date": f"Datum: {context['weekday']}, {context['date_de']}",
+        "kickoff_time": f"Anstoßzeit: {context['time_de']} Uhr",
+        "venue": f"Spielort: {context['venue_display']}",
+        "home_away": f"Spielart: {context['home_away']}",
+    }
+    result_lines = ["Überschrift: ERGEBNIS"]
+    result_lines.extend(
+        result_values[value]
+        for value in selected_result_fields
+        if value in result_values
+    )
+    context["result_fields_instruction"] = "\n".join(
+        f"{index}. {line}" for index, line in enumerate(result_lines, start=1)
+    )
+    return context
 
 
 def render_body(body: str, context: dict) -> str:
