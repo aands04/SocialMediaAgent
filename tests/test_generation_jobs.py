@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from app.config import Settings
+from app.imagegen.service import ImageGenerationError
 from app.jobs import generation
 from app.models import (
     AiPromptDispatch,
@@ -329,9 +330,7 @@ def test_grouped_dashboard_click_enqueues_one_coordinator_job(db):
     db.add(second_game)
     db.commit()
 
-    job, post = generation.enqueue_bundle_create(
-        db, second_game, second, user, "announcement"
-    )
+    job, post = generation.enqueue_bundle_create(db, second_game, second, user, "announcement")
 
     assert post is None
     assert job.parameters["single_shared_text_prompt"] is True
@@ -388,9 +387,7 @@ def test_incomplete_bundle_click_opens_surviving_post_without_new_ai_job(db):
     db.add_all([second_game, surviving_post])
     db.commit()
 
-    job, existing = generation.enqueue_bundle_create(
-        db, second_game, second, user, "announcement"
-    )
+    job, existing = generation.enqueue_bundle_create(db, second_game, second, user, "announcement")
 
     assert job is None
     assert existing.id == surviving_post.id
@@ -465,9 +462,7 @@ def test_ambiguous_openai_timeout_schedules_one_delayed_retry(db, monkeypatch, t
     assert result.active_key == f"create:{game.id}:announcement"
 
 
-def test_ambiguous_openai_timeout_stops_after_one_automatic_retry(
-    db, monkeypatch, tmp_path
-):
+def test_ambiguous_openai_timeout_stops_after_one_automatic_retry(db, monkeypatch, tmp_path):
     _, team, game, user = graph(db)
     job, _ = generation.enqueue_create(db, game, team, user, "announcement")
     monkeypatch.setattr(generation, "build_renderer", lambda settings: object())
@@ -571,6 +566,23 @@ def test_ambiguous_openai_timeout_retries_only_missing_output_after_usable_outpu
     assert "Bereits gespeicherte Ergebnisse bleiben erhalten" in result.error_message
     assert result.completed_outputs == 1
     assert result.active_key == f"create:{game.id}:announcement"
+
+
+def test_provider_status_code_marks_sanitized_image_error_retryable(db):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    job.phase = "generating_ai_composition"
+    error = ImageGenerationError(
+        "KI-Bildgenerierung fehlgeschlagen (HTTP 520)",
+        provider_status_code=520,
+        provider_request_id="req_safe",
+    )
+
+    assert generation._is_retryable_external_failure(
+        error,
+        job,
+        Settings(image_generator_mode="openai", openai_api_key="test"),
+    )
 
 
 def test_stale_job_during_costly_phase_is_not_retried(db):

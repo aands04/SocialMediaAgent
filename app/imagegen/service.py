@@ -3,6 +3,7 @@ import hashlib
 from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
+from typing import BinaryIO
 
 from openai import OpenAI
 from PIL import Image, ImageOps
@@ -12,6 +13,10 @@ from app.rendering.service import Renderer, RenderValidationError
 LOGO_REFERENCE_VERSION = "verified-media-ai-references-v2"
 OPENAI_IMAGE_OUTPUT_FORMAT = "webp"
 OPENAI_IMAGE_OUTPUT_COMPRESSION = 60
+REFERENCE_IMAGE_MAX_EDGE = 2048
+REFERENCE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+REFERENCE_IMAGE_MAX_PIXELS = 40_000_000
+REFERENCE_PLAYER_JPEG_QUALITY = 92
 
 REFERENCE_IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
@@ -22,7 +27,132 @@ REFERENCE_IMAGE_MIME_TYPES = {
 
 
 class ImageGenerationError(RenderValidationError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_status_code: int | None = None,
+        provider_request_id: str | None = None,
+    ):
+        super().__init__(message)
+        self.provider_status_code = provider_status_code
+        self.provider_request_id = provider_request_id
+
+
+def _safe_provider_request_id(value: object) -> str | None:
+    if value is None:
+        return None
+    candidate = "".join(
+        character
+        for character in str(value).strip()[:200]
+        if character.isalnum() or character in {"-", "_", ".", ":"}
+    )
+    return candidate or None
+
+
+def _provider_error_metadata(exc: Exception) -> tuple[int | None, str | None]:
+    status_code = getattr(exc, "status_code", None)
+    if not isinstance(status_code, int):
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+    if not isinstance(status_code, int):
+        status_code = None
+    request_id = getattr(exc, "request_id", None)
+    if not request_id:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers:
+            request_id = headers.get("x-request-id")
+    return status_code, _safe_provider_request_id(request_id)
+
+
+def _has_alpha(image: Image.Image) -> bool:
+    return "A" in image.getbands() or (image.mode == "P" and "transparency" in image.info)
+
+
+def _normalized_reference_bytes(
+    path: Path,
+    *,
+    position: int,
+) -> tuple[str, bytes, str]:
+    """Create a fresh, metadata-free upload for one provider request.
+
+    The first reference is the player photo and may use high-quality JPEG.
+    Logo references remain lossless PNG (or lossless WebP only when the PNG
+    would exceed our conservative transport limit).  Re-encoding also avoids
+    replaying a partially consumed multipart stream on an SDK-level retry.
+    """
+
+    suffix = path.suffix.lower()
+    if suffix not in REFERENCE_IMAGE_MIME_TYPES:
+        raise ImageGenerationError(
+            f"Nicht unterstütztes Referenzbildformat: {path.suffix or 'keine Dateiendung'}"
+        )
+    try:
+        with Image.open(path) as source:
+            if source.width * source.height > REFERENCE_IMAGE_MAX_PIXELS:
+                raise ImageGenerationError("Das Referenzbild überschreitet die sichere Pixelanzahl")
+            source.load()
+            normalized = ImageOps.exif_transpose(source)
+            if max(normalized.size) > REFERENCE_IMAGE_MAX_EDGE:
+                normalized.thumbnail(
+                    (REFERENCE_IMAGE_MAX_EDGE, REFERENCE_IMAGE_MAX_EDGE),
+                    Image.Resampling.LANCZOS,
+                )
+            alpha = _has_alpha(normalized)
+            buffer = BytesIO()
+            if position == 1 and not alpha:
+                normalized.convert("RGB").save(
+                    buffer,
+                    "JPEG",
+                    quality=REFERENCE_PLAYER_JPEG_QUALITY,
+                    optimize=True,
+                )
+                extension = ".jpg"
+                mime_type = "image/jpeg"
+            else:
+                mode = "RGBA" if alpha else "RGB"
+                normalized.convert(mode).save(buffer, "PNG", optimize=True)
+                extension = ".png"
+                mime_type = "image/png"
+            content = buffer.getvalue()
+            if len(content) > REFERENCE_IMAGE_MAX_BYTES:
+                buffer = BytesIO()
+                mode = "RGBA" if alpha else "RGB"
+                normalized.convert(mode).save(
+                    buffer,
+                    "WEBP",
+                    lossless=True,
+                    quality=100,
+                    method=6,
+                )
+                content = buffer.getvalue()
+                extension = ".webp"
+                mime_type = "image/webp"
+            if len(content) > REFERENCE_IMAGE_MAX_BYTES:
+                raise ImageGenerationError(
+                    "Das normalisierte Referenzbild überschreitet die sichere Upload-Größe"
+                )
+    except ImageGenerationError:
+        raise
+    except Exception as exc:
+        raise ImageGenerationError(f"Referenzbild ist technisch nicht lesbar: {path.name}") from exc
+    return f"reference-{position}{extension}", content, mime_type
+
+
+def _reference_uploads(
+    stack: ExitStack,
+    references: list[Path],
+) -> list[tuple[str, BinaryIO, str]]:
+    uploads: list[tuple[str, BinaryIO, str]] = []
+    for position, path in enumerate(references, start=1):
+        name, content, mime_type = _normalized_reference_bytes(
+            path,
+            position=position,
+        )
+        handle = stack.enter_context(BytesIO(content))
+        uploads.append((name, handle, mime_type))
+    return uploads
 
 
 class ImageProvider:
@@ -39,7 +169,11 @@ class ImageProvider:
 
 class OpenAIImageProvider(ImageProvider):
     def __init__(self, api_key: str):
-        self.client = OpenAI(api_key=api_key)
+        # Multipart streams cannot safely be replayed after they have already
+        # been consumed.  Disable the SDK's transparent HTTP retries and let
+        # the generation job perform the single delayed retry with freshly
+        # normalized streams and the existing per-output cost guard.
+        self.client = OpenAI(api_key=api_key, max_retries=0)
 
     def generate(
         self,
@@ -52,16 +186,7 @@ class OpenAIImageProvider(ImageProvider):
         try:
             if references:
                 with ExitStack() as stack:
-                    files = []
-                    for path in references:
-                        mime_type = REFERENCE_IMAGE_MIME_TYPES.get(path.suffix.lower())
-                        if not mime_type:
-                            raise ImageGenerationError(
-                                "Nicht unterstütztes Referenzbildformat: "
-                                f"{path.suffix or 'keine Dateiendung'}"
-                            )
-                        file_handle = stack.enter_context(path.open("rb"))
-                        files.append((path.name, file_handle, mime_type))
+                    files = _reference_uploads(stack, references)
                     edit_options = {
                         "model": model,
                         "image": files,
@@ -90,7 +215,18 @@ class OpenAIImageProvider(ImageProvider):
         except ImageGenerationError:
             raise
         except Exception as exc:
-            raise ImageGenerationError(f"KI-Bildgenerierung fehlgeschlagen: {exc}") from exc
+            status_code, request_id = _provider_error_metadata(exc)
+            details = []
+            if status_code is not None:
+                details.append(f"HTTP {status_code}")
+            if request_id:
+                details.append(f"Request-ID {request_id}")
+            suffix = f" ({', '.join(details)})" if details else ""
+            raise ImageGenerationError(
+                f"KI-Bildgenerierung fehlgeschlagen{suffix}",
+                provider_status_code=status_code,
+                provider_request_id=request_id,
+            ) from exc
 
 
 class AIImageRenderer:
@@ -150,9 +286,7 @@ class AIImageRenderer:
         return path
 
     @staticmethod
-    def _reference_metadata(
-        data: dict, opponent_present: bool, sponsors: list[dict]
-    ) -> dict:
+    def _reference_metadata(data: dict, opponent_present: bool, sponsors: list[dict]) -> dict:
         logos = data.get("logos") if isinstance(data.get("logos"), dict) else {}
         team = logos.get("team") if isinstance(logos.get("team"), dict) else {}
         opponent = logos.get("opponent") if isinstance(logos.get("opponent"), dict) else {}
@@ -200,22 +334,16 @@ class AIImageRenderer:
     def _output_path(self, target: str, generation_job_id: str | None) -> tuple[Path, Path]:
         requested_out = (self.root / target).resolve()
         if requested_out != self.root and not requested_out.is_relative_to(self.root):
-            raise ImageGenerationError(
-                "Ausgabepfad liegt außerhalb des Render-Verzeichnisses"
-            )
+            raise ImageGenerationError("Ausgabepfad liegt außerhalb des Render-Verzeichnisses")
         out = requested_out
         if generation_job_id:
-            job_digest = hashlib.sha256(
-                str(generation_job_id).encode("utf-8")
-            ).hexdigest()[:12]
+            job_digest = hashlib.sha256(str(generation_job_id).encode("utf-8")).hexdigest()[:12]
             out = requested_out.with_name(
                 f"{requested_out.stem}-job-{job_digest}{requested_out.suffix}"
             )
         return requested_out, out
 
-    def reusable_output(
-        self, target: str, generation_job_id: str | None, kind: str
-    ) -> Path | None:
+    def reusable_output(self, target: str, generation_job_id: str | None, kind: str) -> Path | None:
         """Return a validated provider result previously saved for this output.
 
         The caller uses this before reserving another paid image generation.
@@ -252,18 +380,14 @@ class AIImageRenderer:
             )
         opponent_logo = self._logo_reference(data.get("opponent_logo"))
         sponsor_items = [
-            dict(item)
-            for item in (data.get("sponsor_references") or [])
-            if isinstance(item, dict)
+            dict(item) for item in (data.get("sponsor_references") or []) if isinstance(item, dict)
         ]
         sponsor_paths = [self._sponsor_reference(item) for item in sponsor_items]
         references = [player, team_logo]
         if opponent_logo:
             references.append(opponent_logo)
         references.extend(sponsor_paths)
-        integration = self._reference_metadata(
-            data, opponent_logo is not None, sponsor_items
-        )
+        integration = self._reference_metadata(data, opponent_logo is not None, sponsor_items)
         generation_job_id = data.get("_generation_job_id")
         requested_out, out = self._output_path(target, generation_job_id)
         reuse_generation_job_id = data.get("_reuse_generation_job_id")
@@ -273,9 +397,7 @@ class AIImageRenderer:
                 self._metadata[str(reused)] = {
                     "final_path": str(reused),
                     "requested_path": str(requested_out),
-                    "generation_job_id": str(generation_job_id)
-                    if generation_job_id
-                    else None,
+                    "generation_job_id": str(generation_job_id) if generation_job_id else None,
                     "reused_from_generation_job_id": str(reuse_generation_job_id),
                     "reused_final": True,
                     "logo_integration": integration,
