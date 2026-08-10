@@ -54,7 +54,7 @@ DEFAULT_STYLE = (
     "Ausgabe soll eine eigenständige Komposition erhalten"
 )
 
-IMAGE_POLICY_VERSION = "verified-media-ai-references-v2"
+IMAGE_POLICY_VERSION = "verified-media-ai-references-v3-safe-layout"
 
 IMAGE_SAFETY_PREFIX = """VERBINDLICHE DATEN- UND MEDIENREGELN:
 - Verwende ausschließlich die nachfolgend angegebenen Spieldaten.
@@ -152,13 +152,17 @@ DEFAULT_TEXT_PROMPTS = {
 {facts}
 Baue Vorfreude auf die Begegnung auf. Tonalität, Länge, Anrede, Emojis,
 Hashtags und Handlungsaufforderung werden durch die nachfolgenden verbindlichen
-Vereinstextregeln festgelegt. Gib ausschließlich den direkt kopierbaren Text aus.""".format(facts=TEXT_FACTS),
+Vereinstextregeln festgelegt. Gib ausschließlich den direkt kopierbaren Text aus.""".format(
+        facts=TEXT_FACTS
+    ),
     "reminder": """Verfasse einen deutschen Begleittext für {{ channel_name }} für eine Spielerinnerung.
 {facts}
 Mache den nahen Termin schnell erfassbar und vermeide eine Wiederholung derselben
 Informationen. Tonalität, Länge, Anrede, Emojis, Hashtags und
 Handlungsaufforderung werden durch die nachfolgenden verbindlichen
-Vereinstextregeln festgelegt. Gib ausschließlich den direkt kopierbaren Text aus.""".format(facts=TEXT_FACTS),
+Vereinstextregeln festgelegt. Gib ausschließlich den direkt kopierbaren Text aus.""".format(
+        facts=TEXT_FACTS
+    ),
     "result": """Verfasse einen deutschen Begleittext für {{ channel_name }} für eine Ergebnismeldung.
 {facts}
 Nenne das bestätigte Ergebnis klar. Werte es nicht als Sieg, Niederlage oder
@@ -490,11 +494,7 @@ def builtin_prompt(
     settings = get_settings()
     image = prompt_kind == "image"
     name = f"default-image-{media_kind}" if image else f"default-text-{post_type}"
-    body = (
-        default_image_prompt(post_type, media_kind)
-        if image
-        else default_text_prompt(post_type)
-    )
+    body = default_image_prompt(post_type, media_kind) if image else default_text_prompt(post_type)
     context = prompt_context(facts, media_kind)
     rendered = render_body(body, context)
     if image:
@@ -646,7 +646,9 @@ VARIANT_DIRECTIONS = (
 )
 
 
-def prompt_for_variant(prompt: ResolvedPrompt | None, index: int, count: int) -> ResolvedPrompt | None:
+def prompt_for_variant(
+    prompt: ResolvedPrompt | None, index: int, count: int
+) -> ResolvedPrompt | None:
     """Return an explicit, deterministic composition brief for one output variant."""
 
     if prompt is None:

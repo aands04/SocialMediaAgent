@@ -3,10 +3,15 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from app.config import Settings
-from app.imagegen.service import AIImageRenderer, ImageGenerationError, ImageProvider
+from app.imagegen.service import (
+    AIImageRenderer,
+    ImageGenerationError,
+    ImageProvider,
+    _fit_without_clipping,
+)
 from app.logos.service import store_logo
 from app.models import (
     ClubBrandingConfiguration,
@@ -65,7 +70,7 @@ def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     assert "Referenzbild 2" in prompt.rendered
     assert "kein drittes Referenzbild" in prompt.rendered
     assert "oben links und oben rechts" not in prompt.rendered
-    assert prompt.policy_version == "verified-media-ai-references-v2"
+    assert prompt.policy_version == "verified-media-ai-references-v3-safe-layout"
     assert "{{" not in prompt.rendered
 
 
@@ -204,6 +209,32 @@ class FakeImageProvider(ImageProvider):
         data = BytesIO()
         image.save(data, self.output_format)
         return data.getvalue()
+
+
+@pytest.mark.parametrize("target_size", [(1080, 1350), (1080, 1920)])
+def test_ai_format_conversion_preserves_all_four_source_edges(target_size):
+    source = Image.new("RGB", (1024, 1536), "#24334d")
+    draw = ImageDraw.Draw(source)
+    marker_size = 120
+    markers = {
+        (255, 0, 0): (0, 0, marker_size, marker_size),
+        (0, 255, 0): (1024 - marker_size, 0, 1024, marker_size),
+        (0, 0, 255): (0, 1536 - marker_size, marker_size, 1536),
+        (255, 255, 0): (
+            1024 - marker_size,
+            1536 - marker_size,
+            1024,
+            1536,
+        ),
+    }
+    for color, box in markers.items():
+        draw.rectangle(box, fill=color)
+
+    converted = _fit_without_clipping(source, target_size)
+
+    assert converted.size == target_size
+    colors = set(converted.get_flattened_data())
+    assert set(markers).issubset(colors)
 
 
 def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
@@ -585,7 +616,7 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     assert post.design_snapshot["prompts"]["feed"]["version"] == 3
     assert (
         post.design_snapshot["prompts"]["feed"]["policy_version"]
-        == "verified-media-ai-references-v2"
+        == "verified-media-ai-references-v3-safe-layout"
     )
     prompt_snapshot = post.design_snapshot["prompts"]["feed"]
     assert "rendered" not in prompt_snapshot

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
 from openai import OpenAI
-from PIL import Image, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from app.rendering.service import Renderer, RenderValidationError
 
@@ -18,6 +18,8 @@ REFERENCE_LOGO_MAX_EDGE = 1024
 REFERENCE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 REFERENCE_IMAGE_MAX_PIXELS = 40_000_000
 REFERENCE_PLAYER_JPEG_QUALITY = 90
+FORMAT_BACKGROUND_BLUR_DIVISOR = 32
+FORMAT_BACKGROUND_BRIGHTNESS = 0.7
 
 REFERENCE_IMAGE_MIME_TYPES = {
     ".jpg": "image/jpeg",
@@ -165,19 +167,83 @@ def _normalized_reference_bytes(
     return f"reference-{position}{extension}", content, mime_type, normalized.size
 
 
-def _reference_prompt(prompt: str, reference_count: int) -> str:
-    if reference_count <= 0:
-        return prompt
-    return (
-        f"{prompt}\n\n"
-        f"TECHNISCHER REFERENZHINWEIS: Zusätzlich wurden {reference_count} "
-        "getrennte Eingabebilder in der im Prompt beschriebenen Reihenfolge "
-        "übergeben: zuerst das Spielerfoto, danach Mannschaftslogo, optionales "
-        "Gegnerlogo und optionale Sponsorenlogos. Verwende jedes Bild nur für "
-        "seine genannte Rolle. Logos, Wappen und Sponsorzeichen müssen inhaltlich "
-        "unverändert bleiben. Die Eingabebilder sind Referenzen und dürfen nicht "
-        "als Collage oder technische Tafel im Ergebnis erscheinen."
+def _layout_safety_prompt(size: str) -> str:
+    try:
+        width, height = (int(part) for part in size.lower().split("x", maxsplit=1))
+    except (AttributeError, TypeError, ValueError):
+        width, height = (1080, 1350)
+    width, height = {
+        (1088, 1360): (1080, 1350),
+        (1088, 1920): (1080, 1920),
+    }.get((width, height), (width, height))
+    story = height / max(width, 1) >= 1.5
+    safe_zone = (
+        "12 bis 88 Prozent der Breite und 12 bis 88 Prozent der Höhe"
+        if story
+        else "8 bis 92 Prozent der Breite und 10 bis 90 Prozent der Höhe"
     )
+    return (
+        "TECHNISCHER FORMAT- UND RANDSCHUTZ:\n"
+        f"- Die fertige Veröffentlichung hat das Hochformat {width} × {height} Pixel.\n"
+        "- Halte Spieler, Gesichter, Bälle, sämtliche Logos, Ergebnisse, "
+        "Mannschaftsnamen sowie alle anderen lesbaren Texte vollständig innerhalb "
+        f"des zentralen sicheren Bereichs von {safe_zone}.\n"
+        "- Kein wichtiges Motiv und kein Buchstabe darf den Bildrand berühren oder "
+        "angeschnitten sein. Dekorativer Hintergrund, Licht und Texturen dürfen bis "
+        "an den Rand reichen.\n"
+        "- Die technische Bild-API verwendet ein abweichendes Hochformat. Die "
+        "Anwendung erhält deshalb den vollständigen Bildinhalt und erweitert nur "
+        "den Hintergrund auf das Zielformat; plane keine randbündigen Pflichtinhalte."
+    )
+
+
+def _provider_prompt(prompt: str, reference_count: int, size: str) -> str:
+    sections = [prompt]
+    if reference_count > 0:
+        sections.append(
+            f"TECHNISCHER REFERENZHINWEIS: Zusätzlich wurden {reference_count} "
+            "getrennte Eingabebilder in der im Prompt beschriebenen Reihenfolge "
+            "übergeben: zuerst das Spielerfoto, danach Mannschaftslogo, optionales "
+            "Gegnerlogo und optionale Sponsorenlogos. Verwende jedes Bild nur für "
+            "seine genannte Rolle. Logos, Wappen und Sponsorzeichen müssen inhaltlich "
+            "unverändert bleiben. Die Eingabebilder sind Referenzen und dürfen nicht "
+            "als Collage oder technische Tafel im Ergebnis erscheinen."
+        )
+    sections.append(_layout_safety_prompt(size))
+    return "\n\n".join(sections)
+
+
+def _fit_without_clipping(image: Image.Image, target_size: tuple[int, int]) -> Image.Image:
+    """Fit a provider canvas to Instagram dimensions without losing its edges.
+
+    GPT Image supports a small set of aspect ratios that do not exactly match
+    Instagram's 4:5 feed and 9:16 story canvases.  A cover crop silently removed
+    the top/bottom of feed images and the sides of stories.  Keep the full image
+    and fill the remaining strips with a subdued extension of its own background.
+    """
+
+    source = image.convert("RGB")
+    target_width, target_height = target_size
+    source_ratio = source.width / max(source.height, 1)
+    target_ratio = target_width / max(target_height, 1)
+    if abs(source_ratio - target_ratio) < 0.001:
+        return source.resize(target_size, Image.Resampling.LANCZOS)
+
+    background = ImageOps.fit(
+        source,
+        target_size,
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5),
+    )
+    blur_radius = max(12, round(min(target_size) / FORMAT_BACKGROUND_BLUR_DIVISOR))
+    background = background.filter(ImageFilter.GaussianBlur(blur_radius))
+    background = ImageEnhance.Brightness(background).enhance(FORMAT_BACKGROUND_BRIGHTNESS)
+
+    foreground = ImageOps.contain(source, target_size, Image.Resampling.LANCZOS)
+    left = (target_width - foreground.width) // 2
+    top = (target_height - foreground.height) // 2
+    background.paste(foreground, (left, top))
+    return background
 
 
 def _provider_image_size(size: str) -> str:
@@ -256,7 +322,7 @@ class OpenAIImageProvider(ImageProvider):
                     edit_options = {
                         "model": model,
                         "image": _reference_uploads(stack, payloads),
-                        "prompt": _reference_prompt(prompt, len(payloads)),
+                        "prompt": _provider_prompt(prompt, len(payloads), size),
                         "size": _provider_image_size(size),
                         "quality": quality,
                         "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
@@ -271,7 +337,7 @@ class OpenAIImageProvider(ImageProvider):
             else:
                 response = self.client.images.generate(
                     model=model,
-                    prompt=prompt,
+                    prompt=_provider_prompt(prompt, 0, size),
                     size=_provider_image_size(size),
                     quality=quality,
                     output_format=OPENAI_IMAGE_OUTPUT_FORMAT,
@@ -377,7 +443,8 @@ class AIImageRenderer:
         reference_count += len(
             [item for item in (data.get("sponsor_references") or []) if isinstance(item, dict)]
         )
-        return _reference_prompt(rendered, reference_count)
+        size = "1088x1920" if getattr(prompt, "media_kind", "") == "story" else "1088x1360"
+        return _provider_prompt(rendered, reference_count, size)
 
     @staticmethod
     def _reference_metadata(data: dict, opponent_present: bool, sponsors: list[dict]) -> dict:
@@ -522,12 +589,7 @@ class AIImageRenderer:
         try:
             with Image.open(BytesIO(raw)) as image:
                 image.load()
-                normalized = ImageOps.fit(
-                    image.convert("RGB"),
-                    self.sizes[kind],
-                    method=Image.Resampling.LANCZOS,
-                    centering=(0.5, 0.5),
-                )
+                normalized = _fit_without_clipping(image, self.sizes[kind])
                 normalized.save(temporary, "PNG", optimize=True)
             self.validate(temporary, kind)
             temporary.replace(out)

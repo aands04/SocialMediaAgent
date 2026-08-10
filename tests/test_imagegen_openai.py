@@ -54,6 +54,8 @@ def test_gpt_image_2_generate_requests_supported_compressed_webp():
     assert options["output_format"] == "webp"
     assert options["output_compression"] == 60
     assert options["size"] == "1024x1536"
+    assert "1080 × 1350 Pixel" in options["prompt"]
+    assert "Kein wichtiges Motiv" in options["prompt"]
     assert "response_format" not in options
     assert "input_fidelity" not in options
 
@@ -85,6 +87,8 @@ def test_gpt_image_2_references_use_dedicated_image_edit_endpoint(tmp_path):
     assert options["size"] == "1024x1536"
     assert "input_fidelity" not in options
     assert "3 getrennte Eingabebilder" in options["prompt"]
+    assert "1080 × 1920 Pixel" in options["prompt"]
+    assert "12 bis 88 Prozent der Breite" in options["prompt"]
     assert [upload.name for upload in options["image"]] == [
         "reference-1.jpg",
         "reference-2.png",
