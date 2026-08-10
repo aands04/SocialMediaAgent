@@ -152,14 +152,13 @@ def _record_prompt_dispatch(
         raise RuntimeError("Der an den KI-Anbieter zu sendende Prompt ist leer")
     attempt_number = max(1, int(job.attempts or 1))
     idempotency_key = (
-        f"generation:{job.id}:attempt:{attempt_number}:"
-        f"{prompt_kind}:{media_kind}:{call_index}"
+        f"generation:{job.id}:attempt:{attempt_number}:{prompt_kind}:{media_kind}:{call_index}"
     )
     checksum = hashlib.sha256(rendered_prompt.encode("utf-8")).hexdigest()
     existing = db.scalar(
         select(AiPromptDispatch).where(
             AiPromptDispatch.club_id == job.club_id,
-            AiPromptDispatch.idempotency_key == idempotency_key
+            AiPromptDispatch.idempotency_key == idempotency_key,
         )
     )
     if existing:
@@ -288,9 +287,7 @@ class _ProgressTextGenerator:
             result = self.inner.revise(facts, current_text, instruction)
             _check_cancel(self.db, self.job)
             return result
-        rendered, _version, model = self.inner.prepare_revision(
-            facts, current_text, instruction
-        )
+        rendered, _version, model = self.inner.prepare_revision(facts, current_text, instruction)
         usage, dispatch = self._before_provider(rendered, model)
         try:
             result = self.inner.revise(facts, current_text, instruction)
@@ -400,9 +397,7 @@ class _ProgressRenderer:
             if existing is not None:
                 path = self.inner.render(kind, relative_path, render_context)
                 completed += 1
-                progress = 20 + int(
-                    65 * completed / max(1, self.job.planned_outputs)
-                )
+                progress = 20 + int(65 * completed / max(1, self.job.planned_outputs))
                 _phase(self.db, self.job, phase, progress, completed)
                 return path
         usage, dispatch = self._before_provider(kind, context)
@@ -1049,9 +1044,7 @@ def _created_posts_for_job(db: Session, job: GenerationJob) -> list[Post]:
         return []
     parameters = dict(job.parameters or {})
     game_ids = [
-        str(item).strip()
-        for item in (parameters.get("bundle_game_ids") or [])
-        if str(item).strip()
+        str(item).strip() for item in (parameters.get("bundle_game_ids") or []) if str(item).strip()
     ]
     if not game_ids:
         game_ids = [job.game_id]
@@ -1086,9 +1079,7 @@ def _capture_partial_post(db: Session, job: GenerationJob) -> None:
     for post in posts:
         post.status = PostStatus.INCOMPLETE
         post.critical_warnings = list(
-            dict.fromkeys(
-                [*(post.critical_warnings or []), PARTIAL_GENERATION_WARNING]
-            )
+            dict.fromkeys([*(post.critical_warnings or []), PARTIAL_GENERATION_WARNING])
         )
 
 
@@ -1100,9 +1091,7 @@ def _finalize_job_usage(db: Session, job: GenerationJob, post_id: str | None) ->
     can still be recorded on the non-billable row by a later reconciliation.
     """
     entries = list(
-        db.scalars(
-            select(UsageLedgerEntry).where(UsageLedgerEntry.generation_job_id == job.id)
-        )
+        db.scalars(select(UsageLedgerEntry).where(UsageLedgerEntry.generation_job_id == job.id))
     )
     for dispatch in db.scalars(
         select(AiPromptDispatch).where(AiPromptDispatch.generation_job_id == job.id)
@@ -1141,11 +1130,11 @@ def _is_retryable_external_failure(
 ) -> bool:
     if not job.phase.startswith("generating_"):
         return False
-    if not (
-        settings.text_generator_mode == "openai"
-        or settings.image_generator_mode == "openai"
-    ):
+    if not (settings.text_generator_mode == "openai" or settings.image_generator_mode == "openai"):
         return False
+    provider_status_code = getattr(exc, "provider_status_code", None)
+    if provider_status_code in {408, 409, 429, 500, 502, 503, 504, 520}:
+        return True
     text = _exception_text(exc)
     return any(
         marker in text
@@ -1327,8 +1316,14 @@ def process_generation_job(
             bundle_teams = {item.team_id: db.get(Team, item.team_id) for item in bundle_games}
             for item in bundle_games:
                 member_team = bundle_teams.get(item.team_id)
-                if not member_team or item.club_id != job.club_id or member_team.club_id != job.club_id:
-                    raise PermissionError("Ein verbundenes Spiel gehört nicht zum Generierungsverein")
+                if (
+                    not member_team
+                    or item.club_id != job.club_id
+                    or member_team.club_id != job.club_id
+                ):
+                    raise PermissionError(
+                        "Ein verbundenes Spiel gehört nicht zum Generierungsverein"
+                    )
                 if not allowed(db, user, "generate", item.team_id):
                     raise PermissionError(
                         "Der auslösende Benutzer besitzt nicht mehr alle Mannschaftsrechte"
@@ -1372,17 +1367,13 @@ def process_generation_job(
                     build_renderer(settings),
                     db,
                     job,
-                    reuse_generation_job_id=parameters.get(
-                        "resume_generation_job_id"
-                    ),
+                    reuse_generation_job_id=parameters.get("resume_generation_job_id"),
                 ),
                 job.post_type,
                 logos_by_game,
                 str(parameters.get("matchday_bundle_key") or job.id),
             )
-            carousel = coordinate_club_matchday_feed(
-                db, posts[-1], requested_by=job.requested_by
-            )
+            carousel = coordinate_club_matchday_feed(db, posts[-1], requested_by=job.requested_by)
             post = db.get(Post, carousel.primary_post_id) if carousel.primary_post_id else posts[0]
             if not post:
                 raise ValueError("Der gemeinsame Hauptbeitrag konnte nicht bestimmt werden")
@@ -1440,9 +1431,7 @@ def process_generation_job(
                 build_renderer(settings),
                 db,
                 job,
-                reuse_generation_job_id=parameters.get(
-                    "resume_generation_job_id"
-                ),
+                reuse_generation_job_id=parameters.get("resume_generation_job_id"),
             )
             _phase(db, job, "generating_text", 10)
             post = create_post(
@@ -1497,9 +1486,7 @@ def process_generation_job(
                     logo_snapshot=logos,
                     media_asset_id=parameters.get("media_asset_id"),
                     feed_positions=list(parameters.get("feed_positions", [])),
-                    story_variant_numbers=list(
-                        parameters.get("story_variant_numbers", [])
-                    ),
+                    story_variant_numbers=list(parameters.get("story_variant_numbers", [])),
                 )
                 _audit(
                     db,
@@ -1541,9 +1528,7 @@ def process_generation_job(
                     job.parameters.get("media_asset_id"),
                     rerender_feed=bool(job.parameters.get("rerender_feed", True)),
                     feed_positions=list(job.parameters.get("feed_positions", [])),
-                    story_variant_numbers=list(
-                        job.parameters.get("story_variant_numbers", [])
-                    ),
+                    story_variant_numbers=list(job.parameters.get("story_variant_numbers", [])),
                 )
             job.result_post_id = post.id
             db.commit()
@@ -1658,9 +1643,7 @@ def process_generation_job(
         retryable_external = _is_retryable_external_failure(exc, job, settings)
         usable_output = _has_usable_job_output(db, job)
         output_key = _external_output_key(exc, job)
-        retry_counts = dict(
-            (job.parameters or {}).get("external_output_retries") or {}
-        )
+        retry_counts = dict((job.parameters or {}).get("external_output_retries") or {})
         _finalize_job_usage(db, job, job.result_post_id)
         can_retry_external = (
             retryable_external
@@ -1683,9 +1666,7 @@ def process_generation_job(
                 "ambiguous_external_response"
                 if retryable_external
                 else (
-                    "permission_changed"
-                    if isinstance(exc, PermissionError)
-                    else "generation_error"
+                    "permission_changed" if isinstance(exc, PermissionError) else "generation_error"
                 )
             )
             if retryable_external and usable_output:
@@ -1721,6 +1702,8 @@ def process_generation_job(
             status=status.value,
             category=category,
             exception_type=type(exc).__name__,
+            provider_status_code=getattr(exc, "provider_status_code", None),
+            provider_request_id=getattr(exc, "provider_request_id", None),
         )
     return db.get(GenerationJob, job_id)
 
@@ -1753,11 +1736,7 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
         )
     created_posts = _created_posts_for_job(db, job)
     partial_post = next(
-        (
-            post
-            for post in created_posts
-            if post.id == (job.result_post_id or job.post_id)
-        ),
+        (post for post in created_posts if post.id == (job.result_post_id or job.post_id)),
         created_posts[0] if created_posts else None,
     )
     interrupted_posts = [
