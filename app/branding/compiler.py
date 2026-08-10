@@ -207,6 +207,51 @@ def _compile_image(snapshot: dict, post_type: str, media_kind: str, facts: dict)
         f"- Bevorzugte Schriftwirkung: {primary_font.get('label', 'Systemschrift')} für Haupttexte und "
         f"{secondary_font.get('label', 'Systemschrift')} für ergänzende Informationen. Keine Schriftdatei erfinden oder imitieren.",
     ]
+    if post_type == "result":
+        selected_fields = list(
+            dict.fromkeys(
+                str(value)
+                for value in (
+                    image.get("result_image_fields")
+                    or ["score", "teams", "competition", "date", "venue"]
+                )
+            )
+        )
+        labels = {
+            "score": "bestätigtes Ergebnis",
+            "teams": "beide Mannschaftsnamen",
+            "competition": "Wettbewerb",
+            "date": "Spieldatum",
+            "kickoff_time": "Anstoßzeit",
+            "venue": "Spielort",
+            "home_away": "Heim-/Auswärtskennzeichnung",
+        }
+        selected_fields = [
+            "score",
+            "teams",
+            *(value for value in selected_fields if value not in {"score", "teams"}),
+        ]
+        selected_labels = [labels[value] for value in selected_fields if value in labels]
+        excluded_labels = [
+            label for key, label in labels.items() if key not in selected_fields
+        ]
+        lines.append(
+            "- Auf Ergebnisbildern ausschließlich diese Spieldaten zeigen: "
+            + ", ".join(selected_labels)
+            + "."
+        )
+        if excluded_labels:
+            lines.append(
+                "- Diese Spieldaten auf Ergebnisbildern weglassen: "
+                + ", ".join(excluded_labels)
+                + "."
+            )
+        result_extra = str(image.get("result_image_extra_rules") or "").strip()
+        if result_extra:
+            lines.append(
+                "- Ergänzende validierte Vereinsvorgabe für Ergebnisbilder: "
+                + result_extra
+            )
     if media_kind == "story":
         lines.append(
             f"- Story-Sicherheitsbereiche: oben etwa {int(settings.get('safe_top', 12))} %, "

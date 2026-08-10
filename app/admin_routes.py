@@ -380,6 +380,8 @@ def update_club_branding(
     feed_show_club_logo: str = Form(default=""),
     feed_highlight_result: str = Form(default=""),
     feed_extra_rules: str = Form(default=""),
+    result_image_fields: list[str] = Form(default=[]),
+    result_image_extra_rules: str = Form(default=""),
     story_safe_top: int = Form(default=12),
     story_safe_bottom: int = Form(default=15),
     story_use_player_image: str = Form(default=""),
@@ -492,6 +494,8 @@ def update_club_branding(
                     "highlight_result": feed_highlight_result == "on",
                     "extra_rules": feed_extra_rules,
                 },
+                "result_image_fields": result_image_fields,
+                "result_image_extra_rules": result_image_extra_rules,
                 "story_settings": {
                     "safe_top": story_safe_top,
                     "safe_bottom": story_safe_bottom,
@@ -551,7 +555,12 @@ def update_club_branding(
             raise BrandingValidationError("Unbekannte Branding-Aktion")
     except BrandingValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
-    teams = db.scalars(select(Team).where(Team.archived_at.is_(None))).all()
+    teams = db.scalars(
+        select(Team).where(
+            Team.club_id == current.club_id,
+            Team.archived_at.is_(None),
+        )
+    ).all()
     team_ids = {team.id for team in teams}
     configured_team_ids = {item["team_id"] for item in text_settings.get("team_names", [])}
     if not configured_team_ids.issubset(team_ids):
@@ -588,7 +597,8 @@ def update_club_branding(
     if club_logo_id and selected_logo is None:
         raise HTTPException(422, "Das Vereinslogo gehört nicht zum Verein")
     if selected_logo and (
-        selected_logo.logo_type != "team"
+        selected_logo.club_id != current.club_id
+        or selected_logo.logo_type != "team"
         or not selected_logo.active
         or selected_logo.archived_at is not None
     ):

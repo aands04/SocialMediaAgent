@@ -15,6 +15,7 @@ from app.branding.service import (
     dynamic_text_examples,
     normalize_hashtags,
     normalize_mentions,
+    normalize_result_image_fields,
     prompt_data_block,
     validate_branding_settings,
 )
@@ -60,6 +61,33 @@ def test_invalid_structured_choices_are_rejected_on_write():
         validate_branding_settings(
             {"primary_standard_font": "nicht-installiert"}, strict_choices=True
         )
+    with pytest.raises(BrandingValidationError, match="Ergebnisbilder"):
+        normalize_result_image_fields(["score", "tabellenstand"])
+
+
+def test_result_image_fields_are_structured_deduplicated_and_keep_required_facts():
+    assert normalize_result_image_fields(
+        ["venue", "score", "date", "venue"]
+    ) == ["score", "teams", "venue", "date"]
+
+    image, _text = branding_form_state(
+        {
+            "result_image_fields": ["score", "teams", "date", "venue"],
+            "result_image_extra_rules": "Ergebnis besonders deutlich hervorheben",
+        },
+        {},
+    )
+    instructions = compile_branding_instructions(
+        {"image": image, "text": {}},
+        "image",
+        post_type="result",
+        media_kind="feed",
+        facts={},
+    )
+
+    assert "bestätigtes Ergebnis, beide Mannschaftsnamen, Spieldatum, Spielort" in instructions
+    assert "Wettbewerb, Anstoßzeit" in instructions
+    assert "Ergebnis besonders deutlich hervorheben" in instructions
 
 
 def test_standard_fonts_are_controlled_and_available_to_branding():

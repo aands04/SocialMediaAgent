@@ -418,6 +418,8 @@ def test_branding_assistant_loads_and_saves_tenant_structured_values(browser):
             "sponsors_json": "[]",
             "max_hashtags": "10",
             "feed_max_text_amount": "normal",
+            "result_image_fields": ["competition", "date", "venue"],
+            "result_image_extra_rules": "Ergebnis besonders deutlich hervorheben",
             "story_safe_top": "12",
             "story_safe_bottom": "15",
             "legacy_image_json": "{}",
@@ -433,6 +435,17 @@ def test_branding_assistant_loads_and_saves_tenant_structured_values(browser):
         assert config.image_settings["image_effects"] == ["emotional", "modern"]
         assert config.image_settings["primary_standard_font"] == "dejavu-sans"
         assert config.image_settings["secondary_standard_font"] == "liberation-serif"
+        assert config.image_settings["result_image_fields"] == [
+            "score",
+            "teams",
+            "competition",
+            "date",
+            "venue",
+        ]
+        assert (
+            config.image_settings["result_image_extra_rules"]
+            == "Ergebnis besonders deutlich hervorheben"
+        )
         assert config.primary_font_id is None
         assert config.secondary_font_id is None
         assert config.text_settings["hashtags"] == ["#Beispiel", "#Heimspiel"]

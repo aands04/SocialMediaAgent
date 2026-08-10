@@ -391,17 +391,16 @@ def _facts_for_media(
     layout_references = facts.get("result_layout_references") or {}
     if media_kind == "story":
         story_paths = list(layout_references.get("story") or [])
-        selected = (
-            story_paths[variant_number - 1]
-            if 1 <= variant_number <= len(story_paths)
-            else (story_paths[0] if story_paths else layout_references.get("feed"))
-        )
+        # A result job intentionally freezes exactly one announcement story as
+        # its 9:16 edit source. All result-story outputs reuse that verified
+        # source instead of silently switching to further story variants.
+        selected = story_paths[0] if story_paths else layout_references.get("feed")
     else:
         selected = layout_references.get("feed")
     if selected:
         result["result_layout_reference"] = selected
         result["result_layout_reference_media_kind"] = media_kind
-        result["result_layout_reference_variant"] = variant_number
+        result["result_layout_reference_variant"] = 1 if media_kind == "story" else variant_number
     return result
 
 
@@ -442,21 +441,21 @@ def _result_layout_reference(db: Session, game: Game, team: Team) -> dict | None
     for candidate in candidates:
         path = Path(str(candidate.feed_path or "")).resolve()
         if path.is_file() and not path.is_symlink():
-            story_paths: list[str] = []
+            story_path: str | None = None
             snapshot = candidate.design_snapshot or {}
             for entry in snapshot.get("story_variants") or []:
                 if not isinstance(entry, dict):
                     continue
-                story_path = Path(str(entry.get("path") or "")).resolve()
+                possible_story_path = Path(str(entry.get("path") or "")).resolve()
                 if (
-                    story_path.is_file()
-                    and not story_path.is_symlink()
-                    and str(story_path) not in story_paths
+                    possible_story_path.is_file()
+                    and not possible_story_path.is_symlink()
                 ):
-                    story_paths.append(str(story_path))
+                    story_path = str(possible_story_path)
+                    break
             return {
                 "path": str(path),
-                "story_paths": story_paths,
+                "story_paths": [story_path] if story_path else [],
                 "post_id": candidate.id,
                 "post_type": candidate.post_type,
                 "feed_version": candidate.feed_version,
@@ -643,6 +642,10 @@ def _facts(
         "primary_font_family": primary_family,
         "secondary_font_family": secondary_family,
         "sponsor_references_by_media": sponsor_references_by_media,
+        "result_image_fields": list(image_settings.get("result_image_fields") or []),
+        "result_image_extra_rules": str(
+            image_settings.get("result_image_extra_rules") or ""
+        ),
     }
     if post_type == "result" and game.result_confirmed:
         facts["score"] = f"{game.home_score}:{game.away_score}"

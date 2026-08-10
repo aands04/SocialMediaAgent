@@ -11,8 +11,7 @@ from PIL import Image, ImageOps
 from app.rendering.service import Renderer, RenderValidationError
 
 LOGO_REFERENCE_VERSION = "verified-media-ai-references-v2"
-OPENAI_IMAGE_OUTPUT_FORMAT = "webp"
-OPENAI_IMAGE_OUTPUT_COMPRESSION = 60
+OPENAI_IMAGE_OUTPUT_FORMAT = "png"
 REFERENCE_PLAYER_MAX_EDGE = 1536
 REFERENCE_LOGO_MAX_EDGE = 1024
 REFERENCE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
@@ -171,7 +170,7 @@ def _layout_safety_prompt(size: str) -> str:
         width, height = (1080, 1350)
     width, height = {
         (1088, 1360): (1080, 1350),
-        (1088, 1920): (1080, 1920),
+        (1152, 2048): (1080, 1920),
     }.get((width, height), (width, height))
     story = height / max(width, 1) >= 1.5
     safe_zone = (
@@ -188,10 +187,9 @@ def _layout_safety_prompt(size: str) -> str:
         "- Kein wichtiges Motiv und kein Buchstabe darf den Bildrand berühren oder "
         "angeschnitten sein. Dekorativer Hintergrund, Licht und Texturen dürfen bis "
         "an den Rand reichen.\n"
-        "- Die technische Bild-API verwendet ein abweichendes Hochformat. Für das "
-        "exakte Zielformat schneidet die Anwendung ausschließlich dekorative "
-        "Randflächen außerhalb des sicheren Bereichs ab. Gestalte den Hintergrund "
-        "vollflächig bis zum Rand und platziere dort keine Pflichtinhalte."
+        "- Erzeuge die Komposition vollflächig im exakt passenden Seitenverhältnis. "
+        "Die Anwendung verkleinert das Bild anschließend nur proportional und "
+        "schneidet keine Ränder ab."
     )
 
 
@@ -211,31 +209,52 @@ def _provider_prompt(prompt: str, reference_count: int, size: str) -> str:
 
 
 def _fit_full_bleed(image: Image.Image, target_size: tuple[int, int]) -> Image.Image:
-    """Fill the Instagram canvas while retaining the prompt-defined safe area.
+    """Scale an already aspect-correct provider image without clipping.
 
-    GPT Image's 2:3 portrait canvas differs from Instagram's 4:5 feed and 9:16
-    story ratios. The provider prompt reserves the inner region for mandatory
-    content, allowing only decorative outer pixels to be cropped here.
+    GPT Image 2 accepts custom dimensions whose edges are multiples of 16. The
+    renderer therefore requests native 4:5 and 9:16 canvases. A defensive cover
+    fit remains only for unexpected provider output from older models.
     """
 
+    source = image.convert("RGB")
+    source_ratio = source.width / max(source.height, 1)
+    target_ratio = target_size[0] / max(target_size[1], 1)
+    if abs(source_ratio - target_ratio) <= 0.001:
+        return source.resize(target_size, Image.Resampling.LANCZOS)
     return ImageOps.fit(
-        image.convert("RGB"),
-        target_size,
-        method=Image.Resampling.LANCZOS,
-        centering=(0.5, 0.5),
+        source, target_size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5)
     )
 
 
-def _provider_image_size(size: str) -> str:
-    """Map renderer-specific dimensions to an Image API supported size."""
+def _provider_image_size(size: str, model: str) -> str:
+    """Use native Instagram ratios on GPT Image 2, legacy sizes otherwise."""
 
     try:
         width, height = (int(part) for part in size.lower().split("x", maxsplit=1))
     except (TypeError, ValueError):
         return "auto"
+    if (
+        model.startswith("gpt-image-2")
+        and width > 0
+        and height > 0
+        and width <= 3840
+        and height <= 3840
+        and width % 16 == 0
+        and height % 16 == 0
+        and max(width, height) / min(width, height) <= 3
+        and 655_360 <= width * height <= 8_294_400
+    ):
+        return f"{width}x{height}"
     if width == height:
         return "1024x1024"
     return "1024x1536" if height > width else "1536x1024"
+
+
+def _provider_output_options() -> dict[str, str | int]:
+    options: dict[str, str | int] = {"output_format": OPENAI_IMAGE_OUTPUT_FORMAT}
+    if OPENAI_IMAGE_OUTPUT_FORMAT in {"jpeg", "webp"}:
+        options["output_compression"] = 60
+    return options
 
 
 def _reference_uploads(
@@ -316,10 +335,9 @@ class OpenAIImageProvider(ImageProvider):
             "type": "image_generation",
             "action": "edit",
             "model": model,
-            "size": _provider_image_size(size),
+            "size": _provider_image_size(size, model),
             "quality": quality,
-            "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
-            "output_compression": OPENAI_IMAGE_OUTPUT_COMPRESSION,
+            **_provider_output_options(),
         }
         if not model.startswith("gpt-image-2"):
             image_tool["input_fidelity"] = "high"
@@ -371,10 +389,9 @@ class OpenAIImageProvider(ImageProvider):
                         # upstream before OpenAI assigned a request ID.
                         "image": uploads[0] if len(uploads) == 1 else uploads,
                         "prompt": _provider_prompt(prompt, len(payloads), size),
-                        "size": _provider_image_size(size),
+                        "size": _provider_image_size(size, model),
                         "quality": quality,
-                        "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
-                        "output_compression": OPENAI_IMAGE_OUTPUT_COMPRESSION,
+                        **_provider_output_options(),
                     }
                     # GPT Image 2 applies high input fidelity automatically
                     # and rejects the explicit option.  Older image models
@@ -397,10 +414,9 @@ class OpenAIImageProvider(ImageProvider):
                 response = self.client.images.generate(
                     model=model,
                     prompt=_provider_prompt(prompt, 0, size),
-                    size=_provider_image_size(size),
+                    size=_provider_image_size(size, model),
                     quality=quality,
-                    output_format=OPENAI_IMAGE_OUTPUT_FORMAT,
-                    output_compression=OPENAI_IMAGE_OUTPUT_COMPRESSION,
+                    **_provider_output_options(),
                 )
             encoded = response.data[0].b64_json
             if not encoded:
@@ -439,7 +455,9 @@ class AIImageRenderer:
     """Renderer-kompatible KI-Ausgabe mit lokal erzwungenem Zielformat."""
 
     sizes = Renderer.sizes
-    api_sizes = {"feed": "1088x1360", "story": "1088x1920"}
+    # Both dimensions comply with GPT Image 2's multiple-of-16 constraints and
+    # exactly match Instagram's 4:5 feed and 9:16 story aspect ratios.
+    api_sizes = {"feed": "1088x1360", "story": "1152x2048"}
     is_ai = True
 
     def __init__(
@@ -515,7 +533,7 @@ class AIImageRenderer:
             reference_count += len(
                 [item for item in (data.get("sponsor_references") or []) if isinstance(item, dict)]
             )
-        size = "1088x1920" if getattr(prompt, "media_kind", "") == "story" else "1088x1360"
+        size = "1152x2048" if getattr(prompt, "media_kind", "") == "story" else "1088x1360"
         return _provider_prompt(rendered, reference_count, size)
 
     @staticmethod
