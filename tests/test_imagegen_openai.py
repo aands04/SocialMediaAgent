@@ -1,5 +1,5 @@
 import base64
-from io import BytesIO
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,7 +9,6 @@ from openai import OpenAI
 from PIL import Image
 
 from app.imagegen.service import (
-    REFERENCE_BOARD_MAX_EDGE,
     ImageGenerationError,
     OpenAIImageProvider,
 )
@@ -23,9 +22,21 @@ def image_response():
     )
 
 
+def responses_image_response():
+    return SimpleNamespace(
+        output=[
+            SimpleNamespace(
+                type="image_generation_call",
+                result=base64.b64encode(PNG_BYTES).decode("ascii"),
+            )
+        ]
+    )
+
+
 def provider_with_mock_client():
     provider = OpenAIImageProvider.__new__(OpenAIImageProvider)
     provider.client = Mock()
+    provider.responses_model = "gpt-5.4-mini"
     return provider
 
 
@@ -62,7 +73,7 @@ def test_gpt_image_2_generate_requests_compressed_webp_without_response_format()
     assert "input_fidelity" not in options
 
 
-def test_gpt_image_2_edit_omits_unsupported_parameters(tmp_path):
+def test_gpt_image_2_references_use_responses_image_tool(tmp_path):
     references = [
         tmp_path / "player.png",
         tmp_path / "team-logo.png",
@@ -71,7 +82,7 @@ def test_gpt_image_2_edit_omits_unsupported_parameters(tmp_path):
     for reference in references:
         write_reference(reference)
     provider = provider_with_mock_client()
-    provider.client.images.edit.return_value = image_response()
+    provider.client.responses.create.return_value = responses_image_response()
 
     result = provider.generate(
         prompt="Testmotiv mit Spieler",
@@ -82,16 +93,23 @@ def test_gpt_image_2_edit_omits_unsupported_parameters(tmp_path):
     )
 
     assert result == PNG_BYTES
-    options = provider.client.images.edit.call_args.kwargs
-    assert options["output_format"] == "webp"
-    assert options["output_compression"] == 60
-    assert "response_format" not in options
-    assert "input_fidelity" not in options
-    assert len(options["image"]) == 1
-    assert options["image"][0].name == "reference-board.png"
-    assert "Referenztafel mit 3 klar getrennten Feldern" in options["prompt"]
-    assert "ursprünglichen Referenzen 1 bis 3" in options["prompt"]
-    assert all(item.closed for item in options["image"])
+    options = provider.client.responses.create.call_args.kwargs
+    assert options["model"] == "gpt-5.4-mini"
+    assert options["store"] is False
+    assert options["tool_choice"] == {"type": "image_generation"}
+    tool = options["tools"][0]
+    assert tool["model"] == "gpt-image-2-2026-07-01"
+    assert tool["action"] == "edit"
+    assert tool["output_format"] == "webp"
+    assert tool["output_compression"] == 60
+    assert tool["size"] == "1024x1536"
+    assert tool["input_fidelity"] == "high"
+    content = options["input"][0]["content"]
+    assert "3 getrennte Eingabebilder" in content[0]["text"]
+    assert len(content) == 4
+    assert all(item["type"] == "input_image" for item in content[1:])
+    assert content[1]["image_url"].startswith("data:image/jpeg;base64,")
+    assert content[2]["image_url"].startswith("data:image/png;base64,")
 
 
 @pytest.mark.parametrize(
@@ -107,7 +125,7 @@ def test_edit_normalizes_player_reference_to_explicit_jpeg(tmp_path, filename):
     reference = tmp_path / filename
     write_reference(reference)
     provider = provider_with_mock_client()
-    provider.client.images.edit.return_value = image_response()
+    provider.client.responses.create.return_value = responses_image_response()
 
     result = provider.generate(
         prompt="Referenzbild mit explizitem MIME-Typ",
@@ -118,25 +136,17 @@ def test_edit_normalizes_player_reference_to_explicit_jpeg(tmp_path, filename):
     )
 
     assert result == PNG_BYTES
-    upload = provider.client.images.edit.call_args.kwargs["image"][0]
-    assert upload.name == "reference-1.jpg"
-    assert upload.closed
+    content = provider.client.responses.create.call_args.kwargs["input"][0]["content"]
+    assert content[1]["image_url"].startswith("data:image/jpeg;base64,")
 
 
-def test_edit_combines_multiple_normalized_references_into_bounded_board(tmp_path):
+def test_edit_sends_multiple_normalized_references_as_separate_inputs(tmp_path):
     player = tmp_path / "player.jpg"
     logo = tmp_path / "logo.webp"
     write_reference(player, size=(3000, 1200))
     write_reference(logo, alpha=True, size=(900, 1600))
-    captured = []
     provider = provider_with_mock_client()
-
-    def capture_uploads(**options):
-        for handle in options["image"]:
-            captured.append((handle.name, handle.read()))
-        return image_response()
-
-    provider.client.images.edit.side_effect = capture_uploads
+    provider.client.responses.create.return_value = responses_image_response()
 
     result = provider.generate(
         prompt="Normalisierte Referenzen",
@@ -147,35 +157,19 @@ def test_edit_combines_multiple_normalized_references_into_bounded_board(tmp_pat
     )
 
     assert result == PNG_BYTES
-    assert [item[0] for item in captured] == ["reference-board.png"]
-    with Image.open(BytesIO(captured[0][1])) as board:
-        board.load()
-        assert max(board.size) <= REFERENCE_BOARD_MAX_EDGE
-        assert board.width > board.height
-        assert not board.getexif()
+    content = provider.client.responses.create.call_args.kwargs["input"][0]["content"]
+    assert len(content) == 3
+    assert content[1]["image_url"].startswith("data:image/jpeg;base64,")
+    assert content[2]["image_url"].startswith("data:image/png;base64,")
 
 
-def test_edit_sends_reference_board_as_one_named_multipart_part(tmp_path):
+def test_edit_does_not_use_multipart_image_endpoint(tmp_path):
     player = tmp_path / "player.jpg"
     logo = tmp_path / "logo.png"
     write_reference(player)
     write_reference(logo, alpha=True)
-    captured: dict[str, bytes | str] = {}
-
-    def handler(request: httpx.Request):
-        captured["content_type"] = request.headers["content-type"]
-        captured["body"] = request.read()
-        return httpx.Response(
-            200,
-            json={"created": 0, "data": [{"b64_json": base64.b64encode(PNG_BYTES).decode()}]},
-        )
-
-    provider = OpenAIImageProvider.__new__(OpenAIImageProvider)
-    provider.client = OpenAI(
-        api_key="test",
-        max_retries=0,
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
+    provider = provider_with_mock_client()
+    provider.client.responses.create.return_value = responses_image_response()
 
     assert (
         provider.generate(
@@ -188,18 +182,60 @@ def test_edit_sends_reference_board_as_one_named_multipart_part(tmp_path):
         == PNG_BYTES
     )
 
-    body = captured["body"]
-    assert isinstance(body, bytes)
-    assert b'name="image[]"; filename="reference-board.png"' in body
-    assert b"Content-Type: image/png" in body
-    assert body.count(b'name="image[]"') == 1
+    provider.client.responses.create.assert_called_once()
+    provider.client.images.edit.assert_not_called()
 
 
-def test_single_reference_keeps_original_prompt_and_single_upload(tmp_path):
+def test_responses_reference_request_is_valid_json_not_multipart(tmp_path):
+    player = tmp_path / "player.jpg"
+    logo = tmp_path / "logo.png"
+    write_reference(player)
+    write_reference(logo, alpha=True)
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request):
+        captured["path"] = request.url.path
+        captured["content_type"] = request.headers["content-type"]
+        captured["payload"] = json.loads(request.read())
+        return httpx.Response(
+            520,
+            request=request,
+            headers={"x-request-id": "req_transport_test"},
+            json={"error": {"message": "test transport failure", "type": "server_error"}},
+        )
+
+    provider = OpenAIImageProvider.__new__(OpenAIImageProvider)
+    provider.client = OpenAI(
+        api_key="test",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.responses_model = "gpt-5.4-mini"
+
+    with pytest.raises(ImageGenerationError) as raised:
+        provider.generate(
+            prompt="JSON-Transport-Test",
+            references=[player, logo],
+            size="1088x1360",
+            model="gpt-image-2",
+            quality="medium",
+        )
+
+    assert raised.value.provider_status_code == 520
+    assert raised.value.provider_request_id == "req_transport_test"
+    assert captured["path"] == "/v1/responses"
+    assert captured["content_type"] == "application/json"
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["tool_choice"] == {"type": "image_generation"}
+    assert len(payload["input"][0]["content"]) == 3
+
+
+def test_single_reference_adds_safe_reference_instruction(tmp_path):
     reference = tmp_path / "player.jpg"
     write_reference(reference, size=(3000, 1200))
     provider = provider_with_mock_client()
-    provider.client.images.edit.return_value = image_response()
+    provider.client.responses.create.return_value = responses_image_response()
 
     provider.generate(
         prompt="Unveränderter Einzelreferenz-Prompt",
@@ -209,9 +245,10 @@ def test_single_reference_keeps_original_prompt_and_single_upload(tmp_path):
         quality="medium",
     )
 
-    options = provider.client.images.edit.call_args.kwargs
-    assert options["prompt"] == "Unveränderter Einzelreferenz-Prompt"
-    assert options["image"][0].name == "reference-1.jpg"
+    content = provider.client.responses.create.call_args.kwargs["input"][0]["content"]
+    assert content[0]["text"].startswith("Unveränderter Einzelreferenz-Prompt")
+    assert "1 getrennte Eingabebilder" in content[0]["text"]
+    assert len(content) == 2
 
 
 def test_edit_rejects_unsupported_reference_format_before_api_call(tmp_path):
@@ -231,7 +268,7 @@ def test_edit_rejects_unsupported_reference_format_before_api_call(tmp_path):
             quality="medium",
         )
 
-    provider.client.images.edit.assert_not_called()
+    provider.client.responses.create.assert_not_called()
 
 
 def test_edit_rejects_unreadable_supported_reference_before_api_call(tmp_path):
@@ -248,14 +285,14 @@ def test_edit_rejects_unreadable_supported_reference_before_api_call(tmp_path):
             quality="medium",
         )
 
-    provider.client.images.edit.assert_not_called()
+    provider.client.responses.create.assert_not_called()
 
 
-def test_older_gpt_image_edit_retains_high_input_fidelity(tmp_path):
+def test_older_gpt_image_edit_uses_high_input_fidelity(tmp_path):
     reference = tmp_path / "player.png"
     write_reference(reference)
     provider = provider_with_mock_client()
-    provider.client.images.edit.return_value = image_response()
+    provider.client.responses.create.return_value = responses_image_response()
 
     result = provider.generate(
         prompt="Kompatibilitätstest",
@@ -266,14 +303,13 @@ def test_older_gpt_image_edit_retains_high_input_fidelity(tmp_path):
     )
 
     assert result == PNG_BYTES
-    options = provider.client.images.edit.call_args.kwargs
-    assert options["output_format"] == "webp"
-    assert options["output_compression"] == 60
-    assert options["input_fidelity"] == "high"
-    assert "response_format" not in options
+    tool = provider.client.responses.create.call_args.kwargs["tools"][0]
+    assert tool["output_format"] == "webp"
+    assert tool["output_compression"] == 60
+    assert tool["input_fidelity"] == "high"
 
 
-def test_provider_disables_sdk_retries_for_multipart_uploads(monkeypatch):
+def test_provider_disables_sdk_retries_for_persistent_cost_guard(monkeypatch):
     openai = Mock()
     monkeypatch.setattr("app.imagegen.service.OpenAI", openai)
 
@@ -289,7 +325,7 @@ def test_provider_exposes_only_safe_transport_diagnostics(tmp_path):
     error = RuntimeError("Cloudflare response with internal body")
     error.status_code = 520
     error.request_id = "req_123\r\ninjected"
-    provider.client.images.edit.side_effect = error
+    provider.client.responses.create.side_effect = error
 
     with pytest.raises(ImageGenerationError) as raised:
         provider.generate(
