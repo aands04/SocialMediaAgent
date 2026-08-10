@@ -3,7 +3,7 @@ import hashlib
 from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 from openai import OpenAI
 from PIL import Image, ImageOps
@@ -26,6 +26,13 @@ REFERENCE_IMAGE_MIME_TYPES = {
 }
 
 
+class ReferenceUploadDiagnostics(NamedTuple):
+    count: int
+    total_bytes: int
+    mime_types: tuple[str, ...]
+    dimensions: tuple[str, ...]
+
+
 class ImageGenerationError(RenderValidationError):
     def __init__(
         self,
@@ -33,10 +40,18 @@ class ImageGenerationError(RenderValidationError):
         *,
         provider_status_code: int | None = None,
         provider_request_id: str | None = None,
+        provider_reference_count: int | None = None,
+        provider_reference_total_bytes: int | None = None,
+        provider_reference_mime_types: tuple[str, ...] = (),
+        provider_reference_dimensions: tuple[str, ...] = (),
     ):
         super().__init__(message)
         self.provider_status_code = provider_status_code
         self.provider_request_id = provider_request_id
+        self.provider_reference_count = provider_reference_count
+        self.provider_reference_total_bytes = provider_reference_total_bytes
+        self.provider_reference_mime_types = provider_reference_mime_types
+        self.provider_reference_dimensions = provider_reference_dimensions
 
 
 def _safe_provider_request_id(value: object) -> str | None:
@@ -74,7 +89,7 @@ def _normalized_reference_bytes(
     path: Path,
     *,
     position: int,
-) -> tuple[str, bytes, str]:
+) -> tuple[str, bytes, str, tuple[int, int]]:
     """Create a fresh, metadata-free upload for one provider request.
 
     The first reference is the player photo and may use high-quality JPEG.
@@ -137,22 +152,33 @@ def _normalized_reference_bytes(
         raise
     except Exception as exc:
         raise ImageGenerationError(f"Referenzbild ist technisch nicht lesbar: {path.name}") from exc
-    return f"reference-{position}{extension}", content, mime_type
+    return f"reference-{position}{extension}", content, mime_type, normalized.size
 
 
 def _reference_uploads(
     stack: ExitStack,
     references: list[Path],
-) -> list[tuple[str, BinaryIO, str]]:
+) -> tuple[list[tuple[str, BinaryIO, str]], ReferenceUploadDiagnostics]:
     uploads: list[tuple[str, BinaryIO, str]] = []
+    total_bytes = 0
+    mime_types: list[str] = []
+    dimensions: list[str] = []
     for position, path in enumerate(references, start=1):
-        name, content, mime_type = _normalized_reference_bytes(
+        name, content, mime_type, size = _normalized_reference_bytes(
             path,
             position=position,
         )
         handle = stack.enter_context(BytesIO(content))
         uploads.append((name, handle, mime_type))
-    return uploads
+        total_bytes += len(content)
+        mime_types.append(mime_type)
+        dimensions.append(f"{size[0]}x{size[1]}")
+    return uploads, ReferenceUploadDiagnostics(
+        count=len(uploads),
+        total_bytes=total_bytes,
+        mime_types=tuple(mime_types),
+        dimensions=tuple(dimensions),
+    )
 
 
 class ImageProvider:
@@ -183,10 +209,11 @@ class OpenAIImageProvider(ImageProvider):
         model: str,
         quality: str,
     ) -> bytes:
+        reference_diagnostics: ReferenceUploadDiagnostics | None = None
         try:
             if references:
                 with ExitStack() as stack:
-                    files = _reference_uploads(stack, references)
+                    files, reference_diagnostics = _reference_uploads(stack, references)
                     edit_options = {
                         "model": model,
                         "image": files,
@@ -226,6 +253,18 @@ class OpenAIImageProvider(ImageProvider):
                 f"KI-Bildgenerierung fehlgeschlagen{suffix}",
                 provider_status_code=status_code,
                 provider_request_id=request_id,
+                provider_reference_count=(
+                    reference_diagnostics.count if reference_diagnostics else None
+                ),
+                provider_reference_total_bytes=(
+                    reference_diagnostics.total_bytes if reference_diagnostics else None
+                ),
+                provider_reference_mime_types=(
+                    reference_diagnostics.mime_types if reference_diagnostics else ()
+                ),
+                provider_reference_dimensions=(
+                    reference_diagnostics.dimensions if reference_diagnostics else ()
+                ),
             ) from exc
 
 

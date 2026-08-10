@@ -252,6 +252,10 @@ def test_provider_exposes_only_safe_transport_diagnostics(tmp_path):
 
     assert raised.value.provider_status_code == 520
     assert raised.value.provider_request_id == "req_123injected"
+    assert raised.value.provider_reference_count == 1
+    assert raised.value.provider_reference_total_bytes > 0
+    assert raised.value.provider_reference_mime_types == ("image/jpeg",)
+    assert raised.value.provider_reference_dimensions == ("64x48",)
     assert str(raised.value) == (
         "KI-Bildgenerierung fehlgeschlagen (HTTP 520, Request-ID req_123injected)"
     )
