@@ -13,10 +13,7 @@ def build_renderer(settings: Settings | None = None):
             settings.generated_root,
             settings.media_root,
             settings.upload_root,
-            OpenAIImageProvider(
-                settings.openai_api_key,
-                responses_model=settings.openai_image_tool_model,
-            ),
+            OpenAIImageProvider(settings.openai_api_key),
         )
     return Renderer(settings.generated_root, settings.media_root, settings.upload_root)
 

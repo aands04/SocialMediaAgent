@@ -1,8 +1,9 @@
 import base64
 import hashlib
+from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
-from typing import NamedTuple
+from typing import BinaryIO, NamedTuple
 
 from openai import OpenAI
 from PIL import Image, ImageOps
@@ -31,6 +32,14 @@ class ReferenceUploadDiagnostics(NamedTuple):
     total_bytes: int
     mime_types: tuple[str, ...]
     dimensions: tuple[str, ...]
+
+
+class _NamedUpload(BytesIO):
+    """In-memory file with a stable name for the SDK multipart encoder."""
+
+    def __init__(self, content: bytes, name: str):
+        super().__init__(content)
+        self.name = name
 
 
 class ImageGenerationError(RenderValidationError):
@@ -156,7 +165,7 @@ def _normalized_reference_bytes(
     return f"reference-{position}{extension}", content, mime_type, normalized.size
 
 
-def _responses_reference_prompt(prompt: str, reference_count: int) -> str:
+def _reference_prompt(prompt: str, reference_count: int) -> str:
     if reference_count <= 0:
         return prompt
     return (
@@ -171,8 +180,8 @@ def _responses_reference_prompt(prompt: str, reference_count: int) -> str:
     )
 
 
-def _responses_image_size(size: str) -> str:
-    """Map renderer-specific dimensions to a supported Responses tool size."""
+def _provider_image_size(size: str) -> str:
+    """Map renderer-specific dimensions to an Image API supported size."""
 
     try:
         width, height = (int(part) for part in size.lower().split("x", maxsplit=1))
@@ -183,14 +192,16 @@ def _responses_image_size(size: str) -> str:
     return "1024x1536" if height > width else "1536x1024"
 
 
-def _response_image_bytes(response: object) -> bytes:
-    for item in getattr(response, "output", ()) or ():
-        if getattr(item, "type", None) != "image_generation_call":
-            continue
-        encoded = getattr(item, "result", None)
-        if encoded:
-            return base64.b64decode(encoded, validate=True)
-    raise ImageGenerationError("Bild-Tool hat keine eingebetteten Bilddaten geliefert")
+def _reference_uploads(
+    stack: ExitStack,
+    payloads: list[tuple[str, bytes, str, tuple[int, int]]],
+) -> list[BinaryIO]:
+    """Create fresh named streams for one non-retriable multipart request."""
+
+    return [
+        stack.enter_context(_NamedUpload(content, name))
+        for name, content, _mime_type, _size in payloads
+    ]
 
 
 class ImageProvider:
@@ -206,12 +217,11 @@ class ImageProvider:
 
 
 class OpenAIImageProvider(ImageProvider):
-    def __init__(self, api_key: str, *, responses_model: str = "gpt-5.4-mini"):
+    def __init__(self, api_key: str):
         # Keep provider retries under the generation job's persistent cost and
         # idempotency guard.  This also prevents an SDK-level retry from racing
         # with the worker's single delayed retry for the same output slot.
         self.client = OpenAI(api_key=api_key, max_retries=0)
-        self.responses_model = responses_model
 
     def generate(
         self,
@@ -237,51 +247,32 @@ class OpenAIImageProvider(ImageProvider):
                         for _name, _content, _mime, dimensions in payloads
                     ),
                 )
-                content = [
-                    {
-                        "type": "input_text",
-                        "text": _responses_reference_prompt(prompt, len(payloads)),
+                # Reference-based generation is an image edit.  Use the
+                # dedicated official multipart endpoint instead of embedding
+                # all source bytes as JSON data URLs in a Responses request.
+                # Production repeatedly received an upstream HTTP 520 before
+                # an OpenAI request ID was assigned on that JSON transport.
+                with ExitStack() as stack:
+                    edit_options = {
+                        "model": model,
+                        "image": _reference_uploads(stack, payloads),
+                        "prompt": _reference_prompt(prompt, len(payloads)),
+                        "size": _provider_image_size(size),
+                        "quality": quality,
+                        "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
+                        "output_compression": OPENAI_IMAGE_OUTPUT_COMPRESSION,
                     }
-                ]
-                content.extend(
-                    {
-                        "type": "input_image",
-                        "image_url": (
-                            f"data:{mime_type};base64,"
-                            f"{base64.b64encode(image_bytes).decode('ascii')}"
-                        ),
-                        "detail": "high",
-                    }
-                    for _name, image_bytes, mime_type, _size in payloads
-                )
-                image_tool = {
-                    "type": "image_generation",
-                    "action": "edit",
-                    "model": model,
-                    "size": _responses_image_size(size),
-                    "quality": quality,
-                    "output_format": OPENAI_IMAGE_OUTPUT_FORMAT,
-                    "output_compression": OPENAI_IMAGE_OUTPUT_COMPRESSION,
-                }
-                # GPT Image 2 always processes reference images with high
-                # fidelity.  Its API contract rejects input_fidelity instead
-                # of accepting an explicit value.  Older GPT Image models
-                # still need the option to preserve logos and player details.
-                if not model.startswith("gpt-image-2"):
-                    image_tool["input_fidelity"] = "high"
-                response = self.client.responses.create(
-                    model=self.responses_model,
-                    input=[{"role": "user", "content": content}],
-                    tools=[image_tool],
-                    tool_choice={"type": "image_generation"},
-                    store=False,
-                )
-                return _response_image_bytes(response)
+                    # GPT Image 2 applies high input fidelity automatically
+                    # and rejects the explicit option.  Older image models
+                    # still accept it.
+                    if not model.startswith("gpt-image-2"):
+                        edit_options["input_fidelity"] = "high"
+                    response = self.client.images.edit(**edit_options)
             else:
                 response = self.client.images.generate(
                     model=model,
                     prompt=prompt,
-                    size=size,
+                    size=_provider_image_size(size),
                     quality=quality,
                     output_format=OPENAI_IMAGE_OUTPUT_FORMAT,
                     output_compression=OPENAI_IMAGE_OUTPUT_COMPRESSION,
@@ -386,7 +377,7 @@ class AIImageRenderer:
         reference_count += len(
             [item for item in (data.get("sponsor_references") or []) if isinstance(item, dict)]
         )
-        return _responses_reference_prompt(rendered, reference_count)
+        return _reference_prompt(rendered, reference_count)
 
     @staticmethod
     def _reference_metadata(data: dict, opponent_present: bool, sponsors: list[dict]) -> dict:
