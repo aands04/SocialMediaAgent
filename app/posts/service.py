@@ -386,6 +386,46 @@ def _facts_for_media(facts: dict, media_kind: str) -> dict:
     }
 
 
+def _result_layout_reference(db: Session, game: Game, team: Team) -> dict | None:
+    """Find this tenant's latest usable pre-match feed for the same fixture."""
+
+    candidates = list(
+        db.scalars(
+            select(Post)
+            .where(
+                Post.club_id == team.club_id,
+                Post.team_id == team.id,
+                Post.game_id == game.id,
+                Post.post_type.in_(("announcement", "reminder")),
+                Post.active_key == "active",
+                Post.feed_path.is_not(None),
+                Post.status.in_(
+                    (
+                        PostStatus.PENDING,
+                        PostStatus.REAPPROVAL,
+                        PostStatus.APPROVED,
+                        PostStatus.SCHEDULED,
+                        PostStatus.PARTIAL,
+                        PostStatus.PUBLISHED,
+                    )
+                ),
+            )
+            .order_by(Post.created_at.desc(), Post.id.desc())
+        )
+    )
+    candidates.sort(key=lambda item: item.post_type != "announcement")
+    for candidate in candidates:
+        path = Path(str(candidate.feed_path or "")).resolve()
+        if path.is_file() and not path.is_symlink():
+            return {
+                "path": str(path),
+                "post_id": candidate.id,
+                "post_type": candidate.post_type,
+                "feed_version": candidate.feed_version,
+            }
+    return None
+
+
 def _sponsor_snapshot(facts: dict) -> dict[str, list[dict]]:
     result: dict[str, list[dict]] = {}
     for media_kind, references in (facts.get("sponsor_references_by_media") or {}).items():
@@ -572,6 +612,11 @@ def _facts(
     }
     if post_type == "result" and game.result_confirmed:
         facts["score"] = f"{game.home_score}:{game.away_score}"
+        layout_reference = _result_layout_reference(db, game, team)
+        if layout_reference:
+            facts["result_layout_reference"] = layout_reference["path"]
+            facts["result_layout_reference_post_id"] = layout_reference["post_id"]
+            facts["result_layout_reference_feed_version"] = layout_reference["feed_version"]
     if post_type == "result" and not game.result_confirmed:
         raise ValueError("Ergebnis ist nicht bestätigt")
     return facts
