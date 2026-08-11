@@ -137,6 +137,22 @@ def session_csrf(client):
     return re.search(r'name="csrf_token" value="([^"]+)', response.text).group(1)
 
 
+def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
+    client, _factory = browser
+    page = client.get("/games")
+
+    assert page.status_code == 200
+    assert '<header class="app-header">' in page.text
+    assert '<nav class="app-nav">' in page.text
+    assert "/static/style.css?v=20260811-publishing-workspace" in page.text
+
+    stylesheet = client.get("/static/style.css?v=20260811-publishing-workspace")
+    assert stylesheet.status_code == 200
+    assert stylesheet.headers["cache-control"] == "no-cache, must-revalidate"
+    assert "main header{" in stylesheet.text
+    assert "main nav{" in stylesheet.text
+
+
 def create_automation_team(factory, *, suffix: str, rules: dict | None = None):
     with factory() as db:
         page = InstagramPage(
@@ -1666,7 +1682,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260806-matchday-bundles" in teams_page
+    assert "/static/style.css?v=20260811-publishing-workspace" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text

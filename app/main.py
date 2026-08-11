@@ -91,6 +91,14 @@ async def isolate_tenant_context(request: Request, call_next):
         reset_scope(token)
 
 
+@app.middleware("http")
+async def revalidate_static_assets(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 templates.env.filters["berlin"] = berlin_datetime
