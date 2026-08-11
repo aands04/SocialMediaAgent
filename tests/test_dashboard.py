@@ -144,7 +144,7 @@ def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
     assert page.status_code == 200
     assert '<header class="app-header">' in page.text
     assert '<nav class="app-nav">' in page.text
-    assert "/static/style.css?v=20260811-publishing-workspace" in page.text
+    assert "/static/style.css?v=20260811-games-workspace" in page.text
 
     stylesheet = client.get("/static/style.css?v=20260811-publishing-workspace")
     assert stylesheet.status_code == 200
@@ -1768,7 +1768,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260811-publishing-workspace" in teams_page
+    assert "/static/style.css?v=20260811-games-workspace" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text
@@ -1916,10 +1916,10 @@ def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(brow
 
     page = client.get("/games")
     assert page.status_code == 200
-    assert page.text.count("Gemeinsame Ankündigung erzeugen") == 1
-    assert "durch Vereinsregel gebündelt" in page.text
+    assert page.text.count("Gemeinsamen Beitrag erstellen") == 1
+    assert "Gemeinsamer Spieltag · 2 Spiele" in page.text
     grouped_result = re.search(
-        r'<button name="post_type" value="result"([^>]*)>Gemeinsames Ergebnis erzeugen</button>',
+        r'<button name="post_type" value="result"([^>]*)>Gemeinsame Ergebnismeldung erzeugen</button>',
         page.text,
     )
     assert grouped_result and "disabled" in grouped_result.group(1)
@@ -1933,7 +1933,7 @@ def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(brow
         db.commit()
     confirmed_page = client.get("/games").text
     grouped_result = re.search(
-        r'<button name="post_type" value="result"([^>]*)>Gemeinsames Ergebnis erzeugen</button>',
+        r'<button name="post_type" value="result"([^>]*)>Gemeinsame Ergebnismeldung erzeugen</button>',
         confirmed_page,
     )
     assert grouped_result and "disabled" not in grouped_result.group(1)
@@ -1946,7 +1946,7 @@ def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(brow
     )
     assert separated.status_code == 303
     separated_page = client.get("/games").text
-    assert "Gemeinsame Ankündigung erzeugen" not in separated_page
+    assert "Gemeinsamen Beitrag erstellen" not in separated_page
 
     connected = client.post(
         "/games/bundles/connect",
@@ -1955,8 +1955,89 @@ def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(brow
     )
     assert connected.status_code == 303
     connected_page = client.get("/games").text
-    assert connected_page.count("Gemeinsame Ankündigung erzeugen") == 1
-    assert "bewusst verbunden" in connected_page
+    assert connected_page.count("Gemeinsamen Beitrag erstellen") == 1
+    assert "Gemeinsamer Spieltag · 2 Spiele" in connected_page
+
+
+def test_games_page_uses_productive_labels_and_orders_dates_and_kickoffs(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="ordered-games-page",
+            display_name="Spielübersicht",
+            username="ordered_games",
+            club="Sortierverein",
+            active=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="ordered-games-team",
+            display_name="Sortierverein I",
+            short_name="SV I",
+            slug="ordered-games-team",
+            club="Sortierverein",
+            fussball_url="https://example.invalid/ordered-games",
+            instagram_page_id=page.id,
+            media_subdir="ordered-games",
+        )
+        db.add(team)
+        db.flush()
+        start = (datetime.now(timezone.utc) + timedelta(days=2)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        rows = [
+            ("Später Gegner", start + timedelta(days=8, hours=15)),
+            ("Früher Gegner", start + timedelta(days=1, hours=15)),
+            ("Gegner 17 Uhr", start + timedelta(days=4, hours=17)),
+            ("Gegner 13 Uhr", start + timedelta(days=4, hours=13)),
+            ("Gegner 15 Uhr", start + timedelta(days=4, hours=15)),
+            ("Vergangener Gegner", datetime.now(timezone.utc) - timedelta(days=2)),
+        ]
+        for index, (opponent, kickoff) in enumerate(rows):
+            db.add(
+                Game(
+                    team_id=team.id,
+                    provider="fussball.de",
+                    external_id=f"ordered-game-{index}",
+                    home_team=team.display_name,
+                    away_team=opponent,
+                    kickoff=kickoff,
+                    competition="Kreisliga",
+                    venue="Sportanlage",
+                    pitch="Rasenplatz",
+                    source_url=f"https://example.invalid/game/{index}",
+                )
+            )
+        db.commit()
+
+    response = client.get("/games")
+    assert response.status_code == 200
+    html = response.text
+    assert "Spiele &amp; Testdaten" not in html
+    assert "Lokales Testspiel anlegen" not in html
+    assert "Mock-Spiel anlegen" not in html
+    assert "<h1>Spiele</h1>" in html
+    assert "Spiel manuell anlegen" in html
+    assert "Vergangener Gegner" not in html
+    assert html.index("Früher Gegner") < html.index("Gegner 13 Uhr") < html.index(
+        "Später Gegner"
+    )
+    assert html.index("Gegner 13 Uhr") < html.index("Gegner 15 Uhr") < html.index(
+        "Gegner 17 Uhr"
+    )
+
+    all_games = client.get("/games?period=all").text
+    assert "Vergangener Gegner" in all_games
+    assert all_games.index("Kommende Spiele") < all_games.index("Vergangene Spiele")
+    assert "Gegnerlogo fehlt" in all_games
+
+
+def test_games_filters_reject_invisible_team(browser):
+    client, _ = browser
+    assert client.get("/games?team_id=not-visible-to-this-user").status_code == 403
+    assert client.get("/games?period=unknown").status_code == 422
+    assert client.get("/games?contribution_status=unknown").status_code == 422
 
 
 def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_path):
@@ -2947,11 +3028,11 @@ def test_result_can_be_entered_confirmed_and_corrected_from_games_dashboard(brow
         team_id = team.id
         page_id = page.id
 
-    overview = client.get("/games")
+    overview = client.get("/games?period=all")
     assert overview.status_code == 200
-    assert "Ergebnis eintragen und bestätigen" in overview.text
+    assert "Ergebnis eintragen" in overview.text
     result_button = re.search(
-        r'<button name="post_type" value="result"([^>]*)>Ergebnis</button>',
+        r'<button name="post_type" value="result"([^>]*)>Ergebnismeldung erzeugen</button>',
         overview.text,
     )
     assert result_button and "disabled" in result_button.group(1)
@@ -3109,10 +3190,10 @@ def test_result_can_be_entered_confirmed_and_corrected_from_games_dashboard(brow
         assert published.status == JobStatus.PUBLISHED
         assert published.platform_id == "published-result-story"
 
-    confirmed_overview = client.get("/games")
+    confirmed_overview = client.get("/games?period=all")
     assert "Ergebnis bestätigt: 3:1" in confirmed_overview.text
     result_button = re.search(
-        r'<button name="post_type" value="result"([^>]*)>Ergebnis</button>',
+        r'<button name="post_type" value="result"([^>]*)>Ergebnismeldung erzeugen</button>',
         confirmed_overview.text,
     )
     assert result_button and "disabled" not in result_button.group(1)
@@ -3169,7 +3250,7 @@ def test_real_provider_game_is_suppressed_and_can_be_restored(browser):
         assert game.overrides["automation_blocked"] is True
         assert db.query(AuditLog).filter_by(action="game.provider_suppressed").count() == 1
     overview = client.get("/games")
-    assert "Gelöschte Spiele" in overview.text
+    assert "Ausgeblendete Spiele" in overview.text
     result = client.post(
         f"/games/{game_id}/restore",
         data={"csrf_token": token},
