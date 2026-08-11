@@ -1,1 +1,51 @@
-{% extends 'base.html' %}{% block content %}<h1>Veröffentlichungsaufträge</h1><p>Eine Veröffentlichung erfolgt nur nach versionsgebundener Freigabe. In der Testversion wird Mock/Dry-Run verwendet.</p><table><tr><th>Typ</th><th>Plan</th><th>Freigabe</th><th>Status</th><th>Versuche</th><th>Plattform-ID</th><th></th></tr>{% for x in items %}<tr><td>{{x.kind}}</td><td>{{x.scheduled_at|berlin}}</td><td>{{x.approval_status}}</td><td>{{x.status.value}}</td><td>{{x.attempts}}</td><td>{{x.platform_id or '—'}}</td><td><form method="post" action="/publications/{{x.id}}/cancel"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Abbrechen</button></form></td></tr>{% endfor %}</table>{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<header class="section-heading">
+  <div>
+    <p class="eyebrow">Betrieb und Nachvollziehbarkeit</p>
+    <h1>Technische Veröffentlichungshistorie</h1>
+    <p>Diese Ansicht dient der Fehlersuche und zeigt einzelne Plattformaufträge. Die tägliche Planung und Freigabe erfolgt unter <a href="/posts">Beiträge &amp; Freigaben</a>.</p>
+  </div>
+</header>
+
+<div class="technical-history-list">
+{% for x in items %}
+  {% set row=presentation_by_job.get(x.id) %}
+  <article class="technical-history-item">
+    <header>
+      <div>
+        <strong>{% if row %}{{row.channel.label}} · {{row.target}}{% else %}Nicht mehr eingerichtetes Ziel{% endif %}</strong>
+        <span>{% if row %}{{row.content_label}}{% else %}{{x.kind}}{% endif %} · {{x.scheduled_at|berlin}}</span>
+      </div>
+      <span class="status-pill status-{% if row %}{{row.status_tone}}{% else %}neutral{% endif %}">{% if row %}{{row.status_label}}{% else %}{{job_status_labels.get(x.status, 'Status prüfen')}}{% endif %}</span>
+    </header>
+    {% if row and row.post %}<a class="button secondary" href="/posts/{{row.post.id}}">Beitrag öffnen</a>{% endif %}
+    <details>
+      <summary>Technische Auftragsdaten</summary>
+      <dl class="technical-facts">
+        <div><dt>Auftrags-ID</dt><dd>{{x.id}}</dd></div>
+        <div><dt>Kanaltyp</dt><dd>{{x.channel_type}}</dd></div>
+        <div><dt>Inhaltstyp</dt><dd>{{x.content_type or x.kind}}</dd></div>
+        <div><dt>Freigabe</dt><dd>{{approval_labels.get(x.approval_status, x.approval_status)}}</dd></div>
+        <div><dt>Versuche</dt><dd>{{x.attempts}}</dd></div>
+        <div><dt>Plattform-ID</dt><dd>{{x.platform_id or '—'}}</dd></div>
+        {% if x.error %}<div><dt>Letzter Fehler</dt><dd>{{x.error}}</dd></div>{% endif %}
+      </dl>
+    </details>
+    {% if x.status.value not in ['published','cancelled','skipped'] %}
+    <form method="post" action="/publications/{{x.id}}/cancel" onsubmit="return confirm('Diesen technischen Auftrag wirklich abbrechen?');">
+      <input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Auftrag abbrechen</button>
+    </form>
+    {% endif %}
+  </article>
+{% else %}
+  <div class="notice">Es sind noch keine technischen Veröffentlichungsaufträge vorhanden.</div>
+{% endfor %}
+</div>
+
+<nav class="pagination" aria-label="Seitennavigation">
+  {% if page > 1 %}<a class="button secondary" href="/publications?page={{page - 1}}">Neuere Aufträge</a>{% endif %}
+  <span>Seite {{page}}</span>
+  {% if has_next %}<a class="button secondary" href="/publications?page={{page + 1}}">Ältere Aufträge</a>{% endif %}
+</nav>
+{% endblock %}

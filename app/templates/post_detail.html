@@ -1,6 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 {% set is_manual=item.design_snapshot.get('source') == 'manual_upload' %}
+<p><a href="/posts">&larr; Zur Veröffentlichungsarbeit</a></p>
 <section class="review-hero">
   <div>
     <p class="eyebrow">Beitragsprüfung</p>
@@ -15,7 +16,7 @@
   <div class="review-status"><span class="badge">{{publication_summary}}</span><small>Beitragsversion {{item.version}}</small></div>
   <dl class="review-facts">
     <div><dt>Mannschaft</dt><dd>{{detail_team.display_name if detail_team else '–'}}</dd></div>
-    <div><dt>Instagram</dt><dd>{% if detail_page %}@{{detail_page.username}}{% else %}Keine Zielseite{% endif %}</dd></div>
+    <div><dt>Ziele</dt><dd>{% if publication_groups %}{{publication_groups|length}} eingerichtete{% else %}Noch kein Ziel{% endif %}</dd></div>
     <div><dt>Nächster Termin</dt><dd>{{next_publication|berlin if next_publication else 'Manuell festlegen'}}</dd></div>
     <div><dt>Freigabe</dt><dd>{{status_labels.get(item.status.value,item.status.value)}}</dd></div>
   </dl>
@@ -374,7 +375,32 @@
   </div>
 </details>
 {% endif %}
-<h2 id="publications">Geplante Veröffentlichungen</h2>
+<section id="publications" class="channel-publication-summary" aria-labelledby="channel-publication-title">
+  <h2 id="channel-publication-title">Veröffentlichungen und Nachrichten</h2>
+  <p>Hier siehst du nur die tatsächlich für diesen Beitrag eingeplanten Kanäle und Ziele.</p>
+  {% if publication_groups %}
+    {% for channel, rows in publication_groups %}
+    <article class="channel-publication-group">
+      <header>
+        <div><strong>{{channel.label}}</strong><span>{{channel.concrete_target}}</span></div>
+        <span class="status-pill status-{% if channel.ready %}success{% else %}warning{% endif %}">{{channel.connection_status_label}}</span>
+      </header>
+      <div class="channel-publication-items">
+        {% for row in rows %}
+        <div class="channel-publication-item">
+          <div><strong>{{row.content_label}}</strong><span>{{row.contribution_label}}</span></div>
+          <div><strong>{{row.event_at|berlin}}</strong><span>{{row.delivery_label}}</span></div>
+          <div><span class="status-pill status-{{row.status_tone}}">{{row.status_label}}</span>{% if row.status_detail %}<small>{{row.status_detail}}</small>{% endif %}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </article>
+    {% endfor %}
+  {% else %}
+  <div class="notice">Für diesen Beitrag ist noch kein konkreter Kanalauftrag angelegt.</div>
+  {% endif %}
+</section>
+<h2>Freigabe und Zeitplanung</h2>
 {% if can_approve %}<form id="approve-publication-jobs" method="post" action="/posts/{{item.id}}/approve">
   <input type="hidden" name="csrf_token" value="{{csrf}}">
   <input type="hidden" name="channel_selection_submitted" value="true">
@@ -392,9 +418,12 @@
   </fieldset>
 </form>{% endif %}
 {% if can_approve %}<div id="approval" class="approval-sticky"><div><strong>Bereit zur Veröffentlichung</strong><span>{{open_publication_count}} offen · {{published_publication_count}} bereits veröffentlicht</span></div><button form="approve-publication-jobs" class="approve">Ausgewählte Aufträge freigeben</button></div>{% endif %}
-<table><tr><th>Freigeben</th><th>Typ</th>{% if aggregate_bundle %}<th>Mannschaft</th>{% endif %}<th>Zeitpunkt</th><th>Status</th><th>Eingefrorene Versionen</th><th>Medienprüfung</th></tr>
+<details class="technical-review publication-job-details">
+<summary>Technische Aufträge und erweiterte Zeitplanung anzeigen</summary>
+<table><tr><th>Freigeben</th><th>Ziel</th><th>Typ</th>{% if aggregate_bundle %}<th>Mannschaft</th>{% endif %}<th>Zeitpunkt</th><th>Status</th><th>Eingefrorene Versionen</th><th>Medienprüfung</th></tr>
   {% for x in jobs %}<tr class="{% if late_jobs.get(x.id) %}late{% endif %}">
     <td>{% if can_approve and x.status.value!='published' %}<input form="approve-publication-jobs" type="checkbox" name="job_ids" value="{{x.id}}" checked>{% else %}—{% endif %}</td>
+    <td>{% set presented=publication_by_job.get(x.id) %}{% if presented %}<strong>{{presented.channel.label}}</strong><small>{{presented.target}}</small>{% else %}<span class="badge">Technisches Altziel</span>{% endif %}</td>
     <td>{% if x.kind=='feed' %}Feed{% elif x.kind=='story' %}Story{% elif x.kind=='carousel' %}Karussell{% else %}{{x.kind}}{% endif %}</td>
     {% if aggregate_bundle %}<td>{{job_teams[x.id].display_name}}</td>{% endif %}
     <td>
@@ -445,6 +474,7 @@
     <td>{{checks[x.id]}}</td>
   </tr>{% endfor %}
 </table>
+</details>
 {% if not can_approve %}
 <div class="notice">Dieser Beitrag wartet auf die Freigabe durch einen Redakteur oder Administrator.</div>
 {% endif %}

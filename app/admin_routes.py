@@ -130,6 +130,13 @@ from app.posts.media_versions import (
 )
 from app.posts.rules import sync_team_rule_sets
 from app.posts.service import PARTIAL_GENERATION_WARNING, logo_recompose_availability
+from app.publishing.presentation import (
+    APPROVAL_LABELS,
+    JOB_STATUS_LABELS,
+    group_views_by_channel,
+    operational_channels,
+    publication_views,
+)
 from app.publishing.schedule import (
     EDITABLE_JOB_STATUSES,
     PublicationScheduleError,
@@ -3545,142 +3552,177 @@ def posts(
     request: Request,
     days: int = Query(default=7, ge=1, le=90),
     media_format: str = Query(default="all", alias="format"),
+    channel: str = Query(default="all"),
+    status: str = Query(default="all"),
+    team: str = Query(default="all"),
+    content: str = Query(default="all"),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
     if media_format not in {"all", "feed", "story"}:
         raise HTTPException(422, "Ungültiger Formatfilter")
-    selected_kinds = {
-        "all": None,
-        "feed": ["feed", "carousel"],
-        "story": ["story"],
-    }[media_format]
+    if status not in {"all", "attention", "planned", "published"}:
+        raise HTTPException(422, "Ungültiger Statusfilter")
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
+    visible_teams = [
+        row
+        for row in db.scalars(
+            select(Team)
+            .where(Team.club_id == current.club_id, Team.archived_at.is_(None))
+            .order_by(Team.display_name)
+        )
+        if require_visible(db, current, row.id)
+    ]
+    visible_team_ids = {row.id for row in visible_teams}
+    if team != "all" and team not in visible_team_ids:
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    channels = operational_channels(db, current.club_id)
+    channel_ids = {row.connection_id for row in channels}
+    if channel != "all" and channel not in channel_ids:
+        raise HTTPException(422, "Ungültiger Kanalfilter")
+
     now = datetime.now(timezone.utc)
     published_since = now - timedelta(days=2)
     planned_until = now + timedelta(days=days)
 
-    published_query = select(PublicationJob).where(
-        PublicationJob.status == JobStatus.PUBLISHED,
-        PublicationJob.published_at.is_not(None),
-        PublicationJob.published_at >= published_since,
-        PublicationJob.published_at <= now,
-    )
-    overdue_query = select(PublicationJob).where(
-        PublicationJob.scheduled_at < now,
-        PublicationJob.status.notin_([JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED]),
-    )
-    planned_query = select(PublicationJob).where(
-        PublicationJob.scheduled_at >= now,
-        PublicationJob.scheduled_at <= planned_until,
-        PublicationJob.status.notin_([JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED]),
-    )
-    if selected_kinds:
-        published_query = published_query.where(PublicationJob.kind.in_(selected_kinds))
-        overdue_query = overdue_query.where(PublicationJob.kind.in_(selected_kinds))
-        planned_query = planned_query.where(PublicationJob.kind.in_(selected_kinds))
-
-    published_jobs = [
-        job
-        for job in db.scalars(published_query.order_by(PublicationJob.published_at.desc()))
-        if require_visible(db, current, job.team_id)
-    ]
-    overdue_jobs = [
-        job
-        for job in db.scalars(overdue_query.order_by(PublicationJob.scheduled_at.desc()))
-        if require_visible(db, current, job.team_id)
-    ]
-    planned_jobs = [
-        job
-        for job in db.scalars(planned_query.order_by(PublicationJob.scheduled_at))
-        if require_visible(db, current, job.team_id)
-    ]
-
-    calendar_jobs = [*published_jobs, *overdue_jobs, *planned_jobs]
-    post_ids = {job.post_id for job in calendar_jobs}
-    game_ids = {job.game_id for job in calendar_jobs if job.game_id}
-    page_ids = {job.instagram_page_id for job in calendar_jobs}
-    calendar_posts = (
-        {post.id: post for post in db.scalars(select(Post).where(Post.id.in_(post_ids)))}
-        if post_ids
-        else {}
-    )
-    games = (
-        {game.id: game for game in db.scalars(select(Game).where(Game.id.in_(game_ids)))}
-        if game_ids
-        else {}
-    )
-    pages = (
-        {
-            page.id: page
-            for page in db.scalars(select(InstagramPage).where(InstagramPage.id.in_(page_ids)))
-        }
-        if page_ids
-        else {}
-    )
-    calendar_job_ids = {job.id for job in calendar_jobs}
-    carousel_items = {job_id: [] for job_id in calendar_job_ids}
-    if calendar_job_ids:
-        for media in db.scalars(
-            select(PublicationMediaItem)
-            .where(PublicationMediaItem.publication_job_id.in_(calendar_job_ids))
-            .order_by(
-                PublicationMediaItem.publication_job_id,
-                PublicationMediaItem.position,
+    recent_published = []
+    relevant_open = []
+    if visible_team_ids:
+        recent_published = list(
+            db.scalars(
+                select(PublicationJob).where(
+                    PublicationJob.club_id == current.club_id,
+                    PublicationJob.team_id.in_(visible_team_ids),
+                    PublicationJob.status == JobStatus.PUBLISHED,
+                    PublicationJob.published_at.between(published_since, now),
+                )
             )
-        ):
-            carousel_items[media.publication_job_id].append(media)
-
-    items = [
-        p
-        for p in db.scalars(select(Post).order_by(Post.updated_at.desc()))
-        if require_visible(db, current, p.team_id)
-    ]
-    teams = {x.id: x for x in db.scalars(select(Team))}
-    attention_statuses = {
-        JobStatus.DRAFT,
-        JobStatus.UNAPPROVED,
-        JobStatus.FAILED,
-        JobStatus.UNCERTAIN,
-    }
-    attention_count = len(overdue_jobs) + sum(
-        job.approval_status != "approved"
-        or job.status in attention_statuses
-        or job.stale_time
-        or bool(job.error)
-        for job in planned_jobs
+        )
+        relevant_open = list(
+            db.scalars(
+                select(PublicationJob).where(
+                    PublicationJob.club_id == current.club_id,
+                    PublicationJob.team_id.in_(visible_team_ids),
+                    PublicationJob.scheduled_at >= now - timedelta(days=90),
+                    PublicationJob.scheduled_at <= planned_until,
+                    PublicationJob.status.notin_(
+                        [JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED]
+                    ),
+                )
+            )
+        )
+    jobs = list({row.id: row for row in [*recent_published, *relevant_open]}.values())
+    views = publication_views(
+        db,
+        jobs,
+        club_id=current.club_id,
+        channels=channels,
+        now=now,
     )
+
+    # Keep old format links valid while the new content filter offers the
+    # more precise cross-channel vocabulary.
+    if content == "all" and media_format != "all":
+        content = media_format
+    if content not in {"all", "feed", "carousel", "story", "message"}:
+        raise HTTPException(422, "Ungültiger Inhaltsfilter")
+
+    def matches_content(row):
+        if content == "all":
+            return True
+        if content == "feed":
+            return (
+                row.job.kind in {"feed", "carousel"}
+                and row.channel.channel_type != "whatsapp"
+            )
+        if content == "message":
+            return row.job.delivery_action == "send"
+        return row.job.kind == content
+
+    candidate_views = [
+        row
+        for row in views
+        if (team == "all" or row.job.team_id == team)
+        and (channel == "all" or row.channel.connection_id == channel)
+    ]
+    content_options = {
+        "feed": any(
+            row.job.kind in {"feed", "carousel"}
+            and row.channel.channel_type != "whatsapp"
+            for row in candidate_views
+        ),
+        "carousel": any(row.job.kind == "carousel" for row in candidate_views),
+        "story": any(row.job.kind == "story" for row in candidate_views),
+        "message": any(row.job.delivery_action == "send" for row in candidate_views),
+    }
+    base_views = [row for row in candidate_views if matches_content(row)]
+    attention_rows = sorted(
+        (
+            row
+            for row in base_views
+            if row.attention and row.job.status != JobStatus.PUBLISHED
+        ),
+        key=lambda row: row.scheduled_at,
+    )
+    planned_rows = sorted(
+        (
+            row
+            for row in base_views
+            if row.job.status
+            not in {JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED}
+            and row.scheduled_at >= now
+            and not row.attention
+        ),
+        key=lambda row: row.scheduled_at,
+    )
+    published_rows = sorted(
+        (row for row in base_views if row.job.status == JobStatus.PUBLISHED),
+        key=lambda row: row.event_at,
+        reverse=True,
+    )
+    if status == "attention":
+        planned_rows = []
+        published_rows = []
+    elif status == "planned":
+        attention_rows = []
+        published_rows = []
+    elif status == "published":
+        attention_rows = []
+        planned_rows = []
+
     return render(
         request,
         "posts.html",
         current,
-        items=items,
-        teams=teams,
-        published_jobs=published_jobs,
-        overdue_jobs=overdue_jobs,
-        planned_jobs=planned_jobs,
-        calendar_posts=calendar_posts,
-        games=games,
-        pages=pages,
-        carousel_items=carousel_items,
+        attention_rows=attention_rows,
+        planned_rows=planned_rows,
+        published_rows=published_rows,
+        visible_teams=visible_teams,
+        channels=channels,
         future_days=days,
         publication_format=media_format,
+        selected_channel=channel,
+        selected_status=status,
+        selected_team=team,
+        selected_content=content,
+        content_options=content_options,
         published_since=published_since,
         planned_until=planned_until,
-        attention_count=attention_count,
-        format_labels={"feed": "Feed", "story": "Story", "carousel": "Karussell"},
-        status_labels={
-            JobStatus.DRAFT: "Entwurf",
-            JobStatus.UNAPPROVED: "Nicht freigegeben",
-            JobStatus.APPROVED: "Freigegeben",
-            JobStatus.SCHEDULED: "Geplant",
-            JobStatus.WAITING: "Wartet",
-            JobStatus.PUBLISHING: "Wird veröffentlicht",
-            JobStatus.PUBLISHED: "Veröffentlicht",
-            JobStatus.RETRY: "Wiederholung geplant",
-            JobStatus.FAILED: "Fehlgeschlagen",
-            JobStatus.CANCELLED: "Abgebrochen",
-            JobStatus.SKIPPED: "Übersprungen",
-            JobStatus.UNCERTAIN: "Manuell prüfen",
+        summary={
+            "attention": len([row for row in base_views if row.attention]),
+            "planned": len(
+                [
+                    row
+                    for row in base_views
+                    if row.job.status
+                    not in {JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED}
+                    and row.scheduled_at >= now
+                ]
+            ),
+            "published": len(
+                [row for row in base_views if row.job.status == JobStatus.PUBLISHED]
+            ),
         },
         title="Beiträge und Freigaben",
     )
@@ -3821,6 +3863,15 @@ def post_detail(
         bundle_posts = [item]
         jobs = own_jobs
         job_posts = {job.id: item for job in jobs}
+    detail_channels = operational_channels(db, item.club_id)
+    detail_publications = publication_views(
+        db,
+        jobs,
+        club_id=item.club_id,
+        channels=detail_channels,
+    )
+    publication_groups = group_views_by_channel(detail_publications)
+    publication_by_job = {row.job.id: row for row in detail_publications}
     pages = db.scalars(
         select(InstagramPage).where(
             InstagramPage.club_id == item.club_id,
@@ -4309,6 +4360,8 @@ def post_detail(
         open_publication_count=open_count,
         published_publication_count=published_count,
         planned_channel_connections=planned_connections,
+        publication_groups=publication_groups,
+        publication_by_job=publication_by_job,
         channel_previews=channel_previews,
         now=now,
         title="Beitrag prüfen",
@@ -5304,14 +5357,60 @@ def delete_post(
 
 
 @router.get("/publications", response_class=HTMLResponse)
-def publications(request: Request, current=Depends(current_user), db: Session = Depends(get_db)):
-    items = [
-        j
-        for j in db.scalars(select(PublicationJob).order_by(PublicationJob.scheduled_at.desc()))
-        if require_visible(db, current, j.team_id)
+def publications(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
+    visible_team_ids = [
+        team_id
+        for team_id in db.scalars(
+            select(Team.id).where(
+                Team.club_id == current.club_id,
+                Team.archived_at.is_(None),
+            )
+        )
+        if require_visible(db, current, team_id)
     ]
+    page_size = 100
+    items = []
+    has_next = False
+    if visible_team_ids:
+        rows = list(
+            db.scalars(
+                select(PublicationJob)
+                .where(
+                    PublicationJob.club_id == current.club_id,
+                    PublicationJob.team_id.in_(visible_team_ids),
+                )
+                .order_by(PublicationJob.scheduled_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size + 1)
+            )
+        )
+        has_next = len(rows) > page_size
+        items = rows[:page_size]
+    channels = operational_channels(db, current.club_id)
+    presented = publication_views(
+        db,
+        items,
+        club_id=current.club_id,
+        channels=channels,
+    )
     return render(
-        request, "publications.html", current, items=items, title="Veröffentlichungsaufträge"
+        request,
+        "publications.html",
+        current,
+        items=items,
+        presentation_by_job={row.job.id: row for row in presented},
+        job_status_labels=JOB_STATUS_LABELS,
+        approval_labels=APPROVAL_LABELS,
+        page=page,
+        has_next=has_next,
+        title="Technische Veröffentlichungshistorie",
     )
 
 
@@ -5617,14 +5716,25 @@ async def update_opponent_logo(
 
 @router.get("/games", response_class=HTMLResponse)
 def games(request: Request, current=Depends(current_user), db: Session = Depends(get_db)):
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
     teams = [
         t
-        for t in db.scalars(select(Team).where(Team.archived_at.is_(None)))
+        for t in db.scalars(
+            select(Team).where(
+                Team.club_id == current.club_id,
+                Team.archived_at.is_(None),
+            )
+        )
         if require_visible(db, current, t.id)
     ]
     visible_games = [
         g
-        for g in db.scalars(select(Game).order_by(Game.kickoff.desc()))
+        for g in db.scalars(
+            select(Game)
+            .where(Game.club_id == current.club_id)
+            .order_by(Game.kickoff.desc())
+        )
         if require_visible(db, current, g.team_id)
     ]
     items = [
@@ -5650,6 +5760,73 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
         if game.team_id in team_map
     }
     game_groups = dashboard_game_groups(db, items, team_map)
+    game_ids = {game.id for game in items}
+    game_posts = list(
+        db.scalars(
+            select(Post).where(
+                Post.club_id == current.club_id,
+                Post.game_id.in_(game_ids),
+            )
+        )
+    ) if game_ids else []
+    post_ids = {post.id for post in game_posts}
+    publication_jobs = list(
+        db.scalars(
+            select(PublicationJob).where(
+                PublicationJob.club_id == current.club_id,
+                PublicationJob.post_id.in_(post_ids),
+            )
+        )
+    ) if post_ids else []
+    channel_rows = operational_channels(db, current.club_id)
+    publication_rows = publication_views(
+        db,
+        publication_jobs,
+        club_id=current.club_id,
+        channels=channel_rows,
+    )
+    views_by_game: dict[str, list] = {game_id: [] for game_id in game_ids}
+    for row in publication_rows:
+        if row.job.game_id in views_by_game:
+            views_by_game[row.job.game_id].append(row)
+    posts_by_game: dict[str, list[Post]] = {game_id: [] for game_id in game_ids}
+    for post in game_posts:
+        if post.game_id in posts_by_game:
+            posts_by_game[post.game_id].append(post)
+    for group in game_groups:
+        rows = [row for game in group["games"] for row in views_by_game.get(game.id, [])]
+        posts_for_group = [
+            post for game in group["games"] for post in posts_by_game.get(game.id, [])
+        ]
+        group["publication_rows"] = sorted(rows, key=lambda row: row.scheduled_at)
+        group["publication_targets"] = list(
+            dict.fromkeys(
+                (row.channel.label, row.target) for row in group["publication_rows"]
+            )
+        )
+        group["contribution_count"] = len({post.id for post in posts_for_group})
+        group["attention"] = any(row.attention for row in rows)
+        group["next_publication"] = min(
+            (
+                row
+                for row in rows
+                if row.job.status
+                not in {JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED}
+            ),
+            key=lambda row: row.scheduled_at,
+            default=None,
+        )
+        group["detail_post"] = next(
+            (row.post for row in rows if row.post),
+            posts_for_group[0] if posts_for_group else None,
+        )
+    day_groups: dict[object, list[dict]] = {}
+    for group in game_groups:
+        kickoff = group["games"][0].kickoff
+        if kickoff.tzinfo is None:
+            kickoff = kickoff.replace(tzinfo=timezone.utc)
+        local_date = kickoff.astimezone(ZoneInfo(settings.timezone)).date()
+        day_groups.setdefault(local_date, []).append(group)
     return render(
         request,
         "games.html",
@@ -5659,6 +5836,8 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
         logo_map=logo_map,
         opponents=opponents,
         game_groups=game_groups,
+        day_groups=list(day_groups.items()),
+        views_by_game=views_by_game,
         suppressed_items=suppressed_items,
         title="Spiele und Testdaten",
     )

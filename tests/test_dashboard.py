@@ -607,11 +607,11 @@ def test_club_dashboard_shows_usage_and_next_seven_days_in_plain_language(browse
     assert "1,50 / 1,00 GB" in response.text
     assert "0 / 20" in response.text
     assert "Geplante Veröffentlichungen" in response.text
-    assert "Spielankündigung" in response.text
-    assert "Freigegeben" in response.text
-    assert "Nicht freigegeben" in response.text
-    assert "Geplant" in response.text
-    assert f'href="/posts/{post_id}"' in response.text
+    assert "Nächste Veröffentlichung" in response.text
+    assert "Benötigen Aufmerksamkeit" in response.text
+    assert "Eingerichtete Kanäle" in response.text
+    assert 'href="/posts"' in response.text
+    assert f'href="/posts/{post_id}"' not in response.text
     assert "Aktuelle Beiträge" not in response.text
 
 
@@ -1110,11 +1110,11 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
     default_page = client.get("/posts")
     assert default_page.status_code == 200
     assert "Zentraler Veröffentlichungsplan" in default_page.text
-    assert "In den letzten 2 Tagen veröffentlicht" in default_page.text
-    assert "Geplant für die nächsten 7 Tage" in default_page.text
-    assert "Überfällige Veröffentlichungen" in default_page.text
+    assert "Zuletzt veröffentlicht" in default_page.text
+    assert "Als Nächstes geplant" in default_page.text
+    assert "Benötigt deine Aufmerksamkeit" in default_page.text
     assert "Überfälliger manueller Beitrag" in default_page.text
-    assert "Überfällig – noch nicht veröffentlicht" in default_page.text
+    assert "Überfällig" in default_page.text
     assert "Jüngster veröffentlichter Spielbeitrag" in default_page.text
     assert "Geplante Story im Standardzeitraum" in default_page.text
     assert "Feed benötigt noch Freigabe" in default_page.text
@@ -1122,11 +1122,12 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
     assert "Abgebrochener Zukunftsbeitrag" not in default_page.text
     assert berlin_datetime(old_time) not in default_page.text
     assert berlin_datetime(carousel_time) not in default_page.text
-    assert "Freigabe: unapproved" in default_page.text
+    assert "Nicht freigegeben" in default_page.text
+    assert "Freigabe: unapproved" not in default_page.text
 
     extended_page = client.get("/posts?days=14")
     assert extended_page.status_code == 200
-    assert "Geplant für die nächsten 14 Tage" in extended_page.text
+    assert "nächsten 14 Tagen" in extended_page.text
     assert berlin_datetime(carousel_time) in extended_page.text
     assert "Karussell" in extended_page.text
     assert "3 Bilder" in extended_page.text

@@ -1,166 +1,135 @@
 {% extends 'base.html' %}
 
-{% macro publication_row(job, published=false, overdue=false) %}
-  {% set post = calendar_posts.get(job.post_id) %}
-  {% set game = games.get(job.game_id) if job.game_id else none %}
-  {% set media = carousel_items.get(job.id, []) %}
-  <tr class="publication-row{% if overdue or job.approval_status != 'approved' or job.error or job.stale_time %} publication-attention{% endif %}" data-publication-kind="{{ job.kind }}">
-    <td class="publication-preview-cell">
-      {% if post and job.kind == 'carousel' and media %}
-        <div class="publication-carousel-preview" aria-label="Karussell mit {{ media|length }} Bildern">
-          {% for image in media[:3] %}
-            <img src="/posts/{{ post.id }}/media/{{ job.id }}/items/{{ image.id }}" alt="Karussellbild {{ image.position }}" width="62" height="92" loading="lazy">
-          {% endfor %}
-        </div>
-      {% elif post and job.kind in ['feed', 'story'] %}
-        <img class="publication-preview" src="/posts/{{ post.id }}/media/{{ job.id }}" alt="{{ format_labels.get(job.kind, job.kind) }}-Vorschau" width="92" height="116" loading="lazy">
-      {% else %}
-        <span class="publication-no-preview">Keine Vorschau</span>
-      {% endif %}
-    </td>
-    <td>
-      <strong>{{ (job.published_at if published else job.scheduled_at)|berlin }}</strong>
-      {% if published and job.scheduled_at %}<small>geplant: {{ job.scheduled_at|berlin }}</small>{% endif %}
-    </td>
-    <td>
-      <strong>{{ teams[job.team_id].display_name }}</strong>
-      {% if pages.get(job.instagram_page_id) %}<small>@{{ pages[job.instagram_page_id].username }}</small>{% endif %}
-    </td>
-    <td>
-      <strong>{{ format_labels.get(job.kind, job.kind) }}</strong>
-      {% if job.kind == 'carousel' %}<small>{{ media|length }} Bilder</small>{% endif %}
-    </td>
-    <td class="publication-content">
-      {% if game %}
-        <strong>{{ game.home_team }} – {{ game.away_team }}</strong>
-        {% if game.competition %}<small>{{ game.competition }}</small>{% endif %}
-      {% else %}
-        <strong>Manueller Beitrag</strong>
-      {% endif %}
-      {% if post and post.text %}<small>{{ post.text|truncate(120) }}</small>{% endif %}
-    </td>
-    <td>
-      <span class="badge publication-status-{{ job.status.value }}">{{ status_labels.get(job.status, job.status.value) }}</span>
-      {% if overdue %}<small class="publication-warning">Überfällig – noch nicht veröffentlicht</small>{% endif %}
-      {% if job.approval_status != 'approved' %}<small class="publication-warning">Freigabe: {{ job.approval_status }}</small>{% endif %}
-      {% if job.stale_time %}<small class="publication-warning">Zeitpunkt muss geprüft werden</small>{% endif %}
-      {% if job.error %}<small class="publication-warning">{{ job.error|truncate(100) }}</small>{% endif %}
-    </td>
-    <td class="publication-actions">
-      {% if post %}<a class="button" href="/posts/{{ post.id }}">Beitrag öffnen</a>{% endif %}
-      {% if published and job.permalink %}<a href="{{ job.permalink }}" target="_blank" rel="noopener">Instagram öffnen</a>{% endif %}
-    </td>
-  </tr>
+{% macro publication_row(row, published=false) %}
+<article class="publication-work-row publication-tone-{{row.status_tone}}" data-publication-kind="{{row.job.kind}}" data-channel="{{row.channel.channel_type}}">
+  <div class="publication-work-preview">
+    {% if row.post and row.job.kind == 'carousel' and row.media_items %}
+      <div class="publication-carousel-preview" aria-label="Karussell mit {{row.media_items|length}} Bildern">
+      {% for image in row.media_items[:3] %}
+        <img src="/posts/{{row.post.id}}/media/{{row.job.id}}/items/{{image.id}}" alt="Karussellbild {{image.position}}" width="62" height="92" loading="lazy">
+      {% endfor %}
+      </div>
+    {% elif row.post and row.job.kind in ['feed','story'] %}
+      <img class="publication-preview" src="/posts/{{row.post.id}}/media/{{row.job.id}}" alt="{{row.content_label}}-Vorschau" width="92" height="116" loading="lazy">
+    {% else %}<span class="publication-no-preview">Keine Vorschau</span>{% endif %}
+  </div>
+  <div class="publication-work-what">
+    <span class="eyebrow">Was</span>
+    <strong>{{row.contribution_label}} · {{row.content_label}}</strong>
+    <span>{{row.title}}</span>
+    {% if row.subtitle %}<small>{{row.subtitle|truncate(130)}}</small>{% endif %}
+  </div>
+  <div class="publication-work-when">
+    <span class="eyebrow">Wann</span>
+    <strong>{{row.event_at|berlin}}</strong>
+    {% if published and row.job.scheduled_at %}<small>Geplant: {{row.job.scheduled_at|berlin}}</small>{% endif %}
+  </div>
+  <div class="publication-work-where">
+    <span class="eyebrow">Wo</span>
+    <strong>{{row.channel.label}}</strong>
+    <span>{{row.target}}</span>
+    {% if row.team %}<small>{{row.team.display_name}}</small>{% endif %}
+  </div>
+  <div class="publication-work-status">
+    <span class="badge status-{{row.status_tone}}">{{row.status_label}}</span>
+    {% if row.status_detail %}<small>{{row.status_detail}}</small>{% endif %}
+  </div>
+  <div class="publication-work-actions">
+    {% if row.post %}<a class="button" href="/posts/{{row.post.id}}">{{row.action_label}}</a>{% endif %}
+    {% if published and row.job.permalink %}<a href="{{row.job.permalink}}" target="_blank" rel="noopener">Auf {{row.channel.label}} öffnen</a>{% endif %}
+  </div>
+</article>
 {% endmacro %}
 
 {% block content %}
-<div class="publication-heading">
+<header class="publication-heading">
   <div>
+    <p class="eyebrow">Veröffentlichungsarbeit</p>
     <h1>Beiträge und Freigaben</h1>
-    <p>Zentraler Veröffentlichungsplan für Feed-Beiträge, Karussells und Storys.</p>
+    <p>Hier siehst du, was als Nächstes über welche eingerichteten Kanäle veröffentlicht oder versendet wird.</p>
   </div>
   <a class="button" href="/posts/manual/new">Beitrag manuell erstellen</a>
-</div>
+</header>
 
-<section class="publication-calendar">
+<section class="publication-workspace" aria-labelledby="publishing-plan-title">
   <div class="publication-calendar-toolbar">
     <div>
-      <h2>Veröffentlichungsplan</h2>
-      <small>Rückblick: letzte 2 Tage · überfällige Aufträge · Vorschau: nächste {{ future_days }} Tage</small>
+      <h2 id="publishing-plan-title">Zentraler Veröffentlichungsplan</h2>
+      <small>Rückblick: letzte 2 Tage · Vorschau: nächste {{future_days}} Tage</small>
     </div>
-    <form method="get" action="/posts" class="publication-range-form">
-      <label for="publication-days">Vorschauzeitraum</label>
-      <div>
-        <input id="publication-days" type="number" name="days" value="{{ future_days }}" min="1" max="90" required>
-        <span>Tage</span>
-        <label class="publication-format-label" for="publication-format">Format</label>
-        <select id="publication-format" name="format">
-          <option value="all" {% if publication_format == 'all' %}selected{% endif %}>Alle</option>
-          <option value="feed" {% if publication_format == 'feed' %}selected{% endif %}>Feed &amp; Karussell</option>
-          <option value="story" {% if publication_format == 'story' %}selected{% endif %}>Nur Storys</option>
-        </select>
-        <button type="submit">Anzeigen</button>
-      </div>
-    </form>
   </div>
 
-  <div class="cards publication-summary">
-    <article>
-      <strong>{{ published_jobs|length }}</strong>
-      <span>veröffentlicht in 2 Tagen</span>
-    </article>
-    <article>
-      <strong>{{ planned_jobs|length }}</strong>
-      <span>geplant in {{ future_days }} Tagen</span>
-    </article>
-    <article class="{% if attention_count %}publication-summary-warning{% endif %}">
-      <strong>{{ attention_count }}</strong>
-      <span>benötigen Aufmerksamkeit</span>
-    </article>
-  </div>
+  <form method="get" action="/posts" class="publication-filter-panel">
+    <label>Zeitraum
+      <span><input type="number" name="days" value="{{future_days}}" min="1" max="90" required> Tage</span>
+    </label>
+    <label>Kanal
+      <select name="channel">
+        <option value="all">Alle eingerichteten Kanäle</option>
+        {% for item in channels %}<option value="{{item.connection_id}}" {% if selected_channel==item.connection_id %}selected{% endif %}>{{item.label}} · {{item.concrete_target}}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Status
+      <select name="status">
+        <option value="all" {% if selected_status=='all' %}selected{% endif %}>Alle relevanten Status</option>
+        <option value="attention" {% if selected_status=='attention' %}selected{% endif %}>Benötigt Aufmerksamkeit</option>
+        <option value="planned" {% if selected_status=='planned' %}selected{% endif %}>Geplant</option>
+        <option value="published" {% if selected_status=='published' %}selected{% endif %}>Veröffentlicht</option>
+      </select>
+    </label>
+    <label>Mannschaft
+      <select name="team">
+        <option value="all">Alle sichtbaren Mannschaften</option>
+        {% for item in visible_teams %}<option value="{{item.id}}" {% if selected_team==item.id %}selected{% endif %}>{{item.display_name}}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Inhalt
+      <select name="content">
+        <option value="all" {% if selected_content=='all' %}selected{% endif %}>Alle Inhalte</option>
+        {% if content_options.feed %}<option value="feed" {% if selected_content=='feed' %}selected{% endif %}>Feed-Beiträge</option>{% endif %}
+        {% if content_options.carousel %}<option value="carousel" {% if selected_content=='carousel' %}selected{% endif %}>Karussells</option>{% endif %}
+        {% if content_options.story %}<option value="story" {% if selected_content=='story' %}selected{% endif %}>Storys</option>{% endif %}
+        {% if content_options.message %}<option value="message" {% if selected_content=='message' %}selected{% endif %}>Nachrichten</option>{% endif %}
+      </select>
+    </label>
+    <button type="submit">Filter anwenden</button>
+    <a class="button secondary" href="/posts">Zurücksetzen</a>
+  </form>
 
-  <h3>In den letzten 2 Tagen veröffentlicht</h3>
-  <div class="publication-table-wrap">
-    <table class="publication-table">
-      <thead><tr><th>Vorschau</th><th>Veröffentlicht</th><th>Mannschaft / Seite</th><th>Format</th><th>Inhalt</th><th>Status</th><th></th></tr></thead>
-      <tbody>
-        {% for job in published_jobs %}
-          {{ publication_row(job, true) }}
-        {% else %}
-          <tr><td colspan="7" class="publication-empty">In den letzten 2 Tagen wurden keine Beiträge veröffentlicht.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+  <nav class="cards publication-summary" aria-label="Schnellfilter">
+    <a href="/posts?days={{future_days}}&status=attention&channel={{selected_channel}}&team={{selected_team}}&content={{selected_content}}" class="{% if summary.attention %}publication-summary-warning{% endif %}"><strong>{{summary.attention}}</strong><span>benötigen Aufmerksamkeit</span></a>
+    <a href="/posts?days={{future_days}}&status=planned&channel={{selected_channel}}&team={{selected_team}}&content={{selected_content}}"><strong>{{summary.planned}}</strong><span>als Nächstes geplant</span></a>
+    <a href="/posts?days={{future_days}}&status=published&channel={{selected_channel}}&team={{selected_team}}&content={{selected_content}}"><strong>{{summary.published}}</strong><span>zuletzt veröffentlicht</span></a>
+  </nav>
 
-  {% if overdue_jobs %}
-    <h3>Überfällige Veröffentlichungen</h3>
-    <p class="publication-section-hint">Diese Aufträge waren bereits fällig, wurden aber noch nicht abgeschlossen. Bitte Freigabe, Instagram-Verbindung und angezeigte Hinweise prüfen.</p>
-    <div class="publication-table-wrap">
-      <table class="publication-table">
-        <thead><tr><th>Vorschau</th><th>Geplant</th><th>Mannschaft / Seite</th><th>Format</th><th>Inhalt</th><th>Status</th><th></th></tr></thead>
-        <tbody>
-          {% for job in overdue_jobs %}
-            {{ publication_row(job, false, true) }}
-          {% endfor %}
-        </tbody>
-      </table>
+  {% if selected_status in ['all','attention'] %}
+  <section class="publication-section publication-section-attention">
+    <h2>Benötigt deine Aufmerksamkeit</h2>
+    <p>Fehlende Freigaben, überfällige Termine und gestörte oder pausierte Ziele erscheinen hier zuerst.</p>
+    <div class="publication-work-list">
+      {% for row in attention_rows %}{{publication_row(row)}}{% else %}<p class="publication-empty">Aktuell ist keine Aktion erforderlich.</p>{% endfor %}
     </div>
+  </section>
   {% endif %}
 
-  <h3>Geplant für die nächsten {{ future_days }} Tage</h3>
-  <div class="publication-table-wrap">
-    <table class="publication-table">
-      <thead><tr><th>Vorschau</th><th>Geplant</th><th>Mannschaft / Seite</th><th>Format</th><th>Inhalt</th><th>Status</th><th></th></tr></thead>
-      <tbody>
-        {% for job in planned_jobs %}
-          {{ publication_row(job, false) }}
-        {% else %}
-          <tr><td colspan="7" class="publication-empty">Für diesen Zeitraum sind keine Veröffentlichungen geplant.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
+  {% if selected_status in ['all','planned'] %}
+  <section class="publication-section">
+    <h2>Als Nächstes geplant</h2>
+    <p>Freigegebene Veröffentlichungen und Nachrichten in den nächsten {{future_days}} Tagen.</p>
+    <div class="publication-work-list">
+      {% for row in planned_rows %}{{publication_row(row)}}{% else %}<p class="publication-empty">Für diesen Zeitraum ist nichts ausführbar geplant.</p>{% endfor %}
+    </div>
+  </section>
+  {% endif %}
 
-<section>
-  <h2>Alle Beiträge</h2>
-  <table>
-    <thead><tr><th>Mannschaft</th><th>Typ</th><th>Status</th><th>Version</th><th>Bearbeitet</th><th></th></tr></thead>
-    <tbody>
-      {% for x in items %}
-        <tr>
-          <td>{{ teams[x.team_id].display_name }}</td>
-          <td>{{ 'manuell' if x.post_type == 'manual' else x.post_type }}</td>
-          <td><span class="badge">{{ x.status.value }}</span></td>
-          <td>{{ x.version }}</td>
-          <td>{{ x.updated_at|berlin }}</td>
-          <td><a class="button" href="/posts/{{ x.id }}">Prüfen</a></td>
-        </tr>
-      {% else %}
-        <tr><td colspan="6">Noch keine Beiträge vorhanden.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  {% if selected_status in ['all','published'] %}
+  <section class="publication-section">
+    <h2>Zuletzt veröffentlicht</h2>
+    <p>In den letzten 2 Tagen veröffentlicht oder versendet.</p>
+    <div class="publication-work-list">
+      {% for row in published_rows %}{{publication_row(row, true)}}{% else %}<p class="publication-empty">In den letzten 2 Tagen wurden keine Inhalte abgeschlossen.</p>{% endfor %}
+    </div>
+  </section>
+  {% endif %}
 </section>
 {% endblock %}
