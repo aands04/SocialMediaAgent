@@ -162,7 +162,7 @@ class PlanProfile(Base, Timestamped):
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     max_teams: Mapped[int] = mapped_column(Integer, default=1)
-    max_storage_bytes: Mapped[int] = mapped_column(BigInteger, default=1_073_741_824)
+    max_storage_bytes: Mapped[int] = mapped_column(BigInteger, default=1_000_000_000)
     monthly_ai_texts: Mapped[int] = mapped_column(Integer, default=20)
     monthly_ai_images: Mapped[int] = mapped_column(Integer, default=50)
     max_fonts: Mapped[int] = mapped_column(Integer, default=2)

@@ -529,6 +529,8 @@ def test_club_dashboard_shows_usage_and_next_seven_days_in_plain_language(browse
     client, factory = browser
     scheduled_at = datetime.now(timezone.utc) + timedelta(days=1)
     with factory() as db:
+        profile = db.query(PlanProfile).one()
+        profile.max_storage_bytes = 1_000_000_000_000
         page = InstagramPage(
             internal_name="dashboard-overview",
             display_name="Dashboard Übersicht",
@@ -600,9 +602,23 @@ def test_club_dashboard_shows_usage_and_next_seven_days_in_plain_language(browse
                     bucket="dashboard",
                     object_key="clubs/dashboard/generated/feed",
                     category="generated/feed",
-                    size_bytes=1_610_612_736,
+                    size_bytes=10_000_000,
                     checksum="a" * 64,
                     mime_type="image/png",
+                ),
+                MediaAsset(
+                    team_id=team.id,
+                    storage_kind="upload",
+                    relative_path=(
+                        f"clubs/{team.club_id}/teams/{team.id}/players/legacy.jpg"
+                    ),
+                    filename="legacy.jpg",
+                    mime_type="image/jpeg",
+                    size=80_000_000,
+                    width=1080,
+                    height=1350,
+                    checksum="b" * 64,
+                    mtime=datetime.now(timezone.utc),
                 ),
             ]
         )
@@ -620,7 +636,7 @@ def test_club_dashboard_shows_usage_and_next_seven_days_in_plain_language(browse
     )
     assert "KI-Textgenerierungen" in response.text
     assert "KI-Bilder" in response.text
-    assert "1,50 / 1,00 GB" in response.text
+    assert "0,09 / 1.000 GB" in response.text
     assert "0 / 20" in response.text
     assert "Geplante Veröffentlichungen" in response.text
     assert "Nächste Veröffentlichung" in response.text

@@ -7,9 +7,9 @@
     <p>Verwalte die Bilder deines Vereins und bestimme, welche Fotos automatisch für Beiträge verwendet werden dürfen.</p>
   </div>
   <div class="storage-summary" aria-label="Speicherverbrauch">
-    <strong>{{ '%.2f'|format(storage_used_gb) }} GB{% if storage_limit_gb %} von {{ '%.2f'|format(storage_limit_gb) }} GB{% endif %}</strong>
+    <strong>{{ storage_used_display }} GB{% if storage_has_limit %} von {{ storage_limit_display }} GB{% endif %}</strong>
     <span>belegter Medienspeicher{% if storage_percent %} · {{ storage_percent }} %{% endif %}</span>
-    {% if storage_limit_gb %}<progress value="{{ storage_percent }}" max="100" aria-label="{{ storage_percent }} Prozent des Medienspeichers belegt"></progress>{% endif %}
+    {% if storage_has_limit %}<progress value="{{ storage_percent }}" max="100" aria-label="{{ storage_percent }} Prozent des Medienspeichers belegt"></progress>{% endif %}
     {% if storage_percent >= 90 %}<small class="storage-warning">Der Medienspeicher ist fast ausgeschöpft. Neue Uploads können bald blockiert werden.</small>{% endif %}
   </div>
 </header>

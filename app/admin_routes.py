@@ -165,6 +165,7 @@ from app.publishing.schedule import (
 from app.storage.service import (
     StorageQuotaError,
     commit_local_media_upload,
+    format_storage_gb,
     mark_local_media_deleted,
     move_local_media_storage_object,
     reserve_storage,
@@ -1582,8 +1583,11 @@ def media(
         total_media_count=len(all_items),
         reservation_games=reservation_games,
         category_labels=MEDIA_CATEGORY_LABELS,
-        storage_used_gb=float(storage_bytes or 0) / (1024**3),
-        storage_limit_gb=float(storage_limit_bytes or 0) / (1024**3),
+        storage_used_display=format_storage_gb(storage_bytes, fixed_decimals=True),
+        storage_limit_display=format_storage_gb(
+            storage_limit_bytes, fixed_decimals=False
+        ),
+        storage_has_limit=bool(storage_limit_bytes),
         storage_percent=storage_percent,
         title="Medienbibliothek",
     )

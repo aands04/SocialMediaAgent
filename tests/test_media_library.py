@@ -179,6 +179,22 @@ def test_safe_default_media_policies_are_contribution_specific(db):
     assert SAFE_DEFAULT_POLICIES["result"] == ["match_photo"]
 
 
+def test_media_library_uses_decimal_gb_and_counts_legacy_assets(browser):
+    client, factory = browser
+    with factory() as db:
+        team, _games = _graph(db)
+        profile = db.query(PlanProfile).one()
+        profile.max_storage_bytes = 1_000_000_000_000
+        asset = _asset(db, team, "legacy-storage", "match_photo")
+        asset.size = 90_000_000
+        db.commit()
+        team_id = team.id
+
+    response = client.get(f"/media?team_id={team_id}")
+    assert response.status_code == 200
+    assert "0,09 GB von 1.000 GB" in response.text
+
+
 def test_automatic_selection_uses_only_policy_categories_and_never_reuses(db):
     team, games = _graph(db)
     match = _asset(db, team, "match", "match_photo")
