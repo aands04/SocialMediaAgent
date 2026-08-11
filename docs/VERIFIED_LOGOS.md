@@ -23,7 +23,7 @@ eine manuelle Freigabe.
 
 ## Upload und Versionierung
 
-- Erlaubt sind PNG und WebP bis 5 MiB und 32–4096 Pixel je Achse.
+- Erlaubt sind PNG und WebP bis 10 MiB, 32–8192 Pixel je Achse und 40 Millionen Bildpunkte insgesamt.
 - Endung, MIME-Type, tatsächliches Bildformat, technische Lesbarkeit,
   Abmessungen und SHA-256 werden serverseitig geprüft.
 - Der Originaldateiname wird nur als Metadatum gespeichert. Der interne Pfad

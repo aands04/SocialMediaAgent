@@ -12,9 +12,10 @@ from app.games.identity import normalize_team_name, opponent_for_game
 from app.models import LogoAsset, SharedOpponentLogo
 from app.teams.service import team_media_prefix
 
-MAX_LOGO_SIZE = 5 * 1024 * 1024
+MAX_LOGO_SIZE = 10 * 1024 * 1024
 MIN_DIMENSION = 32
-MAX_DIMENSION = 4096
+MAX_DIMENSION = 8192
+MAX_PIXEL_COUNT = 40_000_000
 ALLOWED_SUFFIXES = {".png": "image/png", ".webp": "image/webp"}
 COMPOSITOR_VERSION = "verified-logo-compositor-v1"
 
@@ -35,7 +36,7 @@ def _inspect_image(data: bytes, suffix: str, content_type: str | None) -> tuple[
     if not data:
         raise LogoValidationError("Die Logo-Datei ist leer.")
     if len(data) > MAX_LOGO_SIZE:
-        raise LogoValidationError("Das Logo ist größer als 5 MiB.")
+        raise LogoValidationError("Das Logo ist größer als 10 MiB.")
     expected = ALLOWED_SUFFIXES.get(suffix.lower())
     if not expected:
         raise LogoValidationError("Im MVP sind ausschließlich PNG und WebP erlaubt.")
@@ -58,6 +59,10 @@ def _inspect_image(data: bytes, suffix: str, content_type: str | None) -> tuple[
     if not (MIN_DIMENSION <= width <= MAX_DIMENSION and MIN_DIMENSION <= height <= MAX_DIMENSION):
         raise LogoValidationError(
             f"Logo-Abmessungen müssen zwischen {MIN_DIMENSION} und {MAX_DIMENSION} Pixel liegen."
+        )
+    if width * height > MAX_PIXEL_COUNT:
+        raise LogoValidationError(
+            "Das Logo darf insgesamt höchstens 40 Millionen Bildpunkte enthalten."
         )
     return actual, width, height
 
