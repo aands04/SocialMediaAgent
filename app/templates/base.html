@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{ title or 'Vereinszentrale' }}</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260811-publishing-workspace">
+  <link rel="stylesheet" href="/static/style.css?v=20260811-games-workspace">
 </head>
 <body class="{% if environment == 'meta-test' %}meta-test-environment{% endif %}">
 <header class="app-header">
@@ -28,7 +28,7 @@
   {% else %}
   {% for href,label in [
     ('/','Übersicht'),('/teams','Mannschaften'),('/channels','Social-Media-Kanäle'),
-    ('/games','Spiele & Testdaten'),('/live','Live Center'),('/rules','Automatische Beiträge'),('/media','Medienbibliothek'),
+    ('/games','Spiele'),('/live','Live Center'),('/rules','Automatische Beiträge'),('/media','Medienbibliothek'),
     ('/assets','HTML/CSS-Fallbacks'),
     ('/generation-jobs','Generierungsaufträge'),
     ('/posts','Beiträge & Freigaben'),
