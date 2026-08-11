@@ -40,48 +40,26 @@
   <p>Nächste KI-Kontingenterneuerung: {{ usage_cards.text.period_end|berlin }}</p>
 </section>
 
-<p><a class="button" href="/generation-jobs">Generierungsaufträge anzeigen</a></p>
-
-<section>
-  <h2>Geplante Veröffentlichungen</h2>
-  <p>Feed-Beiträge, Karussells und Storys in den nächsten 7 Tagen.</p>
-  <div class="publication-table-wrap">
-    <table class="publication-table">
-      <thead>
-        <tr>
-          <th>Zeitpunkt</th>
-          <th>Mannschaft</th>
-          <th>Beitrag</th>
-          <th>Format</th>
-          <th>Freigabe</th>
-          <th>Status</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for publication in planned_publications %}
-          {% set post = planned_posts.get(publication.post_id) %}
-          {% set team = planned_teams.get(publication.team_id) %}
-          <tr>
-            <td><strong>{{ publication.scheduled_at|berlin }}</strong></td>
-            <td>{{ team.display_name if team else 'Unbekannte Mannschaft' }}</td>
-            <td>{{ post_type_labels.get(post.post_type, 'Beitrag') if post else 'Beitrag nicht verfügbar' }}</td>
-            <td>{{ format_labels.get(publication.kind, 'Unbekannt') }}</td>
-            <td>
-              <span class="badge">{{ approval_status_labels.get(publication.approval_status, 'Prüfung erforderlich') }}</span>
-            </td>
-            <td>
-              <span class="badge publication-status-{{ publication.status.value }}">
-                {{ publication_status_labels.get(publication.status, 'Prüfung erforderlich') }}
-              </span>
-            </td>
-            <td>{% if post %}<a class="button" href="/posts/{{ post.id }}">Beitrag öffnen</a>{% endif %}</td>
-          </tr>
-        {% else %}
-          <tr><td colspan="7">In den nächsten 7 Tagen sind keine Veröffentlichungen geplant.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
+<section class="dashboard-publishing-summary">
+  <div class="section-heading">
+    <div>
+      <h2>Geplante Veröffentlichungen</h2>
+      <p>Der kompakte Überblick über die nächsten 7 Tage. Details und Freigaben findest du im zentralen Arbeitsbereich.</p>
+    </div>
+    <a class="button" href="/posts">Beiträge &amp; Freigaben öffnen</a>
+  </div>
+  <div class="cards">
+    <article>
+      <strong>{% if next_publication %}{{next_publication.job.scheduled_at|berlin}}{% else %}—{% endif %}</strong>
+      <span>Nächste Veröffentlichung</span>
+      {% if next_publication %}<small>{{next_publication.channel.label}} · {{next_publication.target}}</small>{% endif %}
+    </article>
+    <article><strong>{{planned_publication_count}}</strong><span>Geplante Ausführungen</span></article>
+    <article class="{% if attention_count %}publication-summary-warning{% endif %}"><strong>{{attention_count}}</strong><span>Benötigen Aufmerksamkeit</span></article>
+    <article>
+      <strong>{{active_channels|length}}</strong><span>Eingerichtete Kanäle</span>
+      <small>{% for channel in active_channels %}{{channel.label}}{% if not loop.last %} · {% endif %}{% else %}Noch keine{% endfor %}</small>
+    </article>
   </div>
 </section>
 {% endblock %}

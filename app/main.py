@@ -23,6 +23,7 @@ from app.auth.password_reset import (
     request_password_reset,
 )
 from app.auth.service import (
+    allowed,
     authenticate,
     hash_password,
     normalize_email,
@@ -43,7 +44,6 @@ from app.models import (
     Game,
     JobStatus,
     PlanProfile,
-    Post,
     PublicationJob,
     Role,
     StorageObject,
@@ -52,6 +52,7 @@ from app.models import (
 )
 from app.monitoring.service import system_status
 from app.platform.routes import router as platform_router
+from app.publishing.presentation import operational_channels, publication_views
 from app.storage.routes import router as storage_router
 from app.tenancy.state import clear_scope, reset_scope
 from app.usage.service import usage_summary
@@ -577,76 +578,84 @@ def dashboard(
         raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
     now = datetime.now(timezone.utc)
     planned_until = now + timedelta(days=7)
+    visible_teams = [
+        row
+        for row in db.scalars(
+            select(Team).where(
+                Team.club_id == current.club_id,
+                Team.archived_at.is_(None),
+            )
+        )
+        if allowed(db, current, "view", row.id)
+    ]
+    visible_team_ids = {row.id for row in visible_teams}
     terminal_publication_statuses = [
         JobStatus.PUBLISHED,
         JobStatus.CANCELLED,
         JobStatus.SKIPPED,
     ]
-    planned_publications = list(
-        db.scalars(
-            select(PublicationJob)
-            .where(
-                PublicationJob.club_id == current.club_id,
-                PublicationJob.scheduled_at >= now,
-                PublicationJob.scheduled_at <= planned_until,
-                PublicationJob.status.notin_(terminal_publication_statuses),
+    workspace_jobs = []
+    if visible_team_ids:
+        workspace_jobs = list(
+            db.scalars(
+                select(PublicationJob)
+                .where(
+                    PublicationJob.club_id == current.club_id,
+                    PublicationJob.team_id.in_(visible_team_ids),
+                    PublicationJob.scheduled_at >= now - timedelta(days=90),
+                    PublicationJob.scheduled_at <= planned_until,
+                    PublicationJob.status.notin_(
+                        [JobStatus.CANCELLED, JobStatus.SKIPPED]
+                    ),
+                )
+                .order_by(PublicationJob.scheduled_at, PublicationJob.created_at)
             )
-            .order_by(PublicationJob.scheduled_at, PublicationJob.created_at)
         )
+    channels = operational_channels(db, current.club_id)
+    workspace_views = publication_views(
+        db,
+        workspace_jobs,
+        club_id=current.club_id,
+        channels=channels,
+        now=now,
+    )
+    planned_views = [
+        row
+        for row in workspace_views
+        if row.scheduled_at >= now
+        and row.job.status not in terminal_publication_statuses
+    ]
+    next_publication = min(planned_views, key=lambda row: row.scheduled_at, default=None)
+    attention_count = sum(
+        row.attention and row.job.status != JobStatus.PUBLISHED for row in workspace_views
     )
     counts = {
-        "teams": db.scalar(
-            select(func.count()).select_from(Team).where(Team.club_id == current.club_id)
-        ),
-        "games": db.scalar(
-            select(func.count()).select_from(Game).where(Game.club_id == current.club_id)
-        ),
-        "planned_posts": db.scalar(
-            select(func.count(func.distinct(PublicationJob.post_id)))
-            .select_from(PublicationJob)
-            .where(
-                PublicationJob.club_id == current.club_id,
-                PublicationJob.scheduled_at >= now,
-                PublicationJob.status.notin_(terminal_publication_statuses),
+        "teams": len(visible_team_ids),
+        "games": int(
+            db.scalar(
+                select(func.count()).select_from(Game).where(
+                    Game.club_id == current.club_id,
+                    Game.team_id.in_(visible_team_ids),
+                )
             )
-        ),
-        "publications": db.scalar(
-            select(func.count())
-            .select_from(PublicationJob)
-            .where(
-                PublicationJob.club_id == current.club_id,
-                PublicationJob.status == JobStatus.PUBLISHED,
+            or 0
+        )
+        if visible_team_ids
+        else 0,
+        "planned_posts": len({row.job.post_id for row in planned_views}),
+        "publications": int(
+            db.scalar(
+                select(func.count()).select_from(PublicationJob).where(
+                    PublicationJob.club_id == current.club_id,
+                    PublicationJob.team_id.in_(visible_team_ids),
+                    PublicationJob.status == JobStatus.PUBLISHED,
+                )
             )
-        ),
+            or 0
+        )
+        if visible_team_ids
+        else 0,
     }
-    planned_post_ids = {publication.post_id for publication in planned_publications}
-    planned_team_ids = {publication.team_id for publication in planned_publications}
-    planned_posts = (
-        {
-            post.id: post
-            for post in db.scalars(
-                select(Post).where(
-                    Post.club_id == current.club_id,
-                    Post.id.in_(planned_post_ids),
-                )
-            )
-        }
-        if planned_post_ids
-        else {}
-    )
-    planned_teams = (
-        {
-            team.id: team
-            for team in db.scalars(
-                select(Team).where(
-                    Team.club_id == current.club_id,
-                    Team.id.in_(planned_team_ids),
-                )
-            )
-        }
-        if planned_team_ids
-        else {}
-    )
     club = db.get(Club, current.club_id)
     if club is None:
         raise HTTPException(403, "Verein ist nicht vorhanden")
@@ -697,37 +706,11 @@ def dashboard(
             "user": current,
             "club": club,
             "counts": counts,
-            "planned_publications": planned_publications,
-            "planned_posts": planned_posts,
-            "planned_teams": planned_teams,
+            "next_publication": next_publication,
+            "planned_publication_count": len(planned_views),
+            "attention_count": attention_count,
+            "active_channels": channels,
             "usage_cards": usage_cards,
-            "publication_status_labels": {
-                JobStatus.DRAFT: "Entwurf",
-                JobStatus.UNAPPROVED: "Nicht freigegeben",
-                JobStatus.APPROVED: "Freigegeben",
-                JobStatus.SCHEDULED: "Geplant",
-                JobStatus.WAITING: "Wartet",
-                JobStatus.PUBLISHING: "Wird veröffentlicht",
-                JobStatus.PUBLISHED: "Veröffentlicht",
-                JobStatus.RETRY: "Wiederholung geplant",
-                JobStatus.FAILED: "Fehlgeschlagen",
-                JobStatus.CANCELLED: "Abgebrochen",
-                JobStatus.SKIPPED: "Übersprungen",
-                JobStatus.UNCERTAIN: "Manuell prüfen",
-            },
-            "approval_status_labels": {
-                "approved": "Freigegeben",
-                "unapproved": "Nicht freigegeben",
-                "reapproval_required": "Erneute Freigabe erforderlich",
-                "rejected": "Abgelehnt",
-            },
-            "format_labels": {"feed": "Feed", "story": "Story", "carousel": "Karussell"},
-            "post_type_labels": {
-                "announcement": "Spielankündigung",
-                "reminder": "Spielerinnerung",
-                "result": "Ergebnismeldung",
-                "manual": "Manueller Beitrag",
-            },
             "club_status_labels": {
                 "setup_pending": "Einrichtung offen",
                 "trial": "Testphase",
