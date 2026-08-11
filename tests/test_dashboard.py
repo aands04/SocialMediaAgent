@@ -87,12 +87,12 @@ def browser(tmp_path):
         db.add(club)
         db.flush()
         admin = User(
-                email="admin@test.invalid",
-                password_hash=hash_password("Very-Secure-Test-Password"),
-                role=Role.ADMIN,
-                all_teams=True,
-                club_id=club.id,
-            )
+            email="admin@test.invalid",
+            password_hash=hash_password("Very-Secure-Test-Password"),
+            role=Role.ADMIN,
+            all_teams=True,
+            club_id=club.id,
+        )
         db.add(admin)
         db.commit()
 
@@ -230,14 +230,14 @@ def test_generation_job_overview_collapses_manual_retry_history(browser):
 
     overview = client.get("/generation-jobs")
     assert overview.status_code == 200
-    assert f'/generation-jobs/{current_id}' in overview.text
-    assert f'/generation-jobs/{previous_id}' not in overview.text
+    assert f"/generation-jobs/{current_id}" in overview.text
+    assert f"/generation-jobs/{previous_id}" not in overview.text
     assert "Gesamten Verlauf anzeigen" in overview.text
 
     history = client.get("/generation-jobs?history=1")
     assert history.status_code == 200
-    assert f'/generation-jobs/{current_id}' in history.text
-    assert f'/generation-jobs/{previous_id}' in history.text
+    assert f"/generation-jobs/{current_id}" in history.text
+    assert f"/generation-jobs/{previous_id}" in history.text
     assert "durch Folgeauftrag ersetzt" in history.text
 
 
@@ -697,18 +697,115 @@ def test_setup_pending_club_can_complete_dashboard_setup(browser):
     assert response.status_code == 303
 
 
-def test_instagram_meta_test_dashboard_is_explicit_and_blocks_mock_connect(
-    browser, monkeypatch
+def test_team_setup_hides_technical_fields_and_allows_no_channel(browser, tmp_path, monkeypatch):
+    client, factory = browser
+    upload_root = tmp_path / "managed-uploads"
+    import app.admin_routes as admin_routes
+
+    monkeypatch.setattr(admin_routes.settings, "upload_root", upload_root)
+    form = client.get("/teams")
+    assert form.status_code == 200
+    assert 'name="short_name"' not in form.text
+    assert 'name="slug"' not in form.text
+    assert 'name="media_subdir"' not in form.text
+    assert 'name="instagram_page_id"' not in form.text
+    assert "Die Mannschaft kann ohne Kanal angelegt werden" in form.text
+    assert "Medienablage wird automatisch eingerichtet" in form.text
+
+    response = client.post(
+        "/teams",
+        data={
+            "csrf_token": session_csrf(client),
+            "internal_name": "B-Jugend",
+            "display_name": "JSG Warmetal/Wolfhagen 1",
+            "club": "JSG Warmetal/Wolfhagen",
+            "fussball_url": "https://www.fussball.de/mannschaft/jsg-warmetal",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    with factory() as db:
+        team = db.query(Team).filter_by(internal_name="B-Jugend").one()
+        assert team.short_name == "B-Jugend"
+        assert team.slug == "b-jugend"
+        assert team.instagram_page_id is None
+        assert db.query(TeamChannelAssignment).filter_by(team_id=team.id).count() == 0
+        relative = Path(team.media_subdir)
+        assert relative.parts[:2] == ("clubs", team.club_id)
+        assert relative.parts[-1] == "imports"
+        namespace = upload_root / relative.parent
+        assert {
+            "players",
+            "logos",
+            "backgrounds",
+            "imports",
+        }.issubset({path.name for path in namespace.iterdir() if path.is_dir()})
+
+
+def test_team_setup_assigns_connected_facebook_and_whatsapp_channels(
+    browser, tmp_path, monkeypatch
 ):
+    client, factory = browser
+    import app.admin_routes as admin_routes
+
+    monkeypatch.setattr(admin_routes.settings, "upload_root", tmp_path / "uploads")
+    with factory() as db:
+        facebook = SocialChannelConnection(
+            channel_type="facebook",
+            internal_name="facebook",
+            display_name="Vereinsseite",
+            external_account_id="page-1",
+            status="connected",
+            active=True,
+        )
+        whatsapp = SocialChannelConnection(
+            channel_type="whatsapp",
+            internal_name="whatsapp",
+            display_name="Vereinsnews",
+            external_account_id="waba-1",
+            phone_number_id="phone-1",
+            display_phone_number="+49 561 123456",
+            status="connected",
+            active=True,
+        )
+        db.add_all([facebook, whatsapp])
+        db.commit()
+        channel_ids = [facebook.id, whatsapp.id]
+
+    form = client.get("/teams")
+    assert "Facebook" in form.text
+    assert "WhatsApp" in form.text
+    response = client.post(
+        "/teams",
+        data={
+            "csrf_token": session_csrf(client),
+            "internal_name": "A-Jugend",
+            "display_name": "JSG A-Jugend",
+            "club": "JSG Testverein",
+            "fussball_url": "https://www.fussball.de/mannschaft/jsg-a-jugend",
+            "channel_connection_ids": channel_ids,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    with factory() as db:
+        team = db.query(Team).filter_by(internal_name="A-Jugend").one()
+        assignments = db.query(TeamChannelAssignment).filter_by(team_id=team.id).all()
+        assert {item.channel_connection_id for item in assignments} == set(channel_ids)
+        assert all(item.announcement_enabled and item.result_enabled for item in assignments)
+        assert not any(item.story_enabled for item in assignments)
+
+
+def test_instagram_meta_test_dashboard_is_explicit_and_blocks_mock_connect(browser, monkeypatch):
     client, factory = browser
     import app.admin_routes as admin_routes
     import app.channels.routes as channel_routes
 
     monkeypatch.setattr(admin_routes.settings, "environment", "meta-test")
     monkeypatch.setattr(admin_routes.settings, "publisher_mode", "instagram")
-    monkeypatch.setitem(
-        admin_routes.templates.env.globals, "environment", "meta-test"
-    )
+    monkeypatch.setitem(admin_routes.templates.env.globals, "environment", "meta-test")
     monkeypatch.setattr(channel_routes.settings, "facebook_channel_enabled", True)
     monkeypatch.setattr(channel_routes.settings, "whatsapp_channel_enabled", True)
     with factory() as db:
@@ -869,9 +966,7 @@ def test_channel_specific_text_requires_reapproval_and_stays_tenant_bound(browse
         )
         post = db.get(Post, post_id)
         job = db.scalar(
-            select(PublicationJob).where(
-                PublicationJob.channel_connection_id == connection_id
-            )
+            select(PublicationJob).where(PublicationJob.channel_connection_id == connection_id)
         )
         assert variant.text.startswith("Ausführlicher Facebook-Text")
         assert post.status == PostStatus.REAPPROVAL
@@ -1195,9 +1290,7 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
         assert rejection_audit.details["reason"] is None
 
 
-def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
-    browser, tmp_path, monkeypatch
-):
+def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(browser, tmp_path, monkeypatch):
     client, factory = browser
     import app.admin_routes as admin_routes
 
@@ -1238,12 +1331,10 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
     assert "Instagram-Konten im Bild markieren" in form.text
     assert 'name="user_tags"' in form.text
     csrf_token = re.search(r'name="csrf_token" value="([^"]+)', form.text).group(1)
-    submission_id = re.search(
-        r'name="submission_id" value="([^"]+)', form.text
-    ).group(1)
-    local_publish_at = (
-        datetime.now(ZoneInfo("Europe/Berlin")) + timedelta(hours=2)
-    ).strftime("%Y-%m-%dT%H:%M")
+    submission_id = re.search(r'name="submission_id" value="([^"]+)', form.text).group(1)
+    local_publish_at = (datetime.now(ZoneInfo("Europe/Berlin")) + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M"
+    )
     data = {
         "csrf_token": csrf_token,
         "submission_id": submission_id,
@@ -1284,12 +1375,8 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
             "width": 0.6,
             "height": 1.0,
         }
-        assert uploaded["user_tags"] == [
-            {"username": "testverein.kassel", "x": 0.3, "y": 0.4}
-        ]
-        assert Path(uploaded["original_path"]).read_bytes() == manual_post_image(
-            (1600, 1200)
-        )
+        assert uploaded["user_tags"] == [{"username": "testverein.kassel", "x": 0.3, "y": 0.4}]
+        assert Path(uploaded["original_path"]).read_bytes() == manual_post_image((1600, 1200))
         assert job.game_id is None
         assert job.kind == "feed"
         assert job.status == JobStatus.UNAPPROVED
@@ -1310,9 +1397,7 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
     assert rerender.status_code == 422
 
     carousel_form = client.get("/posts/manual/new")
-    carousel_csrf = re.search(
-        r'name="csrf_token" value="([^"]+)', carousel_form.text
-    ).group(1)
+    carousel_csrf = re.search(r'name="csrf_token" value="([^"]+)', carousel_form.text).group(1)
     carousel_submission = re.search(
         r'name="submission_id" value="([^"]+)', carousel_form.text
     ).group(1)
@@ -1335,15 +1420,14 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(
     )
     assert carousel.status_code == 303
     with factory() as db:
-        carousel_post = db.query(Post).filter_by(
-            manual_submission_id=carousel_submission
-        ).one()
-        carousel_job = db.query(PublicationJob).filter_by(
-            post_id=carousel_post.id
-        ).one()
-        media = db.query(PublicationMediaItem).filter_by(
-            publication_job_id=carousel_job.id
-        ).order_by(PublicationMediaItem.position).all()
+        carousel_post = db.query(Post).filter_by(manual_submission_id=carousel_submission).one()
+        carousel_job = db.query(PublicationJob).filter_by(post_id=carousel_post.id).one()
+        media = (
+            db.query(PublicationMediaItem)
+            .filter_by(publication_job_id=carousel_job.id)
+            .order_by(PublicationMediaItem.position)
+            .all()
+        )
         assert carousel_job.kind == "carousel"
         assert carousel_job.text_snapshot == carousel_post.text
         assert [item.position for item in media] == [1, 2, 3]
@@ -1401,11 +1485,14 @@ def test_player_images_can_be_uploaded_from_dashboard(browser, tmp_path, monkeyp
         team_id = team.id
 
     token = session_csrf(client)
-    assert client.post(
-        f"/media/{team_id}/upload",
-        data={"csrf_token": "wrong"},
-        files={"files": ("spieler.jpg", player_image(), "image/jpeg")},
-    ).status_code == 403
+    assert (
+        client.post(
+            f"/media/{team_id}/upload",
+            data={"csrf_token": "wrong"},
+            files={"files": ("spieler.jpg", player_image(), "image/jpeg")},
+        ).status_code
+        == 403
+    )
     response = client.post(
         f"/media/{team_id}/upload",
         data={"csrf_token": token},
@@ -1428,6 +1515,8 @@ def test_player_images_can_be_uploaded_from_dashboard(browser, tmp_path, monkeyp
         }
         for asset in assets:
             assert not Path(asset.relative_path).is_absolute()
+            assert Path(asset.relative_path).parts[:2] == ("clubs", team.club_id)
+            assert "players" in Path(asset.relative_path).parts
             assert (upload_root / asset.relative_path).is_file()
         asset_id = assets[0].id
         import app.posts.service as post_service
@@ -1443,7 +1532,7 @@ def test_player_images_can_be_uploaded_from_dashboard(browser, tmp_path, monkeyp
     assert page.status_code == 200
     assert "Spielerbilder hochladen" in page.text
     assert "Dashboard-Upload" in page.text
-    assert f'/media/{asset_id}/preview' in page.text
+    assert f"/media/{asset_id}/preview" in page.text
 
     duplicate = client.post(
         f"/media/{team_id}/upload",
@@ -1464,9 +1553,7 @@ def test_player_images_can_be_uploaded_from_dashboard(browser, tmp_path, monkeyp
     with factory() as db:
         assert all(
             asset.available
-            for asset in db.query(MediaAsset).filter_by(
-                team_id=team_id, storage_kind="upload"
-            )
+            for asset in db.query(MediaAsset).filter_by(team_id=team_id, storage_kind="upload")
         )
 
 
@@ -1502,9 +1589,7 @@ def test_player_images_can_be_uploaded_as_safe_zip_archive(browser, tmp_path, mo
 
     archive = player_image_archive(
         {
-            f"mannschaft/SVE_{number:02d}.png": player_image(
-                "PNG", color=(number * 10, 90, 200)
-            )
+            f"mannschaft/SVE_{number:02d}.png": player_image("PNG", color=(number * 10, 90, 200))
             for number in range(25)
         }
     )
@@ -1539,9 +1624,9 @@ def test_player_images_can_be_uploaded_as_safe_zip_archive(browser, tmp_path, mo
 
 
 def test_nginx_allows_large_requests_only_for_player_image_uploads():
-    config = (
-        Path(__file__).parents[1] / "deploy" / "nginx" / "default.conf"
-    ).read_text(encoding="utf-8")
+    config = (Path(__file__).parents[1] / "deploy" / "nginx" / "default.conf").read_text(
+        encoding="utf-8"
+    )
     assert "client_max_body_size 20m;" in config
     assert "location ~ ^/media/[A-Za-z0-9_-]+/upload$" in config
     assert "client_max_body_size 512m;" in config
@@ -1562,9 +1647,7 @@ def test_nginx_proxies_refresh_web_container_address_via_docker_dns():
 
 
 def test_nginx_proxy_healthcheck_uses_ipv4_loopback():
-    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text(
-        encoding="utf-8"
-    )
+    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
     assert "http://127.0.0.1/health" in compose
     assert "http://localhost/health" not in compose
     assert "start_period: 20s" in compose
@@ -1667,11 +1750,14 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
         db.commit()
         team_id, game_id, second_id, admin_id = team.id, game.id, second.id, admin.id
     token = session_csrf(client)
-    assert client.post(
-        f"/teams/{team_id}/logo",
-        data={"csrf_token": "wrong"},
-        files={"file": ("sve.png", logo_png(), "image/png")},
-    ).status_code == 403
+    assert (
+        client.post(
+            f"/teams/{team_id}/logo",
+            data={"csrf_token": "wrong"},
+            files={"file": ("sve.png", logo_png(), "image/png")},
+        ).status_code
+        == 403
+    )
     uploaded = client.post(
         f"/teams/{team_id}/logo",
         data={"csrf_token": token},
@@ -1707,6 +1793,11 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
         second = db.get(Game, second_id)
         logo = db.get(LogoAsset, first.opponent_logo_id)
         assert logo and logo.uploaded_by == admin_id
+        team_logo = db.query(LogoAsset).filter_by(team_id=team_id, logo_type="team").one()
+        assert Path(team_logo.original_path).parts[:2] == ("clubs", team_logo.club_id)
+        assert Path(team_logo.original_path).parts[-2] == "logos"
+        assert Path(logo.original_path).parts[:2] == ("clubs", logo.club_id)
+        assert Path(logo.original_path).parts[2:4] == ("logos", "opponents")
         assert second.opponent_logo_id is None
         logo_id = logo.id
     suggestion = client.get(f"/games/{second_id}/opponent-logo")
@@ -1714,9 +1805,9 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     assert "Passende Logos aus der systemweiten Bibliothek" in suggestion.text
     with factory() as db:
         assert db.get(Game, second_id).opponent_logo_id is None
-        shared_logo = db.query(SharedOpponentLogo).order_by(
-            SharedOpponentLogo.catalog_version.desc()
-        ).first()
+        shared_logo = (
+            db.query(SharedOpponentLogo).order_by(SharedOpponentLogo.catalog_version.desc()).first()
+        )
         shared_logo_id = shared_logo.id
         original_filename = shared_logo.original_filename
     shared_preview = client.get(
@@ -1761,7 +1852,9 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
         db.commit()
         post_id, post_version = post.id, post.version
     legacy_page = client.get(f"/posts/{post_id}").text
-    assert "Lokale Logo-Neuzusammensetzung ist für diesen älteren Beitrag nicht möglich" in legacy_page
+    assert (
+        "Lokale Logo-Neuzusammensetzung ist für diesen älteren Beitrag nicht möglich" in legacy_page
+    )
     blocked = client.post(
         f"/posts/{post_id}/recompose-logos",
         data={"csrf_token": token, "version": post_version},
@@ -2042,10 +2135,15 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
         primary_id = state.primary_post_id
         member_id = next(post.id for post in posts if post.id != primary_id)
         team_ids = [team.id for team in teams]
-        carousel_version = db.query(PublicationJob).filter_by(
-            post_id=primary_id,
-            kind="carousel",
-        ).one().version
+        carousel_version = (
+            db.query(PublicationJob)
+            .filter_by(
+                post_id=primary_id,
+                kind="carousel",
+            )
+            .one()
+            .version
+        )
 
     response = client.get(f"/posts/{primary_id}")
 
@@ -2354,9 +2452,10 @@ def test_dashboard_admin_flow(browser):
         assert saved_team.rules["announcement_weekday_times"]["6"] == "09:00"
         assert saved_team.rules["announcement_weekday_targets"]["4"] == "3"
         assert saved_team.rules["announcement_weekday_targets"]["6"] == "4"
-    assert "Vorläufige Spielpläne für Ankündigungen verwenden" in client.get(
-        f"/rules?team_id={team.id}"
-    ).text
+    assert (
+        "Vorläufige Spielpläne für Ankündigungen verwenden"
+        in client.get(f"/rules?team_id={team.id}").text
+    )
     result = client.post(
         f"/rules/{team.id}/stories",
         data={
@@ -2458,9 +2557,9 @@ def test_dashboard_admin_flow(browser):
         data={"csrf_token": token, "version": post_version, "story_job_ids": story_ids},
         follow_redirects=False,
     )
-    assert targeted_rerender.status_code == 303 and targeted_rerender.headers["location"].startswith(
-        "/generation-jobs/"
-    )
+    assert targeted_rerender.status_code == 303 and targeted_rerender.headers[
+        "location"
+    ].startswith("/generation-jobs/")
     with factory() as db:
         queued = db.scalar(
             __import__("sqlalchemy", fromlist=["select"])
@@ -2729,8 +2828,7 @@ def test_admin_assigns_editorial_roles_and_last_admin_is_protected(browser):
     assert response.status_code == 303
     page = client.get("/users")
     assert all(
-        label in page.text
-        for label in ("Vereinsadministrator", "Redakteur", "Autor", "Nur Lesen")
+        label in page.text for label in ("Vereinsadministrator", "Redakteur", "Autor", "Nur Lesen")
     )
     with factory() as db:
         author = db.query(User).filter_by(email="author@test.invalid").one()
@@ -3006,10 +3104,7 @@ def test_result_can_be_entered_confirmed_and_corrected_from_games_dashboard(brow
         assert game.overrides["result_confirmation_source"] == "dashboard_manual"
         assert game.overrides["provider_score_candidate"] == "2:1"
         corrected_version = game.version
-        assert (
-            db.query(AuditLog).filter_by(action="game.result_confirmed_manually").count()
-            == 1
-        )
+        assert db.query(AuditLog).filter_by(action="game.result_confirmed_manually").count() == 1
 
         user = db.query(User).filter_by(email="admin@test.invalid").one()
         post = Post(
@@ -3179,7 +3274,8 @@ def test_mock_game_with_existing_post_is_safely_hidden_instead_of_destroyed(brow
             club="SV Ehlen",
             active=True,
         )
-        db.add(page); db.flush()
+        db.add(page)
+        db.flush()
         team = Team(
             internal_name="mock-preserved-team",
             display_name="SV Ehlen I",
@@ -3190,7 +3286,8 @@ def test_mock_game_with_existing_post_is_safely_hidden_instead_of_destroyed(brow
             instagram_page_id=page.id,
             media_subdir="erste_mannschaft/spieler",
         )
-        db.add(team); db.flush()
+        db.add(team)
+        db.flush()
         game = Game(
             team_id=team.id,
             provider="mock",
@@ -3200,14 +3297,16 @@ def test_mock_game_with_existing_post_is_safely_hidden_instead_of_destroyed(brow
             kickoff=datetime.now(timezone.utc) + timedelta(days=2),
             source_url="fixture://dashboard",
         )
-        db.add(game); db.flush()
+        db.add(game)
+        db.flush()
         post = Post(
             game_id=game.id,
             team_id=team.id,
             instagram_page_id=page.id,
             post_type="announcement",
         )
-        db.add(post); db.commit()
+        db.add(post)
+        db.commit()
         game_id, post_id = game.id, post.id
 
     result = client.post(
@@ -3346,9 +3445,7 @@ def test_publication_rule_slots_are_csrf_protected_validated_and_audited(browser
         assert copied_slot is not None
         assert copied_slot.target_weekday == 3
         assert db.scalar(
-            select(AuditLog.id).where(
-                AuditLog.action == "publication_weekday_rules.copied"
-            )
+            select(AuditLog.id).where(AuditLog.action == "publication_weekday_rules.copied")
         )
 
 
@@ -3558,9 +3655,7 @@ def test_editor_can_view_but_cannot_change_automatic_post_rules(browser):
 
     client.post("/logout")
     login_page = client.get("/login")
-    login_csrf = re.search(
-        r'name="csrf_token" value="([^"]+)', login_page.text
-    ).group(1)
+    login_csrf = re.search(r'name="csrf_token" value="([^"]+)', login_page.text).group(1)
     logged_in = client.post(
         "/login",
         data={

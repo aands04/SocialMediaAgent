@@ -30,6 +30,7 @@ from app.branding.service import (
     recommended_branding_settings,
     validate_branding_settings,
 )
+from app.channels.service import sync_instagram_channel
 from app.config import get_settings
 from app.db import get_db
 from app.file_delivery import detached_file_response
@@ -141,6 +142,11 @@ from app.publishing.schedule import (
     EDITABLE_JOB_STATUSES,
     PublicationScheduleError,
     reschedule_publication_job,
+)
+from app.teams.service import (
+    derived_team_short_name,
+    ensure_team_media_namespace,
+    unique_team_slug,
 )
 from app.textgen.service import sanitize_generated_caption
 from app.web import (
@@ -254,26 +260,32 @@ def club_branding(
         .order_by(Team.display_name)
     ).all()
     fonts = db.scalars(
-        select(FontAsset).where(
+        select(FontAsset)
+        .where(
             FontAsset.club_id == club.id,
             FontAsset.active.is_(True),
             FontAsset.archived_at.is_(None),
-        ).order_by(FontAsset.name)
+        )
+        .order_by(FontAsset.name)
     ).all()
     logos = db.scalars(
-        select(LogoAsset).where(
+        select(LogoAsset)
+        .where(
             LogoAsset.club_id == club.id,
             LogoAsset.logo_type == "team",
             LogoAsset.active.is_(True),
             LogoAsset.archived_at.is_(None),
-        ).order_by(LogoAsset.display_name, LogoAsset.version.desc())
+        )
+        .order_by(LogoAsset.display_name, LogoAsset.version.desc())
     ).all()
     media_assets = db.scalars(
-        select(MediaAsset).where(
+        select(MediaAsset)
+        .where(
             MediaAsset.club_id == club.id,
             MediaAsset.active.is_(True),
             MediaAsset.available.is_(True),
-        ).order_by(MediaAsset.filename)
+        )
+        .order_by(MediaAsset.filename)
     ).all()
     image, text = branding_form_state(
         (config.image_settings if config else {}) or {},
@@ -291,9 +303,7 @@ def club_branding(
     )
     current_logo = db.get(LogoAsset, club.logo_asset_id) if club.logo_asset_id else None
     if current_logo and (
-        current_logo.archived_at
-        or not current_logo.active
-        or current_logo.logo_type != "team"
+        current_logo.archived_at or not current_logo.active or current_logo.logo_type != "team"
     ):
         current_logo = None
     progress = branding_completion(
@@ -421,6 +431,7 @@ def update_club_branding(
         raise HTTPException(404)
     if club.version != club_version:
         raise HTTPException(409, "Der Verein wurde zwischenzeitlich geändert")
+
     def resolve_font_choice(choice: str, legacy_id: str) -> tuple[str | None, str]:
         value = (choice or legacy_id or "standard:system").strip()
         if value.startswith("standard:"):
@@ -442,11 +453,7 @@ def update_club_branding(
     if action == "reset":
         resolved_primary_font_id = resolved_secondary_font_id = None
         primary_standard_font = secondary_standard_font = "system"
-    font_ids = [
-        value
-        for value in (resolved_primary_font_id, resolved_secondary_font_id)
-        if value
-    ]
+    font_ids = [value for value in (resolved_primary_font_id, resolved_secondary_font_id) if value]
     if font_ids:
         valid_fonts = set(
             db.scalars(
@@ -470,9 +477,7 @@ def update_club_branding(
         elif action == "reset":
             image_settings, text_settings = default_branding_settings(current_image, current_text)
         elif action == "save":
-            normalized_image_effects = normalize_string_list(
-                _structured_values(image_effects)
-            )
+            normalized_image_effects = normalize_string_list(_structured_values(image_effects))
             image_settings = {
                 "primary_color": primary_color,
                 "secondary_color": secondary_color,
@@ -486,9 +491,7 @@ def update_club_branding(
                 "safe_margins": safe_margins,
                 "player_position": player_position,
                 "allowed_elements": normalize_string_list(_structured_values(allowed_elements)),
-                "unwanted_elements": normalize_string_list(
-                    _structured_values(unwanted_elements)
-                ),
+                "unwanted_elements": normalize_string_list(_structured_values(unwanted_elements)),
                 "sponsor_rules": normalize_string_list(_structured_list(sponsor_rules)),
                 "forbidden_colors": normalize_colors(_structured_values(forbidden_colors)),
                 "feed_rules": feed_extra_rules or feed_rules,
@@ -519,9 +522,7 @@ def update_club_branding(
                 "individualization": individualization,
                 "primary_standard_font": primary_standard_font,
                 "secondary_standard_font": secondary_standard_font,
-                "legacy_values": parse_structured_json(
-                    legacy_image_json, "Übernommene Bildwerte"
-                ),
+                "legacy_values": parse_structured_json(legacy_image_json, "Übernommene Bildwerte"),
             }
             text_settings = {
                 "address_style": address_style,
@@ -530,16 +531,10 @@ def update_club_branding(
                 "emoji_usage": emoji_usage,
                 "hashtags": normalize_hashtags(_structured_values(hashtags)),
                 "mentions": normalize_mentions(_structured_values(mentions)),
-                "typical_phrases": normalize_string_list(
-                    _structured_values(typical_phrases)
-                ),
-                "unwanted_phrases": normalize_string_list(
-                    _structured_values(unwanted_phrases)
-                ),
+                "typical_phrases": normalize_string_list(_structured_values(typical_phrases)),
+                "unwanted_phrases": normalize_string_list(_structured_values(unwanted_phrases)),
                 "team_name_spelling": team_name_spelling,
-                "team_names": parse_structured_json(
-                    team_names_json, "Mannschaftsschreibweisen"
-                ),
+                "team_names": parse_structured_json(team_names_json, "Mannschaftsschreibweisen"),
                 "home_label": home_label,
                 "away_label": away_label,
                 "home_venue": home_venue,
@@ -548,13 +543,9 @@ def update_club_branding(
                 "cta_type": cta_type,
                 "cta_custom": cta_custom,
                 "sponsors": parse_structured_json(sponsors_json, "Sponsoren"),
-                "sponsor_mentions": normalize_mentions(
-                    _structured_list(sponsor_mentions)
-                ),
+                "sponsor_mentions": normalize_mentions(_structured_list(sponsor_mentions)),
                 "max_hashtags": max_hashtags,
-                "legacy_values": parse_structured_json(
-                    legacy_text_json, "Übernommene Textwerte"
-                ),
+                "legacy_values": parse_structured_json(legacy_text_json, "Übernommene Textwerte"),
             }
             image_settings = validate_branding_settings(image_settings, strict_choices=True)
             text_settings = validate_branding_settings(text_settings, strict_choices=True)
@@ -691,9 +682,7 @@ def _invalidate_posts_for_result_change(db: Session, game: Game, reason: str) ->
         post.approved_at = None
         post.status = PostStatus.REAPPROVAL
         warning = "Bestätigtes Spielergebnis wurde geändert; erneute Prüfung erforderlich"
-        post.critical_warnings = list(
-            dict.fromkeys([*(post.critical_warnings or []), warning])
-        )
+        post.critical_warnings = list(dict.fromkeys([*(post.critical_warnings or []), warning]))
         for publication in db.scalars(
             select(PublicationJob).where(PublicationJob.post_id == post.id)
         ):
@@ -737,7 +726,43 @@ def teams(request: Request, current=Depends(current_user), db: Session = Depends
     items = db.scalars(
         select(Team).where(Team.archived_at.is_(None)).order_by(Team.display_name)
     ).all()
-    pages = db.scalars(select(InstagramPage).where(InstagramPage.archived_at.is_(None))).all()
+    available_channels = list(
+        db.scalars(
+            select(SocialChannelConnection)
+            .where(
+                SocialChannelConnection.club_id == current.club_id,
+                SocialChannelConnection.active.is_(True),
+                SocialChannelConnection.status == "connected",
+                SocialChannelConnection.disconnected_at.is_(None),
+            )
+            .order_by(
+                SocialChannelConnection.channel_type,
+                SocialChannelConnection.display_name,
+            )
+        )
+    )
+    team_channel_labels: dict[str, list[str]] = {item.id: [] for item in items}
+    for assignment, connection in db.execute(
+        select(TeamChannelAssignment, SocialChannelConnection)
+        .join(
+            SocialChannelConnection,
+            SocialChannelConnection.id == TeamChannelAssignment.channel_connection_id,
+        )
+        .where(TeamChannelAssignment.enabled.is_(True))
+        .where(TeamChannelAssignment.club_id == current.club_id)
+        .order_by(
+            TeamChannelAssignment.team_id,
+            SocialChannelConnection.channel_type,
+            SocialChannelConnection.display_name,
+        )
+    ):
+        label = connection.channel_type.capitalize()
+        account = (
+            f"@{connection.username.lstrip('@')}"
+            if connection.username
+            else connection.display_phone_number or connection.display_name
+        )
+        team_channel_labels.setdefault(assignment.team_id, []).append(f"{label} · {account}")
     logos = {
         item.id: db.get(LogoAsset, item.logo_asset_id) if item.logo_asset_id else None
         for item in items
@@ -769,7 +794,8 @@ def teams(request: Request, current=Depends(current_user), db: Session = Depends
         "teams.html",
         current,
         items=items,
-        pages=pages,
+        available_channels=available_channels,
+        team_channel_labels=team_channel_labels,
         logos=logos,
         logo_versions=logo_versions,
         uploaders=uploaders,
@@ -783,12 +809,15 @@ def create_team(
     csrf_token_value: str = Form(alias="csrf_token"),
     internal_name: str = Form(),
     display_name: str = Form(),
-    short_name: str = Form(),
-    slug: str = Form(),
     club: str = Form(),
     fussball_url: str = Form(),
-    instagram_page_id: str = Form(),
-    media_subdir: str = Form(),
+    channel_connection_ids: list[str] = Form(default=[]),
+    # Accepted for backwards-compatible clients, but no longer required by
+    # the dashboard. Technical values are generated on the server.
+    short_name: str = Form(default=""),
+    slug: str = Form(default=""),
+    instagram_page_id: str = Form(default=""),
+    media_subdir: str = Form(default=""),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -804,27 +833,103 @@ def create_team(
         raise HTTPException(409, str(exc)) from exc
     if not fussball_url.startswith(("https://www.fussball.de/", "https://fussball.de/")):
         raise HTTPException(422, "Ungültige FUSSBALL.DE-URL")
-    try:
-        LocalStorageProvider(settings.media_root).resolve(media_subdir)
-    except StorageError as e:
-        raise HTTPException(422, str(e)) from e
-    page = db.get(InstagramPage, instagram_page_id)
-    if not page or page.club_id != current.club_id or not page.active:
-        raise HTTPException(422, "Instagram-Seite muss aktiv sein")
+    requested_channel_ids = list(dict.fromkeys(channel_connection_ids))
+    if instagram_page_id:
+        page = db.get(InstagramPage, instagram_page_id)
+        if not page or page.club_id != current.club_id or not page.active:
+            raise HTTPException(422, "Instagram-Seite muss aktiv sein")
+        legacy_channel = sync_instagram_channel(db, page)
+        db.flush()
+        if legacy_channel.id not in requested_channel_ids:
+            requested_channel_ids.append(legacy_channel.id)
+
+    connections = (
+        list(
+            db.scalars(
+                select(SocialChannelConnection).where(
+                    SocialChannelConnection.id.in_(requested_channel_ids),
+                    SocialChannelConnection.club_id == current.club_id,
+                    SocialChannelConnection.active.is_(True),
+                    SocialChannelConnection.disconnected_at.is_(None),
+                )
+            )
+        )
+        if requested_channel_ids
+        else []
+    )
+    if len(connections) != len(requested_channel_ids):
+        raise HTTPException(422, "Mindestens ein ausgewählter Kanal ist nicht verfügbar")
+    explicit_channel_ids = set(channel_connection_ids)
+    if any(
+        connection.id in explicit_channel_ids and connection.status != "connected"
+        for connection in connections
+    ):
+        raise HTTPException(422, "Ausgewählte Kanäle müssen vollständig verbunden sein")
+
+    technical_slug = unique_team_slug(db, current.club_id, slug or internal_name or display_name)
+    legacy_instagram_page_id = next(
+        (
+            connection.legacy_instagram_page_id
+            for connection in connections
+            if connection.channel_type == "instagram" and connection.legacy_instagram_page_id
+        ),
+        None,
+    )
     item = Team(
+        club_id=current.club_id,
         internal_name=internal_name,
         display_name=display_name,
-        short_name=short_name,
-        slug=slug,
+        short_name=short_name.strip()[:30] or derived_team_short_name(internal_name, display_name),
+        slug=technical_slug,
         club=club,
         fussball_url=fussball_url,
-        instagram_page_id=page.id,
-        media_subdir=media_subdir,
+        instagram_page_id=legacy_instagram_page_id,
+        media_subdir="pending",
     )
     db.add(item)
     db.flush()
-    audit(db, current, "team.created", "team", item.id, item.id)
-    db.commit()
+    try:
+        item.media_subdir = ensure_team_media_namespace(
+            settings.upload_root,
+            club_id=current.club_id,
+            team_id=item.id,
+            slug=item.slug,
+        )
+    except (OSError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(
+            503, "Der automatische Medienbereich konnte nicht angelegt werden"
+        ) from exc
+
+    for connection in connections:
+        db.add(
+            TeamChannelAssignment(
+                club_id=current.club_id,
+                team_id=item.id,
+                channel_connection_id=connection.id,
+                enabled=True,
+                announcement_enabled=True,
+                result_enabled=True,
+                story_enabled=connection.channel_type == "instagram",
+            )
+        )
+    audit(
+        db,
+        current,
+        "team.created",
+        "team",
+        item.id,
+        item.id,
+        {
+            "channel_types": sorted({connection.channel_type for connection in connections}),
+            "managed_media_namespace": True,
+        },
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "Die Mannschaft konnte nicht eindeutig angelegt werden") from exc
     return redirect("/teams")
 
 
@@ -899,6 +1004,8 @@ async def upload_team_logo(
             content_type=file.content_type,
             data=await file.read(),
             uploaded_by=current.id,
+            club_id=team.club_id,
+            team_slug=team.slug,
         )
     except LogoValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -1265,12 +1372,20 @@ def media(
         else []
     )
     folders = []
+    external_import_available = False
     try:
         folders = [
             x.name for x in settings.media_root.iterdir() if x.is_dir() and not x.is_symlink()
         ]
     except OSError:
         pass
+    if selected:
+        try:
+            external_import_available = (
+                LocalStorageProvider(settings.media_root).resolve(selected.media_subdir).is_dir()
+            )
+        except StorageError:
+            external_import_available = False
     return render(
         request,
         "media.html",
@@ -1279,7 +1394,8 @@ def media(
         selected=selected,
         items=items,
         folders=folders,
-        storage_ok=settings.media_root.is_dir(),
+        external_import_available=external_import_available,
+        storage_ok=settings.upload_root.is_dir(),
         title="Medienbibliothek",
     )
 
@@ -1428,7 +1544,13 @@ async def upload_player_images(
                 skipped.append(image.original_filename)
                 return
 
-        relative, target = store_player_image(settings.upload_root, team.id, image)
+        relative, target = store_player_image(
+            settings.upload_root,
+            team.id,
+            image,
+            club_id=team.club_id,
+            team_slug=team.slug,
+        )
         created_paths.append(target)
         stat = target.stat()
         asset = MediaAsset(
@@ -1931,9 +2053,7 @@ def _active_team_rule_sets(db: Session, team: Team) -> list[ContentRuleSet]:
 
 def _serialize_team_publication_slots(db: Session, team: Team) -> list[dict]:
     configured = (team.rules or {}).get("publication_rule_slots")
-    explicitly_configured = bool(
-        (team.rules or {}).get("publication_rule_slots_configured")
-    )
+    explicitly_configured = bool((team.rules or {}).get("publication_rule_slots_configured"))
     if isinstance(configured, list) and (configured or explicitly_configured):
         return deepcopy([row for row in configured if isinstance(row, dict)])
     rule_sets = _active_team_rule_sets(db, team)
@@ -2015,9 +2135,7 @@ def _legacy_story_publication_rows(story: StoryRule, team: Team) -> list[dict]:
     return rows
 
 
-def _replace_legacy_story_publication_rows(
-    db: Session, team: Team, story: StoryRule
-) -> None:
+def _replace_legacy_story_publication_rows(db: Session, team: Team, story: StoryRule) -> None:
     rules = dict(team.rules or {})
     configured = rules.get("publication_rule_slots")
     configured_is_authoritative = bool(configured) or bool(
@@ -2054,7 +2172,9 @@ def _rule_cards(slots: list[dict]) -> list[dict]:
         (row for row in slots if row.get("match_weekday") is None),
         key=lambda row: (int(row.get("sort_order") or 0), str(row.get("slot_key") or "")),
     )
-    return cards + ([{"weekday": None, "label": "Alle Spieltage", "slots": general}] if general else [])
+    return cards + (
+        [{"weekday": None, "label": "Alle Spieltage", "slots": general}] if general else []
+    )
 
 
 def _rule_slot_summary(row: dict) -> str:
@@ -2065,7 +2185,9 @@ def _rule_slot_summary(row: dict) -> str:
         return f"{day}, {row.get('local_time') or '--:--'} Uhr"
     if model == "result_detected":
         offset = int(row.get("offset_minutes") or 0)
-        return "Direkt nach bestätigtem Ergebnis" if not offset else f"{offset} Minuten nach Ergebnis"
+        return (
+            "Direkt nach bestätigtem Ergebnis" if not offset else f"{offset} Minuten nach Ergebnis"
+        )
     if model == "manual":
         return "Manuelle Planung"
     offset = int(row.get("offset_minutes") or 0)
@@ -2347,8 +2469,7 @@ def copy_team_rules(
             protected = {
                 key: value
                 for key, value in target_config.items()
-                if key.startswith(("image_prompt", "text_prompt"))
-                or key == "style_direction"
+                if key.startswith(("image_prompt", "text_prompt")) or key == "style_direction"
             }
             target_config = {**source_config, **protected}
         else:
@@ -2434,7 +2555,7 @@ def copy_team_rules(
         "sort_order",
         "reuse_media",
     )
-    for source_row in (source_rows if copy_schedule else []):
+    for source_row in source_rows if copy_schedule else []:
         target_row = target_rows.get(source_row.name)
         if target_row is not None and copy_mode == "append_missing":
             continue
@@ -2592,9 +2713,7 @@ def save_rules(
     previous_auto_approve_announcements = bool(
         (team.rules or {}).get("auto_approve_announcements", False)
     )
-    previous_auto_approve_results = bool(
-        (team.rules or {}).get("auto_approve_results", False)
-    )
+    previous_auto_approve_results = bool((team.rules or {}).get("auto_approve_results", False))
     if (
         auto_approve_announcements
         and not previous_auto_approve_announcements
@@ -2669,8 +2788,7 @@ def save_rules(
     if not RESULT_POLL_MINUTES_MIN <= result_poll_interval_minutes <= 120:
         raise HTTPException(
             422,
-            "Die Ergebnisprüfung am Spieltag kann frühestens alle 10 Minuten "
-            "durchgeführt werden.",
+            "Die Ergebnisprüfung am Spieltag kann frühestens alle 10 Minuten durchgeführt werden.",
         )
     if not 0 <= reminder_feed_before_minutes <= 10080:
         raise HTTPException(422, "Der Erinnerungszeitpunkt ist ungültig")
@@ -2729,7 +2847,9 @@ def save_rules(
         story_published = legacy_story if story_published is None else story_published
         values = (feed_generated, feed_published, story_generated, story_published)
         if any(not 0 <= value <= 10 for value in values):
-            raise HTTPException(422, "Erstellungs- und Auswahlzahlen muessen zwischen 0 und 10 liegen")
+            raise HTTPException(
+                422, "Erstellungs- und Auswahlzahlen muessen zwischen 0 und 10 liegen"
+            )
         if feed_published > feed_generated or story_published > story_generated:
             raise HTTPException(
                 422,
@@ -2976,16 +3096,12 @@ def save_rules(
         # Alte Felder bleiben für bestehende Worker-/Fallbackpfade unverändert,
         # statt beim Speichern der reinen UX-Einstellungen geleert zu werden.
         existing_rules = previous_rules
-        announcement_weekday_times = deepcopy(
-            existing_rules.get("announcement_weekday_times", {})
-        )
+        announcement_weekday_times = deepcopy(existing_rules.get("announcement_weekday_times", {}))
         announcement_weekday_targets = deepcopy(
             existing_rules.get("announcement_weekday_targets", {})
         )
         reminder_weekday_times = deepcopy(existing_rules.get("reminder_weekday_times", {}))
-        reminder_weekday_targets = deepcopy(
-            existing_rules.get("reminder_weekday_targets", {})
-        )
+        reminder_weekday_targets = deepcopy(existing_rules.get("reminder_weekday_targets", {}))
         result_weekday_times = deepcopy(existing_rules.get("result_weekday_times", {}))
         result_weekday_targets = deepcopy(existing_rules.get("result_weekday_targets", {}))
         team.rules = {
@@ -3138,7 +3254,9 @@ def save_publication_rule_slot(
     target_day = _parse_optional_weekday(target_weekday, field="Zielwochentag")
     if timing_model == "weekday_fixed":
         if match_day is None or target_day is None or not local_time:
-            raise HTTPException(422, "Kalenderbasierte Regeln benötigen Spieltag, Zieltag und Uhrzeit")
+            raise HTTPException(
+                422, "Kalenderbasierte Regeln benötigen Spieltag, Zieltag und Uhrzeit"
+            )
         try:
             parsed_time = datetime.strptime(local_time, "%H:%M")
         except ValueError as exc:
@@ -3222,7 +3340,11 @@ def save_publication_rule_slot(
         "template": template.strip()[:100] or None,
         "reuse_media": reuse_media,
     }
-    action = "publication_rule_slot.updated" if existing_index is not None else "publication_rule_slot.created"
+    action = (
+        "publication_rule_slot.updated"
+        if existing_index is not None
+        else "publication_rule_slot.created"
+    )
     if existing_index is None:
         rows.append(payload)
     else:
@@ -3249,7 +3371,9 @@ def save_publication_rule_slot(
         },
     )
     db.commit()
-    return redirect(f"/rules?team_id={team.id}#publication-rules", "Veröffentlichungsregel gespeichert")
+    return redirect(
+        f"/rules?team_id={team.id}#publication-rules", "Veröffentlichungsregel gespeichert"
+    )
 
 
 @router.post("/rules/{team_id}/publication-slots/{slot_key}/delete")
@@ -3286,7 +3410,9 @@ def delete_publication_rule_slot(
         {"deletion_mode": "new_rule_version"},
     )
     db.commit()
-    return redirect(f"/rules?team_id={team.id}#publication-rules", "Veröffentlichungsregel gelöscht")
+    return redirect(
+        f"/rules?team_id={team.id}#publication-rules", "Veröffentlichungsregel gelöscht"
+    )
 
 
 @router.post("/rules/{team_id}/publication-weekdays/copy")
@@ -3325,7 +3451,9 @@ def copy_publication_weekday(
         row["match_weekday"] = target_weekday
         if isinstance(row.get("target_weekday"), int):
             row["target_weekday"] = (row["target_weekday"] + shift) % 7
-        row["label"] = f"{row.get('label') or 'Veröffentlichung'} – {WEEKDAY_LABELS[target_weekday]}"
+        row["label"] = (
+            f"{row.get('label') or 'Veröffentlichung'} – {WEEKDAY_LABELS[target_weekday]}"
+        )
         copied.append(row)
     rows.extend(copied)
     team.rules = {
@@ -3632,10 +3760,7 @@ def posts(
         if content == "all":
             return True
         if content == "feed":
-            return (
-                row.job.kind in {"feed", "carousel"}
-                and row.channel.channel_type != "whatsapp"
-            )
+            return row.job.kind in {"feed", "carousel"} and row.channel.channel_type != "whatsapp"
         if content == "message":
             return row.job.delivery_action == "send"
         return row.job.kind == content
@@ -3648,8 +3773,7 @@ def posts(
     ]
     content_options = {
         "feed": any(
-            row.job.kind in {"feed", "carousel"}
-            and row.channel.channel_type != "whatsapp"
+            row.job.kind in {"feed", "carousel"} and row.channel.channel_type != "whatsapp"
             for row in candidate_views
         ),
         "carousel": any(row.job.kind == "carousel" for row in candidate_views),
@@ -3658,19 +3782,14 @@ def posts(
     }
     base_views = [row for row in candidate_views if matches_content(row)]
     attention_rows = sorted(
-        (
-            row
-            for row in base_views
-            if row.attention and row.job.status != JobStatus.PUBLISHED
-        ),
+        (row for row in base_views if row.attention and row.job.status != JobStatus.PUBLISHED),
         key=lambda row: row.scheduled_at,
     )
     planned_rows = sorted(
         (
             row
             for row in base_views
-            if row.job.status
-            not in {JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED}
+            if row.job.status not in {JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED}
             and row.scheduled_at >= now
             and not row.attention
         ),
@@ -3720,9 +3839,7 @@ def posts(
                     and row.scheduled_at >= now
                 ]
             ),
-            "published": len(
-                [row for row in base_views if row.job.status == JobStatus.PUBLISHED]
-            ),
+            "published": len([row for row in base_views if row.job.status == JobStatus.PUBLISHED]),
         },
         title="Beiträge und Freigaben",
     )
@@ -3998,12 +4115,8 @@ def post_detail(
             and not job.locked_at
             and job.id not in active_attempt_job_ids
         )
-    can_edit_all = all(
-        allowed(db, current, "edit_post", member.team_id) for member in bundle_posts
-    )
-    can_delete_all = all(
-        allowed(db, current, "approve", member.team_id) for member in bundle_posts
-    )
+    can_edit_all = all(allowed(db, current, "edit_post", member.team_id) for member in bundle_posts)
+    can_delete_all = all(allowed(db, current, "approve", member.team_id) for member in bundle_posts)
     incomplete_members = [
         member
         for member in bundle_posts
@@ -4101,9 +4214,9 @@ def post_detail(
     catalog_groups: dict[tuple[str, str, int], list[dict]] = {}
     for entry in media_catalog:
         slot = entry["slot"]
-        catalog_groups.setdefault(
-            (slot.post_id, slot.media_kind, slot.output_position), []
-        ).append(entry)
+        catalog_groups.setdefault((slot.post_id, slot.media_kind, slot.output_position), []).append(
+            entry
+        )
     for entries in catalog_groups.values():
         entries.sort(key=lambda entry: entry["slot"].variant_number)
     publication_variant_choices: dict[str, list[dict]] = {}
@@ -4126,9 +4239,7 @@ def post_detail(
                         if media.position <= len(bundle_posts)
                         else None
                     )
-                    choices = (
-                        catalog_groups.get((member.id, "feed", 1), []) if member else []
-                    )
+                    choices = catalog_groups.get((member.id, "feed", 1), []) if member else []
                     current_slot = None
                 rows.append(
                     {
@@ -4213,8 +4324,7 @@ def post_detail(
             select(TeamChannelAssignment, SocialChannelConnection)
             .join(
                 SocialChannelConnection,
-                SocialChannelConnection.id
-                == TeamChannelAssignment.channel_connection_id,
+                SocialChannelConnection.id == TeamChannelAssignment.channel_connection_id,
             )
             .where(
                 TeamChannelAssignment.team_id.in_(relevant_team_ids),
@@ -4249,9 +4359,7 @@ def post_detail(
     for versions in text_versions.values():
         for version in versions:
             try:
-                text_version_display[version.id] = sanitize_generated_caption(
-                    version.text or ""
-                )
+                text_version_display[version.id] = sanitize_generated_caption(version.text or "")
             except ValueError:
                 text_version_display[version.id] = ""
     channel_previews = {}
@@ -4313,9 +4421,7 @@ def post_detail(
         late_jobs=late_jobs,
         logo_recompose=logo_recompose_availability(item, own_jobs),
         bundle_posts=bundle_posts,
-        bundle_member_teams={
-            member.id: db.get(Team, member.team_id) for member in bundle_posts
-        },
+        bundle_member_teams={member.id: db.get(Team, member.team_id) for member in bundle_posts},
         aggregate_bundle=aggregate_bundle,
         bundle_error=bundle_error,
         job_posts=job_posts,
@@ -4339,9 +4445,7 @@ def post_detail(
         can_edit=can_edit_all,
         can_generate=not bundle_error
         and not incomplete_members
-        and all(
-            allowed(db, current, "generate", member.team_id) for member in bundle_posts
-        ),
+        and all(allowed(db, current, "generate", member.team_id) for member in bundle_posts),
         can_approve=not bundle_error and not incomplete_members and can_delete_all,
         incomplete_members=incomplete_members,
         resumable_generation_job=resumable_generation_job,
@@ -4595,10 +4699,12 @@ def choose_publication_media_variant(
     if not post:
         raise HTTPException(404)
     job = db.scalar(
-        select(PublicationJob).where(
+        select(PublicationJob)
+        .where(
             PublicationJob.id == job_id,
             PublicationJob.club_id == post.club_id,
-        ).with_for_update()
+        )
+        .with_for_update()
     )
     if not job or job.post_id != post.id:
         raise HTTPException(404)
@@ -4812,11 +4918,7 @@ def rerender_post_media(
         )
         story_slot_ids = [slot.id for slot in target_slots if slot.media_kind == "story"]
         target_story_variants = sorted(
-            {
-                slot.variant_number
-                for slot in target_slots
-                if slot.media_kind == "story"
-            }
+            {slot.variant_number for slot in target_slots if slot.media_kind == "story"}
         )
         story_version_ids = list(
             db.scalars(
@@ -4843,11 +4945,7 @@ def rerender_post_media(
         target_rerender_feed = bool(target_feed_positions) or (
             not media_slot_ids and target_post.id == item.id and rerender_feed
         )
-        if (
-            not target_rerender_feed
-            and not target_story_jobs
-            and not target_story_variants
-        ):
+        if not target_rerender_feed and not target_story_jobs and not target_story_variants:
             continue
         queued.append(
             enqueue_rerender(
@@ -4856,7 +4954,9 @@ def rerender_post_media(
                 current,
                 target_post.version,
                 target_story_jobs,
-                selected_media_asset_id if target_post.id == item.id else target_post.media_asset_id,
+                selected_media_asset_id
+                if target_post.id == item.id
+                else target_post.media_asset_id,
                 rerender_feed=target_rerender_feed,
                 feed_positions=target_feed_positions or None,
                 story_variant_numbers=target_story_variants or None,
@@ -4921,9 +5021,7 @@ def revise_post_with_ai(
         if not separator or choice_post_id not in target_posts or not choice_asset_id:
             raise HTTPException(422, "Ungültige Spielerbild-Zuordnung")
         if choice_post_id in selected_assets_by_post:
-            raise HTTPException(
-                422, "Spielerbild wurde für eine Mannschaft mehrfach angegeben"
-            )
+            raise HTTPException(422, "Spielerbild wurde für eine Mannschaft mehrfach angegeben")
         selected_assets_by_post[choice_post_id] = choice_asset_id
     selected_slots: list[GeneratedMediaSlot] = []
     if media_slot_ids:
@@ -4973,11 +5071,7 @@ def revise_post_with_ai(
             )
             story_slot_ids = [slot.id for slot in target_slots if slot.media_kind == "story"]
             target_story_variants = sorted(
-                {
-                    slot.variant_number
-                    for slot in target_slots
-                    if slot.media_kind == "story"
-                }
+                {slot.variant_number for slot in target_slots if slot.media_kind == "story"}
             )
             story_version_ids = list(
                 db.scalars(
@@ -5034,9 +5128,7 @@ def revise_post_with_ai(
                     or selected_asset.reserved_game_id is not None
                     or selected_asset.uses != 0
                 ):
-                    raise HTTPException(
-                        409, "Das ausgewählte Spielerbild ist nicht mehr frei"
-                    )
+                    raise HTTPException(409, "Das ausgewählte Spielerbild ist nicht mehr frei")
             queued.append(
                 enqueue_ai_revision(
                     db,
@@ -5046,9 +5138,7 @@ def revise_post_with_ai(
                     instruction,
                     revise_text=target_revise_text,
                     revise_graphics=bool(
-                        target_revise_feed
-                        or target_story_jobs
-                        or target_story_variants
+                        target_revise_feed or target_story_jobs or target_story_variants
                     ),
                     revise_feed=target_revise_feed,
                     story_job_ids=target_story_jobs,
@@ -5622,6 +5712,7 @@ async def update_opponent_logo(
                 content_type=file.content_type,
                 data=upload_data,
                 uploaded_by=current.id,
+                club_id=team.club_id,
             )
             publish_shared_opponent_logo(
                 db,
@@ -5651,6 +5742,7 @@ async def update_opponent_logo(
                 shared=shared,
                 display_name=opponent_name(game, team),
                 uploaded_by=current.id,
+                club_id=team.club_id,
             )
         except LogoValidationError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -5820,23 +5912,31 @@ def games(
     }
     game_groups = dashboard_game_groups(db, items, team_map)
     game_ids = {game.id for game in items}
-    game_posts = list(
-        db.scalars(
-            select(Post).where(
-                Post.club_id == current.club_id,
-                Post.game_id.in_(game_ids),
+    game_posts = (
+        list(
+            db.scalars(
+                select(Post).where(
+                    Post.club_id == current.club_id,
+                    Post.game_id.in_(game_ids),
+                )
             )
         )
-    ) if game_ids else []
+        if game_ids
+        else []
+    )
     post_ids = {post.id for post in game_posts}
-    publication_jobs = list(
-        db.scalars(
-            select(PublicationJob).where(
-                PublicationJob.club_id == current.club_id,
-                PublicationJob.post_id.in_(post_ids),
+    publication_jobs = (
+        list(
+            db.scalars(
+                select(PublicationJob).where(
+                    PublicationJob.club_id == current.club_id,
+                    PublicationJob.post_id.in_(post_ids),
+                )
             )
         )
-    ) if post_ids else []
+        if post_ids
+        else []
+    )
     channel_rows = operational_channels(db, current.club_id)
     publication_rows = publication_views(
         db,
@@ -5866,9 +5966,7 @@ def games(
         ]
         group["publication_rows"] = sorted(rows, key=lambda row: row.scheduled_at)
         group["publication_targets"] = list(
-            dict.fromkeys(
-                (row.channel.label, row.target) for row in group["publication_rows"]
-            )
+            dict.fromkeys((row.channel.label, row.target) for row in group["publication_rows"])
         )
         group["contribution_count"] = len({post.id for post in posts_for_group})
         group["attention"] = any(row.attention for row in rows)
@@ -6459,14 +6557,12 @@ def confirm_game_result(
     )
     game.overrides = overrides
 
-    result_changed = (
-        before["result_confirmed"]
-        and (before["home_score"], before["away_score"]) != (home_score, away_score)
-    )
+    result_changed = before["result_confirmed"] and (
+        before["home_score"],
+        before["away_score"],
+    ) != (home_score, away_score)
     reason = "Bestätigtes Spielergebnis wurde im Dashboard geändert"
-    affected_posts = (
-        _invalidate_posts_for_result_change(db, game, reason) if result_changed else []
-    )
+    affected_posts = _invalidate_posts_for_result_change(db, game, reason) if result_changed else []
     audit(
         db,
         current,
@@ -6535,9 +6631,7 @@ def generation_jobs(request: Request, current=Depends(current_user), db: Session
     }
     show_history = request.query_params.get("history") == "1"
     items = (
-        all_items
-        if show_history
-        else [item for item in all_items if item.id not in superseded_by]
+        all_items if show_history else [item for item in all_items if item.id not in superseded_by]
     )
     teams = {item.id: item for item in db.scalars(select(Team))}
     games_map = {item.id: item for item in db.scalars(select(Game))}

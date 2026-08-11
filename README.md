@@ -44,7 +44,7 @@ PUBLISHER_MODE=dry-run GLOBAL_PUBLISH_ENABLED=false docker compose -f docker-com
    Browser angezeigt. Eine neue Verbindung bleibt deaktiviert, bis sie ausdrücklich einer
    Mannschaft und den gewünschten Inhaltstypen zugewiesen wurde. Voraussetzungen,
    Sicherheit und Meta-App-Schritte beschreibt [`docs/META_CHANNELS.md`](docs/META_CHANNELS.md).
-2. **Mannschaft:** Namen/Slug, plausible `https://www.fussball.de/...`-URL, aktive Seite, relativen Medienunterordner, vorhandene Vorlagen/Fonts, Farben und Zeitzone anlegen. Löschen ist Soft-Delete/Archivierung.
+2. **Mannschaft:** Interner Name, Anzeigename, Vereins-/Spielgemeinschaftsname und eine plausible `https://www.fussball.de/...`-URL genügen. Kurzname, technische Kennung und Medienpfade werden serverseitig erzeugt. Instagram, Facebook und WhatsApp sind optionale Zuordnungen und können später geändert werden; eine Mannschaft benötigt bei der Anlage noch keinen Kanal. Löschen ist Soft-Delete/Archivierung.
 3. **Rechte:** Rolle und Mannschaftszuordnung sind getrennt. `all_teams=false` verlangt explizite `UserTeam`-Zeilen; direkte URLs und Services prüfen serverseitig.
 
 ### Vereinsbranding
@@ -72,7 +72,7 @@ Registrierung beantragen, bleiben aber bis zur ausdrücklichen Freigabe durch
 einen Administrator gesperrt. Nur Administratoren dürfen Konten direkt anlegen oder Rollen
 ändern; der letzte aktive Administrator kann nicht herabgestuft werden.
 4. **Zeitregeln:** Feed als Minuten vor Anpfiff; Story-Regeln referenzieren Anpfiff, geplantes Ende, Ergebniserkennung, Freigabe oder Folgetag, mit Offset/fester Uhrzeit. Jede Regel erzeugt einen Job; Kollisionen werden nicht unbemerkt dupliziert.
-5. **Medien:** Spielerbilder können in der Medienbibliothek als JPG, PNG oder WebP mehrfach hochgeladen oder aus einem read-only eingebundenen Team-Unterordner eingelesen werden. Dashboard-Uploads liegen getrennt im persistenten Upload-Volume; die externe Medienwurzel bleibt schreibgeschützt. Ein Bild wird atomar einem Spiel reserviert und darf in dessen Feed/Storys wiederverwendet werden. Ohne Bild entsteht eine neutrale Grafik mit Prüfhinweis.
+5. **Medien:** Spielerbilder können in der Medienbibliothek als JPG, PNG oder WebP mehrfach hochgeladen oder optional aus einer read-only eingebundenen Importquelle eingelesen werden. Dashboard-Uploads und neue Mannschaftslogos liegen automatisch unter einem UUID-basierten Vereins- und Mannschaftsnamespace im persistenten Upload-Volume; Anwender pflegen keine Ordnernamen. Die externe Medienwurzel bleibt ein optionaler, schreibgeschützter Importprovider. Ein Bild wird atomar einem Spiel reserviert und darf in dessen Feed/Storys wiederverwendet werden. Ohne Bild entsteht eine neutrale Grafik mit Prüfhinweis.
 6. **Workflow:** Worker synchronisiert Spiele, erzeugt Beiträge automatisch, rendert alle Dateien und Text. Freigeber prüft Version, Ziel und abgelaufene Zeiten. Jede relevante Änderung setzt offene Jobs auf erneute Freigabe.
 7. **Fehler:** Transiente Fehler werden begrenzt wiederholt. Token-/Rechtefehler stoppen. Timeout/unklare Antwort wird `uncertain`; Status muss bei Meta geprüft werden, bevor jemand erneut startet.
 

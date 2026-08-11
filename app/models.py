@@ -389,7 +389,9 @@ class Team(Base, Timestamped):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fussball_url: Mapped[str] = mapped_column(String(1000))
-    instagram_page_id: Mapped[str] = mapped_column(String(36))
+    # Compatibility link for the original Instagram-only workflow. New teams
+    # may be created without Instagram and use TeamChannelAssignment instead.
+    instagram_page_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     media_subdir: Mapped[str] = mapped_column(String(500))
     logo_path: Mapped[str | None] = mapped_column(String(500))
     logo_asset_id: Mapped[str | None] = mapped_column(ForeignKey("logo_assets.id"))
@@ -523,9 +525,7 @@ class SharedOpponentLogo(Base, Timestamped):
     source_club_id: Mapped[str | None] = mapped_column(
         ForeignKey("clubs.id", ondelete="SET NULL"), index=True
     )
-    uploaded_by: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL")
-    )
+    uploaded_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
 
 class MediaAsset(Base, Timestamped):
@@ -599,7 +599,10 @@ class ContentRuleSet(Base, Timestamped):
     __tablename__ = "content_rule_sets"
     __table_args__ = (
         UniqueConstraint(
-            "club_id", "scope_key", "post_type", "rule_version",
+            "club_id",
+            "scope_key",
+            "post_type",
+            "rule_version",
             name="uq_content_rule_set_scope_version",
         ),
         CheckConstraint("scope_type IN ('club', 'team', 'game')", name="ck_content_rule_scope"),
@@ -616,8 +619,12 @@ class ContentRuleSet(Base, Timestamped):
     club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     scope_type: Mapped[str] = mapped_column(String(10))
     scope_key: Mapped[str] = mapped_column(String(80), index=True)
-    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
-    game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id", ondelete="CASCADE"), index=True)
+    team_id: Mapped[str | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), index=True
+    )
+    game_id: Mapped[str | None] = mapped_column(
+        ForeignKey("games.id", ondelete="CASCADE"), index=True
+    )
     post_type: Mapped[str] = mapped_column(String(30), index=True)
     rule_version: Mapped[int] = mapped_column(Integer, default=1)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -796,7 +803,9 @@ class GeneratedMediaSlot(Base, Timestamped):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     post_id: Mapped[str] = mapped_column(ForeignKey("posts.id", ondelete="CASCADE"), index=True)
-    game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id", ondelete="SET NULL"), index=True)
+    game_id: Mapped[str | None] = mapped_column(
+        ForeignKey("games.id", ondelete="SET NULL"), index=True
+    )
     team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="RESTRICT"), index=True)
     story_rule_id: Mapped[str | None] = mapped_column(
         ForeignKey("story_rules.id", ondelete="SET NULL"), index=True
@@ -947,9 +956,7 @@ class GenerationJob(Base, Timestamped):
     __tablename__ = "generation_jobs"
     __table_args__ = (
         UniqueConstraint("club_id", "active_key", name="uq_generation_jobs_club_active_key"),
-        UniqueConstraint(
-            "club_id", "idempotency_key", name="uq_generation_jobs_club_idempotency"
-        ),
+        UniqueConstraint("club_id", "idempotency_key", name="uq_generation_jobs_club_idempotency"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
@@ -1035,9 +1042,7 @@ class SocialChannelConnection(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     channel_type: Mapped[str] = mapped_column(String(20), index=True)
     internal_name: Mapped[str] = mapped_column(String(120))
     display_name: Mapped[str] = mapped_column(String(160))
@@ -1054,9 +1059,7 @@ class SocialChannelConnection(Base, Timestamped):
     scopes: Mapped[list] = mapped_column(JSON, default=list)
     settings: Mapped[dict] = mapped_column(JSON, default=dict)
     encrypted_token: Mapped[str | None] = mapped_column(Text)
-    token_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), index=True
-    )
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     token_key_version: Mapped[str | None] = mapped_column(String(40))
     api_version: Mapped[str | None] = mapped_column(String(20))
     active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -1099,9 +1102,7 @@ class PostChannelContent(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     post_id: Mapped[str] = mapped_column(String(36), index=True)
     channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
     channel_type: Mapped[str] = mapped_column(String(20), index=True)
@@ -1126,9 +1127,7 @@ class SocialChannelOAuthState(Base):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     channel_type: Mapped[str] = mapped_column(String(20), index=True)
     state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     user_id: Mapped[str] = mapped_column(String(36), index=True)
@@ -1143,9 +1142,7 @@ class SocialChannelOAuthState(Base):
 class TeamChannelAssignment(Base, Timestamped):
     __tablename__ = "team_channel_assignments"
     __table_args__ = (
-        UniqueConstraint(
-            "team_id", "channel_connection_id", name="uq_team_channel_assignment"
-        ),
+        UniqueConstraint("team_id", "channel_connection_id", name="uq_team_channel_assignment"),
         ForeignKeyConstraint(
             ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="CASCADE"
         ),
@@ -1186,9 +1183,7 @@ class WhatsAppRecipient(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
     normalized_phone: Mapped[str] = mapped_column(String(32), index=True)
     display_name: Mapped[str | None] = mapped_column(String(160))
@@ -1228,9 +1223,7 @@ class WhatsAppAudience(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
     name: Mapped[str] = mapped_column(String(160))
     description: Mapped[str | None] = mapped_column(String(500))
@@ -1256,9 +1249,7 @@ class WhatsAppAudienceRecipient(Base):
     )
     audience_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     recipient_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
 
 
 class WhatsAppMessageTemplate(Base, Timestamped):
@@ -1278,9 +1269,7 @@ class WhatsAppMessageTemplate(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
     name: Mapped[str] = mapped_column(String(160))
     provider_template_id: Mapped[str] = mapped_column(String(160))
@@ -1314,9 +1303,7 @@ class ChannelDeliveryAttempt(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     publication_job_id: Mapped[str] = mapped_column(
         ForeignKey("publication_jobs.id", ondelete="CASCADE"), index=True
     )
@@ -1351,9 +1338,7 @@ class MetaWebhookEvent(Base):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     channel_type: Mapped[str] = mapped_column(String(20), index=True)
     channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
     provider_event_key: Mapped[str] = mapped_column(String(200))
@@ -1397,9 +1382,7 @@ class LiveReporter(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     user_id: Mapped[str | None] = mapped_column(String(36), index=True)
     channel_connection_id: Mapped[str | None] = mapped_column(String(36), index=True)
     normalized_phone: Mapped[str | None] = mapped_column(String(32), index=True)
@@ -1432,9 +1415,7 @@ class LiveReporterTeam(Base):
     )
     reporter_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     team_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
 
 
 class LiveGameState(Base, Timestamped):
@@ -1457,9 +1438,7 @@ class LiveGameState(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     game_id: Mapped[str] = mapped_column(String(36), index=True)
     team_id: Mapped[str] = mapped_column(String(36), index=True)
     phase: Mapped[str] = mapped_column(String(30), default="scheduled", index=True)
@@ -1526,14 +1505,10 @@ class MatchEvent(Base, Timestamped):
             "team_side IS NULL OR team_side IN ('own','opponent','neutral')",
             name="ck_match_event_team_side",
         ),
-        UniqueConstraint(
-            "club_id", "game_id", "event_sequence", name="uq_match_event_sequence"
-        ),
+        UniqueConstraint("club_id", "game_id", "event_sequence", name="uq_match_event_sequence"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     game_id: Mapped[str] = mapped_column(String(36), index=True)
     team_id: Mapped[str] = mapped_column(String(36), index=True)
     reporter_id: Mapped[str | None] = mapped_column(String(36), index=True)
@@ -1570,18 +1545,14 @@ class MatchEvent(Base, Timestamped):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     confirmed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     corrected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    corrected_by: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL")
-    )
+    corrected_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
 
 class LiveEventRule(Base, Timestamped):
     __tablename__ = "live_event_rules"
     __table_args__ = (
-        UniqueConstraint(
-            "club_id", "team_id", "event_type", name="uq_live_event_rule_team_type"
-        ),
+        UniqueConstraint("club_id", "team_id", "event_type", name="uq_live_event_rule_team_type"),
         ForeignKeyConstraint(
             ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="CASCADE"
         ),
@@ -1600,9 +1571,7 @@ class LiveEventRule(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     team_id: Mapped[str] = mapped_column(String(36), index=True)
     event_type: Mapped[str] = mapped_column(String(40), index=True)
     delivery_mode: Mapped[str] = mapped_column(String(20), default="off")
@@ -1644,9 +1613,7 @@ class LiveEventDelivery(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     event_id: Mapped[str] = mapped_column(String(36), index=True)
     rule_id: Mapped[str | None] = mapped_column(
         ForeignKey("live_event_rules.id", ondelete="SET NULL"), index=True
@@ -1678,9 +1645,7 @@ class LiveDeliveryAttempt(Base, Timestamped):
 
     __tablename__ = "live_delivery_attempts"
     __table_args__ = (
-        UniqueConstraint(
-            "club_id", "idempotency_key", name="uq_live_delivery_attempt_idempotency"
-        ),
+        UniqueConstraint("club_id", "idempotency_key", name="uq_live_delivery_attempt_idempotency"),
         ForeignKeyConstraint(
             ["delivery_id", "club_id"],
             ["live_event_deliveries.id", "live_event_deliveries.club_id"],
@@ -1702,9 +1667,7 @@ class LiveDeliveryAttempt(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     delivery_id: Mapped[str] = mapped_column(String(36), index=True)
     recipient_id: Mapped[str | None] = mapped_column(String(36), index=True)
     template_id: Mapped[str | None] = mapped_column(String(36), index=True)
@@ -2030,7 +1993,9 @@ class AiPromptDispatch(Base):
     status: Mapped[str] = mapped_column(String(30), default="dispatched", index=True)
     error_summary: Mapped[str | None] = mapped_column(String(500))
     idempotency_key: Mapped[str] = mapped_column(String(255))
-    dispatched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    dispatched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -2125,9 +2090,7 @@ class DirectUploadSession(Base, Timestamped):
         CheckConstraint("expected_size_bytes > 0", name="ck_direct_upload_expected_size"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
     actor_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     ledger_entry_id: Mapped[str] = mapped_column(
         ForeignKey("storage_ledger_entries.id", ondelete="CASCADE"), unique=True

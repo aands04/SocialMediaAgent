@@ -7,27 +7,37 @@
     <input type="hidden" name="csrf_token" value="{{csrf}}">
     <label>Interner Name<input name="internal_name" required></label>
     <label>Anzeigename<input name="display_name" required></label>
-    <label>Kurzname<input name="short_name" required maxlength="30"></label>
-    <label>Slug<input name="slug" required pattern="[a-z0-9-]+"></label>
-    <label>Verein<input name="club" required></label>
+    <label>Vereins- oder Spielgemeinschaftsname<input name="club" required></label>
     <label>FUSSBALL.DE-Link<input name="fussball_url" type="url" required></label>
-    <label>Instagram-Seite
-      <select name="instagram_page_id" required>
-        {% for p in pages %}<option value="{{p.id}}">{{p.display_name}}{% if not p.active %} (inaktiv){% endif %}</option>{% endfor %}
-      </select>
-    </label>
-    <label>Medien-Unterordner<input name="media_subdir" required></label>
-    <button>Anlegen</button>
+    <fieldset class="team-channel-choices full-span">
+      <legend>Social-Media-Kanäle <span class="field-kind optional">optional</span></legend>
+      <p class="field-help">Die Mannschaft kann ohne Kanal angelegt werden. Verbindungen lassen sich jederzeit unter „Social-Media-Kanäle“ zuordnen oder ändern.</p>
+      {% if available_channels %}
+        <div class="team-channel-choice-grid">
+        {% for channel in available_channels %}
+          {% set channel_label = {'instagram':'Instagram','facebook':'Facebook','whatsapp':'WhatsApp'}.get(channel.channel_type, channel.channel_type) %}
+          <label class="team-channel-choice">
+            <input type="checkbox" name="channel_connection_ids" value="{{channel.id}}">
+            <span><strong>{{channel_label}}</strong><small>{{channel.display_name}}{% if channel.username %} · @{{channel.username.lstrip('@')}}{% elif channel.display_phone_number %} · {{channel.display_phone_number}}{% endif %}</small></span>
+          </label>
+        {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty-state">Noch kein einsatzbereiter Kanal vorhanden. Die Mannschaft kann trotzdem angelegt werden.</p>
+      {% endif %}
+    </fieldset>
+    <div class="full-span team-storage-note"><strong>Medienablage wird automatisch eingerichtet</strong><small>Spielerbilder, Logos, Hintergründe und Importe werden sicher im Vereins- und Mannschaftsbereich abgelegt.</small></div>
+    <button class="full-span">Mannschaft anlegen</button>
   </form>
 </section>
 <section>
   <h2>Vorhandene Mannschaften</h2>
   <table>
-    <tr><th>Name</th><th>Verifiziertes Vereinslogo</th><th>Instagram / Ordner</th><th>Status</th><th>Aktionen</th></tr>
+    <tr><th>Name</th><th>Verifiziertes Vereinslogo</th><th>Kanäle / Medien</th><th>Status</th><th>Aktionen</th></tr>
     {% for x in items %}
     {% set logo=logos.get(x.id) %}
     <tr>
-      <td>{{x.display_name}}<small>{{x.slug}}</small></td>
+      <td>{{x.display_name}}<small>Interner Name: {{x.internal_name}}</small></td>
       <td>
         {% if logo %}
           <img class="logo-thumb" width="88" height="88" src="/logos/{{logo.id}}/preview" alt="Vereinslogo {{x.display_name}}">
@@ -59,7 +69,14 @@
           <button>Logo prüfen und speichern</button>
         </form>
       </td>
-      <td>{{x.instagram_page_id}}<small>{{x.media_subdir}}</small></td>
+      <td>
+        {% if team_channel_labels.get(x.id) %}
+          {% for label in team_channel_labels.get(x.id) %}<span class="team-channel-pill">{{label}}</span>{% endfor %}
+        {% else %}
+          <span class="field-help">Noch kein Kanal zugeordnet</span>
+        {% endif %}
+        <small>Medienablage: automatisch verwaltet</small>
+      </td>
       <td>{{'aktiv' if x.active else 'inaktiv'}}</td>
       <td>
         <form method="post" action="/teams/{{x.id}}/state">
