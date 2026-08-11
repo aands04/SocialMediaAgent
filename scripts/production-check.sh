@@ -127,6 +127,8 @@ fi
 
 check "Webanwendung erreichbar" curl -fsS "http://127.0.0.1:${HTTP_PORT:-8083}/health"
 check "Anmeldeseite erreichbar" sh -c "curl -fsS http://127.0.0.1:${HTTP_PORT:-8083}/login | grep -q csrf_token"
+check "Datenschutzseite öffentlich erreichbar" sh -c "curl -fsS http://127.0.0.1:${HTTP_PORT:-8083}/datenschutz | grep -q Datenschutzerklärung"
+check "Datenlöschungsseite öffentlich erreichbar" sh -c "curl -fsS http://127.0.0.1:${HTTP_PORT:-8083}/datenloeschung | grep -q Datenlöschung"
 check "Aktuelle Alembic-Migration installiert" check_alembic_head
 check "Worker-Modus stimmt mit den Gates überein" sh -c \
   "$COMPOSE exec -T worker /app/scripts/entrypoint.sh python -c 'import json; from app.config import get_settings; s=get_settings(); d=json.load(open(s.log_root / \"worker-heartbeat.json\")); expected=s.global_publish_enabled and s.meta_scheduler_enabled and s.meta_automatic_publish_enabled; assert d[\"automatic_scheduler\"] is expected'"

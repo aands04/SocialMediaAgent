@@ -34,6 +34,7 @@ from app.channels.routes import router as channels_router
 from app.channels.webhooks import router as channel_webhook_router
 from app.config import get_settings
 from app.db import get_db
+from app.legal.routes import router as legal_router
 from app.limits.service import effective_limits
 from app.live.routes import router as live_router
 from app.meta.routes import router as meta_router
@@ -731,3 +732,4 @@ app.include_router(channel_webhook_router)
 app.include_router(live_router)
 app.include_router(platform_router)
 app.include_router(storage_router)
+app.include_router(legal_router)

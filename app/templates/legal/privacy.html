@@ -1,0 +1,93 @@
+{% extends 'base.html' %}
+{% set title = 'Datenschutz | Vereinszentrale' %}
+{% set description = 'Datenschutzhinweise der Vereinszentrale für Instagram, Facebook und WhatsApp.' %}
+{% block content %}
+<article class="legal-page">
+  <header class="legal-page__header">
+    <p class="eyebrow">Vereinszentrale</p>
+    <h1>Datenschutzerklärung</h1>
+    <p>Diese Hinweise erläutern, wie personenbezogene Daten bei der Nutzung der Vereinszentrale und ihrer Verbindungen zu Instagram, Facebook und WhatsApp verarbeitet werden.</p>
+    <p class="legal-page__version">Stand: {{ effective_date }}</p>
+  </header>
+
+  <nav class="legal-page__nav" aria-label="Inhalt der Datenschutzerklärung">
+    <a href="#verantwortung">Verantwortung</a>
+    <a href="#daten">Verarbeitete Daten</a>
+    <a href="#meta">Meta-Kanäle</a>
+    <a href="#empfaenger">Empfänger</a>
+    <a href="#speicherung">Speicherung</a>
+    <a href="#rechte">Ihre Rechte</a>
+  </nav>
+
+  <section id="verantwortung">
+    <h2>1. Verantwortliche Stellen</h2>
+    <p>Für den technischen Betrieb der Vereinszentrale und die zugehörige Meta-App ist verantwortlich:</p>
+    <address>
+      <strong>{{ controller_name }}</strong><br>
+      {{ controller_street }}<br>
+      {{ controller_city }}<br>
+      E-Mail: <a href="mailto:{{ contact_email }}">{{ contact_email }}</a>
+    </address>
+    <p>Weitere Angaben zum Betreiber und zur Vertretung finden Sie im <a href="{{ imprint_url }}" rel="noopener noreferrer">Impressum</a>.</p>
+    <p>Vereine, die die Plattform als eigener Mandant nutzen, sind für ihre eingestellten Inhalte, Benutzer, Social-Media-Konten und WhatsApp-Empfänger innerhalb ihres Verantwortungsbereichs zuständig. Fragen zu einem konkreten Verein können zunächst an dessen Vereinsadministration gerichtet werden.</p>
+  </section>
+
+  <section id="daten">
+    <h2>2. Welche Daten verarbeitet werden</h2>
+    <p>Je nach Nutzung können insbesondere folgende Daten verarbeitet werden:</p>
+    <ul>
+      <li>Kontodaten wie Name, E-Mail-Adresse, Rolle, Vereins- und Mannschaftszuordnung;</li>
+      <li>Anmelde-, Sitzungs-, Sicherheits- und technische Protokolldaten;</li>
+      <li>Vereins-, Mannschafts-, Spiel-, Ergebnis-, Spielstätten- und Veröffentlichungsdaten;</li>
+      <li>hochgeladene Logos, Spielerfotos, Bilder, Schriftarten und sonstige Mediendateien;</li>
+      <li>Beiträge, Freigaben, geplante Veröffentlichungen und deren Status;</li>
+      <li>technische Kennungen verbundener Instagram-Konten, Facebook-Seiten und WhatsApp-Business-Konten;</li>
+      <li>verschlüsselt gespeicherte Verbindungs- und Zugriffstoken;</li>
+      <li>bei WhatsApp: Telefonnummer, Anzeigename, Einwilligungsstatus, Einwilligungsquelle, Nachrichtenpräferenzen sowie Versand- und Zustellstatus.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>3. Zwecke und Rechtsgrundlagen</h2>
+    <p>Die Verarbeitung erfolgt zur Bereitstellung und Absicherung der Plattform, zur Verwaltung von Vereinsinhalten, zur Erstellung und Freigabe von Beiträgen sowie zur vom Verein veranlassten Veröffentlichung oder zum Versand über verbundene Kanäle.</p>
+    <p>Rechtsgrundlagen sind je nach Vorgang Art. 6 Abs. 1 Buchst. b DSGVO (Vertrag und vorvertragliche Maßnahmen), Art. 6 Abs. 1 Buchst. f DSGVO (berechtigtes Interesse an sicherem und effizientem Plattformbetrieb), Art. 6 Abs. 1 Buchst. a DSGVO (Einwilligung, insbesondere bei WhatsApp-Empfängern) und Art. 6 Abs. 1 Buchst. c DSGVO (rechtliche Verpflichtungen).</p>
+  </section>
+
+  <section id="meta">
+    <h2>4. Instagram, Facebook und WhatsApp</h2>
+    <p>Die Verbindung erfolgt ausschließlich über offizielle Schnittstellen von Meta. Passwörter für Instagram, Facebook oder WhatsApp werden nicht in der Vereinszentrale gespeichert.</p>
+    <p>Nach ausdrücklicher Verbindung werden die für das ausgewählte Konto erforderlichen Kennungen und verschlüsselten Token gespeichert. Diese Daten werden verwendet, um Verbindungen zu prüfen und freigegebene Inhalte zu veröffentlichen oder WhatsApp-Nachrichten an zulässige Empfänger zu versenden.</p>
+    <p>WhatsApp-Nachrichten werden nur an Empfänger versendet, deren erforderliche Einwilligung dokumentiert wurde. Eine Abmeldung sperrt künftige Nachrichten. Die Plattform veröffentlicht keine automatischen WhatsApp-Statusmeldungen.</p>
+    <p>Für die Verarbeitung durch Meta gelten ergänzend die <a href="https://www.facebook.com/privacy/policy/" rel="noopener noreferrer">Datenschutzhinweise von Meta</a>.</p>
+  </section>
+
+  <section id="empfaenger">
+    <h2>5. Dienstleister und Datenübermittlungen</h2>
+    <p>Daten werden nur weitergegeben, soweit dies für den Betrieb oder eine beauftragte Funktion erforderlich ist. Dazu können Hosting- und Speicheranbieter, E-Mail-Dienstleister, Meta Platforms für die verbundenen Social-Media-Kanäle und der konfigurierte KI-Dienstleister für beauftragte Text- und Bildgenerierungen gehören.</p>
+    <p>Bei Anbietern außerhalb der Europäischen Union oder des Europäischen Wirtschaftsraums erfolgt eine Übermittlung nur auf Grundlage der anwendbaren Datenschutzvorgaben, insbesondere eines Angemessenheitsbeschlusses oder geeigneter Garantien wie Standardvertragsklauseln.</p>
+  </section>
+
+  <section id="speicherung">
+    <h2>6. Speicherdauer und Sicherheit</h2>
+    <p>Daten werden nur so lange gespeichert, wie sie für den jeweiligen Zweck, die Sicherheit und Nachvollziehbarkeit des Betriebs oder gesetzliche Aufbewahrungspflichten erforderlich sind. Verbindungsdaten werden nach einer Trennung gesperrt oder gelöscht, soweit keine Sicherheits- oder Nachweispflichten entgegenstehen.</p>
+    <p>Zugangstoken werden verschlüsselt gespeichert und weder im Browser noch in normalen Protokollen oder Auditansichten ausgegeben. Vereinsdaten sind technisch und organisatorisch nach Mandanten getrennt.</p>
+  </section>
+
+  <section>
+    <h2>7. Automatisierte Verarbeitung</h2>
+    <p>Die Plattform kann Beiträge automatisiert vorbereiten und nach den hinterlegten Regeln verarbeiten. Entscheidungen mit rechtlicher oder vergleichbar erheblicher Wirkung im Sinne von Art. 22 DSGVO werden dadurch nicht getroffen.</p>
+  </section>
+
+  <section id="rechte">
+    <h2>8. Ihre Rechte</h2>
+    <p>Betroffene Personen haben nach Maßgabe der gesetzlichen Voraussetzungen insbesondere das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit und Widerspruch. Eine erteilte Einwilligung kann mit Wirkung für die Zukunft widerrufen werden.</p>
+    <p>Anfragen richten Sie bitte an <a href="mailto:{{ contact_email }}">{{ contact_email }}</a>. Einzelheiten zum Löschverfahren finden Sie unter <a href="/datenloeschung">Datenlöschung</a>.</p>
+    <p>Darüber hinaus besteht das Recht, sich bei einer zuständigen Datenschutzaufsichtsbehörde zu beschweren.</p>
+  </section>
+
+  <section>
+    <h2>9. Änderungen</h2>
+    <p>Diese Datenschutzerklärung wird angepasst, wenn sich Funktionen, Dienstleister oder rechtliche Anforderungen ändern. Auf dieser Seite ist jeweils die aktuelle Fassung abrufbar.</p>
+  </section>
+</article>
+{% endblock %}

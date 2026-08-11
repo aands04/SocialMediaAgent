@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     timezone: str = "Europe/Berlin"
     session_max_age: int = 3600
     app_public_base_url: str | None = None
+    legal_controller_name: str = "SV Blau Weiß Ehlen 1901 e.V."
+    legal_controller_street: str = "Erleweg 20"
+    legal_controller_city: str = "34317 Habichtswald-Ehlen"
+    legal_contact_email: str = "socialmedia@svehlen.de"
+    legal_imprint_url: str = "https://www.svehlen.de/impressum-datenschutz"
+    legal_privacy_effective_date: str = "11. August 2026"
     password_reset_enabled: bool = False
     password_reset_token_ttl_seconds: int = 1800
     password_reset_request_cooldown_seconds: int = 60

@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  {% if description %}<meta name="description" content="{{ description }}">{% endif %}
+  {% if robots %}<meta name="robots" content="{{ robots }}">{% endif %}
   <title>{{ title or 'Vereinszentrale' }}</title>
   <link rel="stylesheet" href="/static/style.css?v=20260811-media-library">
 </head>
@@ -48,5 +50,9 @@
   {% if request.query_params.get('notice') %}<div class="notice">{{ request.query_params.get('notice') }}</div>{% endif %}
   {% block content %}{% endblock %}
 </main>
+<footer class="site-footer">
+  <a href="/datenschutz">Datenschutz</a>
+  <a href="/datenloeschung">Datenlöschung</a>
+</footer>
 </body>
 </html>
