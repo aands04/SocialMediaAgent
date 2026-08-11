@@ -46,7 +46,6 @@ from app.models import (
     PlanProfile,
     PublicationJob,
     Role,
-    StorageObject,
     Team,
     User,
 )
@@ -54,6 +53,7 @@ from app.monitoring.service import system_status
 from app.platform.routes import router as platform_router
 from app.publishing.presentation import operational_channels, publication_views
 from app.storage.routes import router as storage_router
+from app.storage.service import format_storage_gb, storage_usage
 from app.tenancy.state import clear_scope, reset_scope
 from app.usage.service import usage_summary
 from app.web import berlin_datetime, csrf_token, current_user, optional_current_user
@@ -679,24 +679,16 @@ def dashboard(
     limits = effective_limits(db, current.club_id)
     text_usage = usage_summary(db, current.club_id, "text")
     image_usage = usage_summary(db, current.club_id, "image")
-    storage_used = int(
-        db.scalar(
-            select(func.coalesce(func.sum(StorageObject.size_bytes), 0)).where(
-                StorageObject.club_id == current.club_id,
-                StorageObject.deleted_at.is_(None),
-                StorageObject.billable.is_(True),
-            )
-        )
-        or 0
-    )
+    storage_committed, storage_reserved = storage_usage(db, current.club_id)
+    storage_used = storage_committed + storage_reserved
     usage_cards = {
         "plan": db.get(PlanProfile, club.plan_profile_id),
         "storage": {
             "used": storage_used,
             "limit": limits["storage_bytes"].value,
-            "used_gb": f"{storage_used / (1024**3):.2f}".replace(".", ","),
-            "limit_gb": f"{limits['storage_bytes'].value / (1024**3):.2f}".replace(
-                ".", ","
+            "used_gb": format_storage_gb(storage_used, fixed_decimals=True),
+            "limit_gb": format_storage_gb(
+                limits["storage_bytes"].value, fixed_decimals=False
             ),
             "percent": round(storage_used * 100 / max(1, limits["storage_bytes"].value)),
         },

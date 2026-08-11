@@ -47,6 +47,8 @@ ALLOWED_MIME_TYPES = {
     "application/zip",
 }
 
+DECIMAL_GB_BYTES = 1_000_000_000
+
 
 class StorageQuotaError(ValueError):
     pass
@@ -118,6 +120,17 @@ def storage_usage(db: Session, club_id: str) -> tuple[int, int]:
     """Return committed and currently reserved billable bytes for one club."""
 
     return _storage_usage(db, club_id)
+
+
+def format_storage_gb(value_bytes: int, *, fixed_decimals: bool) -> str:
+    """Format storage capacities consistently as decimal GB for the German UI."""
+
+    value = max(0, int(value_bytes or 0)) / DECIMAL_GB_BYTES
+    decimals = 2 if fixed_decimals or not value.is_integer() else 0
+    formatted = f"{value:,.{decimals}f}"
+    return formatted.replace(",", "\N{NO-BREAK SPACE}").replace(".", ",").replace(
+        "\N{NO-BREAK SPACE}", "."
+    )
 
 
 def commit_local_media_upload(
