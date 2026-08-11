@@ -5715,7 +5715,14 @@ async def update_opponent_logo(
 
 
 @router.get("/games", response_class=HTMLResponse)
-def games(request: Request, current=Depends(current_user), db: Session = Depends(get_db)):
+def games(
+    request: Request,
+    team_id: str = Query(default=""),
+    period: str = Query(default="upcoming"),
+    contribution_status: str = Query(default="all"),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
     if not current.club_id:
         raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
     teams = [
@@ -5724,16 +5731,32 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
             select(Team).where(
                 Team.club_id == current.club_id,
                 Team.archived_at.is_(None),
-            )
+            ).order_by(Team.display_name.asc(), Team.id.asc())
         )
         if require_visible(db, current, t.id)
     ]
+    team_map = {team.id: team for team in teams}
+    if team_id and team_id not in team_map:
+        raise HTTPException(403, "Diese Mannschaft ist nicht verfügbar")
+    allowed_periods = {"upcoming", "today", "next_7", "next_30", "past", "all"}
+    allowed_contribution_statuses = {
+        "all",
+        "missing",
+        "attention",
+        "planned",
+        "published",
+        "problem",
+    }
+    if period not in allowed_periods:
+        raise HTTPException(422, "Unbekannter Zeitraumfilter")
+    if contribution_status not in allowed_contribution_statuses:
+        raise HTTPException(422, "Unbekannter Beitragsstatus")
     visible_games = [
         g
         for g in db.scalars(
             select(Game)
             .where(Game.club_id == current.club_id)
-            .order_by(Game.kickoff.desc())
+            .order_by(Game.kickoff.asc(), Game.team_id.asc(), Game.id.asc())
         )
         if require_visible(db, current, g.team_id)
     ]
@@ -5749,7 +5772,43 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
         if bool((game.overrides or {}).get("dashboard_deleted"))
         or bool((game.overrides or {}).get("import_suppressed"))
     ]
-    team_map = {team.id: team for team in teams}
+    local_zone = ZoneInfo(settings.timezone)
+    now_local = datetime.now(timezone.utc).astimezone(local_zone)
+    today = now_local.date()
+
+    def local_kickoff(game: Game) -> datetime:
+        kickoff = game.kickoff
+        if kickoff.tzinfo is None:
+            kickoff = kickoff.replace(tzinfo=timezone.utc)
+        return kickoff.astimezone(local_zone)
+
+    if team_id:
+        items = [game for game in items if game.team_id == team_id]
+        suppressed_items = [game for game in suppressed_items if game.team_id == team_id]
+
+    def in_selected_period(game: Game) -> bool:
+        game_date = local_kickoff(game).date()
+        if period == "upcoming":
+            return game_date >= today
+        if period == "today":
+            return game_date == today
+        if period == "next_7":
+            return today <= game_date <= today + timedelta(days=6)
+        if period == "next_30":
+            return today <= game_date <= today + timedelta(days=29)
+        if period == "past":
+            return game_date < today
+        return True
+
+    items = [game for game in items if in_selected_period(game)]
+    team_order = {team.id: index for index, team in enumerate(teams)}
+    items.sort(
+        key=lambda game: (
+            local_kickoff(game),
+            team_order.get(game.team_id, len(team_order)),
+            game.id,
+        )
+    )
     logo_map = {
         game.id: db.get(LogoAsset, game.opponent_logo_id) if game.opponent_logo_id else None
         for game in items
@@ -5794,6 +5853,13 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
         if post.game_id in posts_by_game:
             posts_by_game[post.game_id].append(post)
     for group in game_groups:
+        group["games"].sort(
+            key=lambda game: (
+                local_kickoff(game),
+                team_order.get(game.team_id, len(team_order)),
+                game.id,
+            )
+        )
         rows = [row for game in group["games"] for row in views_by_game.get(game.id, [])]
         posts_for_group = [
             post for game in group["games"] for post in posts_by_game.get(game.id, [])
@@ -5820,13 +5886,69 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
             (row.post for row in rows if row.post),
             posts_for_group[0] if posts_for_group else None,
         )
-    day_groups: dict[object, list[dict]] = {}
+        job_statuses = {row.job.status for row in rows}
+        post_statuses = {post.status for post in posts_for_group}
+        if JobStatus.FAILED in job_statuses or JobStatus.UNCERTAIN in job_statuses or PostStatus.ERROR in post_statuses:
+            status_key, status_label = "problem", "Problem"
+        elif (
+            any(row.attention for row in rows)
+            or post_statuses
+            & {
+                PostStatus.CREATING,
+                PostStatus.INCOMPLETE,
+                PostStatus.PENDING,
+                PostStatus.REAPPROVAL,
+            }
+        ):
+            status_key, status_label = "attention", "Freigabe ausstehend"
+        elif JobStatus.PUBLISHED in job_statuses or PostStatus.PUBLISHED in post_statuses:
+            if job_statuses and job_statuses <= {
+                JobStatus.PUBLISHED,
+                JobStatus.CANCELLED,
+                JobStatus.SKIPPED,
+            }:
+                status_key, status_label = "published", "Veröffentlicht"
+            else:
+                status_key, status_label = "attention", "Teilweise veröffentlicht"
+        elif job_statuses & {
+            JobStatus.APPROVED,
+            JobStatus.SCHEDULED,
+            JobStatus.WAITING,
+            JobStatus.PUBLISHING,
+            JobStatus.RETRY,
+        } or PostStatus.SCHEDULED in post_statuses:
+            status_key, status_label = "planned", "Geplant"
+        elif posts_for_group:
+            status_key, status_label = "attention", "Manuelle Planung erforderlich"
+        else:
+            status_key, status_label = "missing", "Beitrag kann erstellt werden"
+        group["status_key"] = status_key
+        group["status_label"] = status_label
+        group["contribution_label"] = "Erstellt" if posts_for_group else "Noch nicht erstellt"
+        group["channel_labels"] = list(
+            dict.fromkeys(row.channel.label for row in group["publication_rows"])
+        )
+        group["action_label"] = {
+            "missing": "Gemeinsamen Beitrag erstellen" if group["grouped"] else "Beitrag erstellen",
+            "attention": "Gemeinsamen Beitrag prüfen" if group["grouped"] else "Beitrag prüfen",
+            "planned": "Beitrag ansehen",
+            "published": "Veröffentlichung ansehen",
+            "problem": "Beitrag prüfen",
+        }[status_key]
+
+    if contribution_status != "all":
+        game_groups = [
+            group for group in game_groups if group["status_key"] == contribution_status
+        ]
+
+    upcoming_groups: dict[object, list[dict]] = {}
+    past_groups: dict[object, list[dict]] = {}
     for group in game_groups:
-        kickoff = group["games"][0].kickoff
-        if kickoff.tzinfo is None:
-            kickoff = kickoff.replace(tzinfo=timezone.utc)
-        local_date = kickoff.astimezone(ZoneInfo(settings.timezone)).date()
-        day_groups.setdefault(local_date, []).append(group)
+        local_date = min(local_kickoff(game) for game in group["games"]).date()
+        target = upcoming_groups if local_date >= today else past_groups
+        target.setdefault(local_date, []).append(group)
+    upcoming_day_groups = sorted(upcoming_groups.items(), key=lambda row: row[0])
+    past_day_groups = sorted(past_groups.items(), key=lambda row: row[0], reverse=True)
     return render(
         request,
         "games.html",
@@ -5836,10 +5958,15 @@ def games(request: Request, current=Depends(current_user), db: Session = Depends
         logo_map=logo_map,
         opponents=opponents,
         game_groups=game_groups,
-        day_groups=list(day_groups.items()),
+        upcoming_day_groups=upcoming_day_groups,
+        past_day_groups=past_day_groups,
+        today=today,
+        selected_team_id=team_id,
+        selected_period=period,
+        selected_contribution_status=contribution_status,
         views_by_game=views_by_game,
         suppressed_items=suppressed_items,
-        title="Spiele und Testdaten",
+        title="Spiele",
     )
 
 
@@ -5875,7 +6002,7 @@ def connect_game_bundle(
         {"game_ids": selected_ids},
     )
     db.commit()
-    return redirect("/games", "Spiele wurden bewusst zu einem Auftrag verbunden")
+    return redirect("/games", "Spiele wurden zu einem gemeinsamen Spieltag zusammengefasst")
 
 
 @router.post("/games/bundles/separate")
@@ -5904,11 +6031,11 @@ def separate_game_bundle(
         {"game_ids": selected_ids},
     )
     db.commit()
-    return redirect("/games", "Spiele wurden bewusst getrennt")
+    return redirect("/games", "Spiele werden künftig getrennt behandelt")
 
 
 @router.post("/games/mock")
-def create_mock_game(
+async def create_mock_game(
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
     team_id: str = Form(),
@@ -5918,6 +6045,7 @@ def create_mock_game(
     competition: str = Form(default=""),
     venue: str = Form(default=""),
     pitch: str = Form(default=""),
+    opponent_logo: UploadFile | None = File(default=None),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -5967,10 +6095,46 @@ def create_mock_game(
         db.flush()
     except IntegrityError as e:
         db.rollback()
-        raise HTTPException(409, "Dieses Testspiel existiert bereits") from e
-    audit(db, current, "game.mock_created", "game", item.id, team_id)
+        raise HTTPException(409, "Dieses Spiel existiert bereits") from e
+    if opponent_logo and opponent_logo.filename:
+        try:
+            logo_data = await opponent_logo.read()
+            logo, _ = store_logo(
+                db,
+                upload_root=settings.upload_root,
+                logo_type="opponent",
+                team_id=None,
+                display_name=opponent,
+                original_filename=opponent_logo.filename,
+                content_type=opponent_logo.content_type,
+                data=logo_data,
+                uploaded_by=current.id,
+            )
+            publish_shared_opponent_logo(
+                db,
+                upload_root=settings.upload_root,
+                source=logo,
+                data=logo_data,
+            )
+            item.opponent_logo_id = logo.id
+            item.overrides = {
+                **(item.overrides or {}),
+                "opponent_logo_source": "manual_upload_confirmed",
+            }
+        except LogoValidationError as exc:
+            db.rollback()
+            raise HTTPException(422, str(exc)) from exc
+    audit(
+        db,
+        current,
+        "game.mock_created",
+        "game",
+        item.id,
+        team_id,
+        {"opponent_logo_uploaded": bool(item.opponent_logo_id)},
+    )
     db.commit()
-    return redirect("/games", "Lokales Testspiel angelegt")
+    return redirect("/games", "Spiel wurde manuell angelegt")
 
 
 @router.post("/games/{game_id}/delete")
@@ -6108,7 +6272,7 @@ def delete_game(
     db.delete(game)
     db.flush()
     db.commit()
-    return redirect("/games", "Lokales Testspiel gelöscht")
+    return redirect("/games", "Spiel wurde gelöscht")
 
 
 @router.post("/games/{game_id}/restore")
