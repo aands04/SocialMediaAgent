@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.games.identity import normalize_team_name, opponent_for_game
 from app.models import LogoAsset, SharedOpponentLogo
+from app.teams.service import team_media_prefix
 
 MAX_LOGO_SIZE = 5 * 1024 * 1024
 MIN_DIMENSION = 32
@@ -96,6 +97,8 @@ def store_logo(
     content_type: str | None,
     data: bytes,
     uploaded_by: str,
+    club_id: str | None = None,
+    team_slug: str | None = None,
 ) -> tuple[LogoAsset, bool]:
     if logo_type not in {"team", "opponent"}:
         raise LogoValidationError("Unbekannte Logoart.")
@@ -123,9 +126,16 @@ def store_logo(
     )
     version = int(latest or 0) + 1
     token = uuid4().hex
-    folder = "teams" if logo_type == "team" else "opponents"
-    relative_original = Path("logos") / folder / f"{token}{suffix}"
-    relative_render = Path("logos") / folder / f"{token}-render.png"
+    if logo_type == "team" and club_id and team_id:
+        base = team_media_prefix(club_id, team_id, team_slug or team_id) / "logos"
+    elif logo_type == "opponent" and club_id:
+        base = Path("clubs") / club_id / "logos" / "opponents"
+    else:
+        # Compatibility for existing imports and direct service integrations.
+        folder = "teams" if logo_type == "team" else "opponents"
+        base = Path("logos") / folder
+    relative_original = base / f"{token}{suffix}"
+    relative_render = base / f"{token}-render.png"
     root = Path(upload_root).resolve()
     original = root / relative_original
     render = root / relative_render
@@ -249,6 +259,7 @@ def import_shared_opponent_logo(
     shared: SharedOpponentLogo,
     display_name: str,
     uploaded_by: str,
+    club_id: str | None = None,
 ) -> tuple[LogoAsset, bool]:
     if not shared.active or shared.archived_at:
         raise LogoValidationError("Das systemweite Gegnerlogo ist nicht mehr aktiv")
@@ -263,6 +274,7 @@ def import_shared_opponent_logo(
         content_type=shared.mime_type,
         data=path.read_bytes(),
         uploaded_by=uploaded_by,
+        club_id=club_id,
     )
 
 

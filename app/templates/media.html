@@ -2,7 +2,7 @@
 {% block content %}
 <h1>Spielerbilder</h1>
 <div class="{{ 'notice' if storage_ok else 'alert' }}">
-  Externe Medienwurzel: {{ 'erreichbar' if storage_ok else 'nicht erreichbar' }}
+  Automatische Medienablage: {{ 'bereit' if storage_ok else 'nicht erreichbar' }}
 </div>
 <form method="get">
   <label>Mannschaft
@@ -41,15 +41,20 @@
   </form>
 </section>
 <section>
-  <h2>Externe Medien einlesen</h2>
-  <p>
-    Konfigurierter Ordner: <code>{{ selected.media_subdir }}</code>.
-    Sichtbare Basisordner: {{ folders | join(', ') or 'keine' }}
-  </p>
-  <form method="post" action="/media/{{ selected.id }}/scan">
-    <input type="hidden" name="csrf_token" value="{{ csrf }}">
-    <button>Dateien neu einlesen</button>
-  </form>
+  <h2>Medienablage</h2>
+  <p>Spielerbilder werden automatisch im geschützten Vereins- und Mannschaftsbereich abgelegt. Ein Ordnername muss nicht eingerichtet oder gepflegt werden.</p>
+  {% if external_import_available %}
+    <details>
+      <summary>Optionalen externen Import verwenden</summary>
+      <p>Für diese Mannschaft ist zusätzlich eine bestehende externe Importquelle erreichbar.</p>
+      <form method="post" action="/media/{{ selected.id }}/scan">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button>Dateien aus externer Quelle neu einlesen</button>
+      </form>
+    </details>
+  {% else %}
+    <p class="field-help">Keine externe Importquelle eingerichtet. Uploads über das Dashboard funktionieren unabhängig davon.</p>
+  {% endif %}
 </section>
 <table>
   <tr>

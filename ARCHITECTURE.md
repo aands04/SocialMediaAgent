@@ -117,6 +117,15 @@ abgeleitete Ansichten.
 Neue SaaS-Objekte liegen privat unter
 `clubs/{club_uuid}/{category}/{object_uuid}`. Direkte Uploads erhalten nur
 kurzlebige signierte URLs und werden nach dem Upload serverseitig geprüft.
+Bei der Mannschaftsanlage erzeugt der Server zusätzlich den lokalen
+Kompatibilitätsnamespace
+`clubs/{club_uuid}/teams/{team_uuid}-{technischer_slug}/` mit den Bereichen
+`players`, `logos`, `backgrounds` und `imports`. Der Slug wird automatisch aus
+dem internen Mannschaftsnamen abgeleitet und ist kein Berechtigungsmerkmal;
+Vereins- und Mannschafts-UUID bleiben die Sicherheitsgrenze. Social-Media-
+Verbindungen werden optional über mandantengebundene
+`TeamChannelAssignment`-Zeilen zugewiesen, nicht über ein Pflichtfeld für
+Instagram.
 Bestehende lokale Dateipfade bleiben vorerst über den Legacypfad lesbar; SMB ist
 nur Importprovider. Diese schrittweise Kompatibilität verhindert einen
 ungeprüften Big-Bang-Umzug produktiver Medien.

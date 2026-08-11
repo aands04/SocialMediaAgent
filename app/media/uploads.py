@@ -12,6 +12,8 @@ from uuid import uuid4
 
 from PIL import Image, UnidentifiedImageError
 
+from app.teams.service import team_media_prefix
+
 MAX_PLAYER_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_PLAYER_IMAGE_FILES = 25
 MAX_PLAYER_IMAGE_ARCHIVE_BYTES = 500 * 1024 * 1024
@@ -215,6 +217,9 @@ def store_player_image(
     upload_root: Path,
     team_id: str,
     image: ValidatedPlayerImage,
+    *,
+    club_id: str | None = None,
+    team_slug: str | None = None,
 ) -> tuple[str, Path]:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", team_id):
         raise PlayerImageUploadError("Ungültige Mannschafts-ID")
@@ -222,7 +227,12 @@ def store_player_image(
     root.mkdir(parents=True, exist_ok=True)
     if root.is_symlink():
         raise PlayerImageUploadError("Upload-Wurzel darf kein symbolischer Link sein")
-    folder = root / "player-images" / team_id
+    if club_id:
+        folder = root / team_media_prefix(club_id, team_id, team_slug or team_id) / "players"
+    else:
+        # Existing integrations and old tests may still use the legacy helper
+        # signature. New dashboard uploads always pass a club_id.
+        folder = root / "player-images" / team_id
     folder.mkdir(parents=True, exist_ok=True)
     folder = folder.resolve()
     if not folder.is_relative_to(root) or folder.is_symlink():
