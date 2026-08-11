@@ -152,7 +152,7 @@ def test_secure_versioned_logo_storage_and_normalization(db, tmp_path):
             data=b"not-an-image",
             uploaded_by=user.id,
         )
-    with pytest.raises(LogoValidationError, match="5 MiB"):
+    with pytest.raises(LogoValidationError, match="10 MiB"):
         store_logo(
             db,
             upload_root=root,
@@ -161,7 +161,7 @@ def test_secure_versioned_logo_storage_and_normalization(db, tmp_path):
             display_name="FC Zu Groß",
             original_filename="gross.png",
             content_type="image/png",
-            data=b"x" * (5 * 1024 * 1024 + 1),
+            data=b"x" * (10 * 1024 * 1024 + 1),
             uploaded_by=user.id,
         )
     traversal, _ = store_logo(
@@ -177,6 +177,56 @@ def test_secure_versioned_logo_storage_and_normalization(db, tmp_path):
     )
     assert ".." not in traversal.original_path
     assert traversal.original_filename == "escape.png"
+
+
+def test_large_phone_logo_is_accepted_and_oversized_dimensions_are_rejected(
+    db, tmp_path, monkeypatch
+):
+    user, _, _, _ = graph(db)
+    root = tmp_path / "uploads"
+
+    accepted, created = store_logo(
+        db,
+        upload_root=root,
+        logo_type="opponent",
+        team_id=None,
+        display_name="FC Hochauflösend",
+        original_filename="gross.png",
+        content_type="image/png",
+        data=image_bytes(size=(3831, 4263)),
+        uploaded_by=user.id,
+    )
+
+    assert created is True
+    assert (accepted.width, accepted.height) == (3831, 4263)
+    assert (root / accepted.render_path).is_file()
+
+    with pytest.raises(LogoValidationError, match="8192 Pixel"):
+        store_logo(
+            db,
+            upload_root=root,
+            logo_type="opponent",
+            team_id=None,
+            display_name="FC Zu Breit",
+            original_filename="zu-breit.png",
+            content_type="image/png",
+            data=image_bytes(size=(8193, 32)),
+            uploaded_by=user.id,
+        )
+
+    monkeypatch.setattr("app.logos.service.MAX_PIXEL_COUNT", 30_000)
+    with pytest.raises(LogoValidationError, match="40 Millionen"):
+        store_logo(
+            db,
+            upload_root=root,
+            logo_type="opponent",
+            team_id=None,
+            display_name="FC Zu Viele Pixel",
+            original_filename="zu-viele-pixel.png",
+            content_type="image/png",
+            data=image_bytes(size=(200, 200)),
+            uploaded_by=user.id,
+        )
 
 
 def test_deterministic_compositor_uses_originals_and_text_fallback(db, tmp_path):

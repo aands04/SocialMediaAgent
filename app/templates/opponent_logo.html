@@ -19,7 +19,7 @@
 {% endif %}
 <section>
   <h2>Neues Original hochladen</h2>
-  <p>Erlaubt sind ausschließlich technisch geprüfte PNG- und WebP-Dateien bis 5 MiB. Das Original bleibt unverändert erhalten.</p>
+  <p>Erlaubt sind ausschließlich technisch geprüfte PNG- und WebP-Dateien bis 10 MiB, 8192 Pixel je Achse und 40 Millionen Bildpunkte insgesamt. Das Original bleibt unverändert erhalten.</p>
   <form method="post" enctype="multipart/form-data" action="/games/{{game.id}}/opponent-logo">
     <input type="hidden" name="csrf_token" value="{{csrf}}">
     <input type="hidden" name="action" value="upload">
