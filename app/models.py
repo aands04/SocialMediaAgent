@@ -531,8 +531,19 @@ class SharedOpponentLogo(Base, Timestamped):
 class MediaAsset(Base, Timestamped):
     __tablename__ = "media_assets"
     __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_media_assets_id_club"),
         UniqueConstraint(
             "club_id", "team_id", "relative_path", name="uq_media_assets_club_team_path"
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"],
+            ["teams.id", "teams.club_id"],
+            ondelete="RESTRICT",
+            name="fk_media_assets_team_club",
+        ),
+        CheckConstraint(
+            "media_category IN ('match_photo', 'player_portrait', 'team_photo')",
+            name="ck_media_assets_category",
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
@@ -545,13 +556,164 @@ class MediaAsset(Base, Timestamped):
     filename: Mapped[str] = mapped_column(String(255))
     mime_type: Mapped[str] = mapped_column(String(80))
     size: Mapped[int] = mapped_column(Integer)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
     checksum: Mapped[str] = mapped_column(String(64))
     mtime: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     player_name: Mapped[str | None] = mapped_column(String(160))
+    media_category: Mapped[str] = mapped_column(
+        String(30), default="match_photo", server_default="match_photo", index=True
+    )
+    game_id: Mapped[str | None] = mapped_column(
+        ForeignKey("games.id", ondelete="SET NULL"), index=True
+    )
+    description: Mapped[str | None] = mapped_column(String(500))
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    photographer: Mapped[str | None] = mapped_column(String(160))
+    uploaded_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    automatic_usage_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", index=True
+    )
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     available: Mapped[bool] = mapped_column(Boolean, default=True)
-    reserved_game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id"), unique=True)
+    reserved_game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id"), index=True)
     uses: Mapped[int] = mapped_column(Integer, default=0)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class MediaUsageHistory(Base):
+    """Immutable, user-facing history of media selection and consumption."""
+
+    __tablename__ = "media_usage_history"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('reserved', 'reservation_released', 'used', 'released', 'manual_reuse', "
+            "'automatic_excluded', 'automatic_enabled', 'soft_deleted')",
+            name="ck_media_usage_history_action",
+        ),
+        ForeignKeyConstraint(
+            ["media_asset_id", "club_id"],
+            ["media_assets.id", "media_assets.club_id"],
+            ondelete="RESTRICT",
+            name="fk_media_usage_history_asset_club",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"],
+            ["teams.id", "teams.club_id"],
+            ondelete="RESTRICT",
+            name="fk_media_usage_history_team_club",
+        ),
+        ForeignKeyConstraint(
+            ["game_id", "club_id"],
+            ["games.id", "games.club_id"],
+            ondelete="RESTRICT",
+            name="fk_media_usage_history_game_club",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    media_asset_id: Mapped[str] = mapped_column(String(36), index=True)
+    team_id: Mapped[str] = mapped_column(String(36), index=True)
+    game_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    post_id: Mapped[str | None] = mapped_column(
+        ForeignKey("posts.id", ondelete="SET NULL"), index=True
+    )
+    contribution_type: Mapped[str | None] = mapped_column(String(30), index=True)
+    action: Mapped[str] = mapped_column(String(30), index=True)
+    actor_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
+class ClubMediaUsagePolicy(Base, Timestamped):
+    """Tenant policy defining which media categories a contribution may use."""
+
+    __tablename__ = "club_media_usage_policies"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id", "contribution_type", name="uq_club_media_policy_contribution"
+        ),
+        CheckConstraint(
+            "contribution_type IN ('announcement', 'reminder', 'result', 'live')",
+            name="ck_club_media_policy_contribution_type",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
+    )
+    contribution_type: Mapped[str] = mapped_column(String(30), index=True)
+    allowed_media_categories: Mapped[list] = mapped_column(JSON, default=list)
+    category_priority: Mapped[list] = mapped_column(JSON, default=list)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    updated_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+
+class GameMediaPreference(Base, Timestamped):
+    """Explicit or automatic media choice for one game and contribution type."""
+
+    __tablename__ = "game_media_preferences"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "game_id",
+            "team_id",
+            "contribution_type",
+            name="uq_game_media_preference_scope",
+        ),
+        CheckConstraint(
+            "selection_mode IN ('automatic', 'manual')",
+            name="ck_game_media_preference_mode",
+        ),
+        CheckConstraint(
+            "contribution_type IN ('announcement', 'reminder', 'result', 'live')",
+            name="ck_game_media_preference_contribution_type",
+        ),
+        CheckConstraint(
+            "selection_mode = 'automatic' OR selected_media_asset_id IS NOT NULL",
+            name="ck_game_media_preference_manual_asset",
+        ),
+        ForeignKeyConstraint(
+            ["game_id", "club_id"],
+            ["games.id", "games.club_id"],
+            ondelete="CASCADE",
+            name="fk_game_media_preference_game_club",
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"],
+            ["teams.id", "teams.club_id"],
+            ondelete="RESTRICT",
+            name="fk_game_media_preference_team_club",
+        ),
+        ForeignKeyConstraint(
+            ["selected_media_asset_id", "club_id"],
+            ["media_assets.id", "media_assets.club_id"],
+            ondelete="RESTRICT",
+            name="fk_game_media_preference_asset_club",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    game_id: Mapped[str] = mapped_column(String(36), index=True)
+    team_id: Mapped[str] = mapped_column(String(36), index=True)
+    contribution_type: Mapped[str] = mapped_column(String(30), index=True)
+    selection_mode: Mapped[str] = mapped_column(
+        String(20), default="automatic", server_default="automatic"
+    )
+    selected_media_asset_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    allow_used_once: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    selected_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    selected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class StoryRule(Base, Timestamped):

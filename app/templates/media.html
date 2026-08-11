@@ -1,95 +1,213 @@
 {% extends 'base.html' %}
 {% block content %}
-<h1>Spielerbilder</h1>
-<div class="{{ 'notice' if storage_ok else 'alert' }}">
-  Automatische Medienablage: {{ 'bereit' if storage_ok else 'nicht erreichbar' }}
-</div>
-<form method="get">
-  <label>Mannschaft
-    <select name="team_id" onchange="this.form.submit()">
-      {% for team in teams %}
-      <option value="{{ team.id }}" {% if selected and team.id == selected.id %}selected{% endif %}>{{ team.display_name }}</option>
-      {% endfor %}
-    </select>
-  </label>
-</form>
-{% if selected %}
-<section>
-  <h2>Spielerbilder hochladen</h2>
-  <p>
-    Bis zu 25 Bilder als einzelne JPG-, PNG- oder WebP-Dateien oder gemeinsam
-    in einem ZIP-Archiv; maximal 20 MiB je entpacktem Bild.
-  </p>
-  <form method="post" action="/media/{{ selected.id }}/upload" enctype="multipart/form-data">
-    <input type="hidden" name="csrf_token" value="{{ csrf }}">
-    <label>Bilder auswählen
-      <input
-        type="file"
-        name="files"
-        accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
-        multiple
-      >
-    </label>
-    <label>Alternativ ZIP-Archiv auswählen
-      <input
-        type="file"
-        name="archive"
-        accept=".zip,application/zip,application/x-zip-compressed"
-      >
-    </label>
-    <button>Spielerbilder hochladen</button>
-  </form>
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">BILDER UND FOTOS</p>
+    <h1>Medienbibliothek</h1>
+    <p>Verwalte die Bilder deines Vereins und bestimme, welche Fotos automatisch für Beiträge verwendet werden dürfen.</p>
+  </div>
+  <div class="storage-summary" aria-label="Speicherverbrauch">
+    <strong>{{ '%.2f'|format(storage_used_gb) }} GB{% if storage_limit_gb %} von {{ '%.2f'|format(storage_limit_gb) }} GB{% endif %}</strong>
+    <span>belegter Medienspeicher{% if storage_percent %} · {{ storage_percent }} %{% endif %}</span>
+    {% if storage_limit_gb %}<progress value="{{ storage_percent }}" max="100" aria-label="{{ storage_percent }} Prozent des Medienspeichers belegt"></progress>{% endif %}
+    {% if storage_percent >= 90 %}<small class="storage-warning">Der Medienspeicher ist fast ausgeschöpft. Neue Uploads können bald blockiert werden.</small>{% endif %}
+  </div>
+</header>
+
+<section class="media-category-overview" aria-label="Medienkategorien">
+  <a class="media-category-card{% if category == 'all' %} is-active{% endif %}" href="/media?team_id={{ filter_team_id }}&category=all">
+    <span class="media-category-icon" aria-hidden="true">▦</span>
+    <strong>Alle Bilder</strong>
+    <span>{{ total_media_count }} Bilder</span>
+  </a>
+  {% for key, label in category_labels.items() %}
+  <a class="media-category-card{% if category == key %} is-active{% endif %}" href="/media?team_id={{ filter_team_id }}&category={{ key }}">
+    <span class="media-category-icon" aria-hidden="true">{{ '⚽' if key == 'match_photo' else ('👤' if key == 'player_portrait' else '👥') }}</span>
+    <strong>{{ label }}</strong>
+    <span>{{ category_counts.get(key, 0) }} Bilder</span>
+  </a>
+  {% endfor %}
 </section>
+
 <section>
-  <h2>Medienablage</h2>
-  <p>Spielerbilder werden automatisch im geschützten Vereins- und Mannschaftsbereich abgelegt. Ein Ordnername muss nicht eingerichtet oder gepflegt werden.</p>
-  {% if external_import_available %}
-    <details>
-      <summary>Optionalen externen Import verwenden</summary>
-      <p>Für diese Mannschaft ist zusätzlich eine bestehende externe Importquelle erreichbar.</p>
-      <form method="post" action="/media/{{ selected.id }}/scan">
-        <input type="hidden" name="csrf_token" value="{{ csrf }}">
-        <button>Dateien aus externer Quelle neu einlesen</button>
-      </form>
-    </details>
-  {% else %}
-    <p class="field-help">Keine externe Importquelle eingerichtet. Uploads über das Dashboard funktionieren unabhängig davon.</p>
+  <h2>Bilder hochladen</h2>
+  <p class="field-help">JPG, PNG oder WebP – einzeln, mehrfach oder als ZIP-Archiv. Die Dateien werden automatisch im geschützten Vereins- und Mannschaftsbereich abgelegt.</p>
+  <details class="technical-details upload-requirements">
+    <summary>Technische Anforderungen anzeigen</summary>
+    <ul>
+      <li>Bis zu 25 Bilddateien pro Upload</li>
+      <li>Maximal 20 MiB je entpacktem Bild</li>
+      <li>Erlaubt sind JPG, PNG und WebP; alternativ ein sicheres ZIP-Archiv</li>
+    </ul>
+  </details>
+  {% if not selected and teams %}
+  <form method="get" class="guided-upload-team-choice">
+    <label>Mannschaft für den Upload <span class="required-marker">Erforderlich</span>
+      <select name="team_id" required>
+        <option value="">Bitte Mannschaft auswählen</option>
+        {% for team in teams %}<option value="{{ team.id }}">{{ team.display_name }}</option>{% endfor %}
+      </select>
+    </label>
+    <button>Upload vorbereiten</button>
+  </form>
+  <p class="field-help">Die allgemeine Galerie bleibt mannschaftsübergreifend sichtbar. Für einen Upload wird immer eine konkrete Mannschaft ausgewählt.</p>
+  {% elif selected %}
+  <form method="post" action="/media/{{ selected.id }}/upload" enctype="multipart/form-data" class="guided-upload-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <fieldset class="media-upload-category">
+      <legend>Kategorie <span class="required-marker">Erforderlich</span></legend>
+      <div class="media-category-options">
+        {% for key, label in category_labels.items() %}
+        <label class="media-category-option">
+          <input type="radio" name="media_category" value="{{ key }}" {% if key == 'match_photo' %}checked{% endif %} required>
+          <span><strong>{{ label }}</strong><small>{{ 'Fotos aus Spielen und Spielszenen' if key == 'match_photo' else ('Porträts einzelner Spielerinnen oder Spieler' if key == 'player_portrait' else 'Gemeinsame Mannschafts- und Gruppenfotos') }}</small></span>
+        </label>
+        {% endfor %}
+      </div>
+    </fieldset>
+    <div class="form-grid">
+      <label>Mannschaft <span class="required-marker">Erforderlich</span>
+        <select name="team_display" disabled><option>{{ selected.display_name }}</option></select>
+      </label>
+      <label>Zugehöriges Spiel <span class="optional-marker">Optional</span>
+        <select name="game_id">
+          <option value="">Keinem bestimmten Spiel zuordnen</option>
+          {% for game in games %}<option value="{{ game.id }}">{{ game.kickoff|berlin }} · {{ game.home_team }} – {{ game.away_team }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Aufnahmedatum <span class="optional-marker">Optional</span>
+        <input type="date" name="captured_date">
+      </label>
+      <label>Spieler oder Motiv <span class="optional-marker">Optional</span>
+        <input name="player_name" maxlength="160" placeholder="z. B. Max Mustermann">
+      </label>
+      <label>Fotograf/in <span class="optional-marker">Optional</span>
+        <input name="photographer" maxlength="160">
+      </label>
+    </div>
+    <label>Beschreibung <span class="optional-marker">Optional</span>
+      <textarea name="description" maxlength="500" rows="2" placeholder="Kurzer Hinweis zum Bild oder Anlass"></textarea>
+    </label>
+    <div class="form-grid">
+      <label>Bilder auswählen
+        <input type="file" name="files" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple>
+      </label>
+      <label>Oder ZIP-Archiv auswählen
+        <input type="file" name="archive" accept=".zip,application/zip,application/x-zip-compressed">
+      </label>
+    </div>
+    <button>Bilder hochladen</button>
+  </form>
   {% endif %}
 </section>
-<table>
-  <tr>
-    <th>Vorschau</th>
-    <th>Datei</th>
-    <th>Quelle</th>
-    <th>Größe</th>
-    <th>Prüfsumme</th>
-    <th>Verfügbarkeit</th>
-    <th>Nutzung</th>
-    <th>Aktion</th>
-  </tr>
-  {% for item in items %}
-  <tr>
-    <td>
-      {% if item.available %}
-      <img class="player-thumb" src="/media/{{ item.id }}/preview" alt="Vorschau {{ item.filename }}">
-      {% else %}
-      —
-      {% endif %}
-    </td>
-    <td>{{ item.filename }}<small>{{ item.player_name or 'Spieler nicht benannt' }}</small></td>
-    <td>{{ 'Dashboard-Upload' if item.storage_kind == 'upload' else 'Externer Ordner' }}</td>
-    <td>{{ item.size }}</td>
-    <td><code>{{ item.checksum[:12] }}</code></td>
-    <td>{{ 'vorhanden' if item.available else 'entfernt' }}</td>
-    <td>{{ item.uses }} / {{ item.reserved_game_id or 'frei' }}</td>
-    <td>
-      <form method="post" action="/media/{{ item.id }}/toggle">
-        <input type="hidden" name="csrf_token" value="{{ csrf }}">
-        <button>{{ 'Deaktivieren' if item.active else 'Aktivieren' }}</button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
-</table>
+
+{% if teams %}
+<section class="media-library-section">
+  <div class="section-heading-row">
+    <div>
+      <h2>Gespeicherte Medien</h2>
+      <p class="field-help">Technische Dateiinformationen findest du nur in der jeweiligen Detailansicht.</p>
+    </div>
+  </div>
+  <form method="get" class="media-filter-bar">
+    <label>Mannschaft
+      <select name="team_id">
+        <option value="all" {% if filter_team_id == 'all' %}selected{% endif %}>Alle berechtigten Mannschaften</option>
+        {% for team in teams %}<option value="{{ team.id }}" {% if selected and team.id == selected.id %}selected{% endif %}>{{ team.display_name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Kategorie
+      <select name="category">
+        <option value="all">Alle Kategorien</option>
+        {% for key, label in category_labels.items() %}<option value="{{ key }}" {% if category == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Status
+      <select name="status">
+        <option value="all">Alle Status</option>
+        <option value="available" {% if status == 'available' %}selected{% endif %}>Verfügbar</option>
+        <option value="reserved" {% if status == 'reserved' %}selected{% endif %}>Reserviert</option>
+        <option value="used" {% if status == 'used' %}selected{% endif %}>Bereits verwendet</option>
+        <option value="excluded" {% if status == 'excluded' %}selected{% endif %}>Von Automatik ausgeschlossen</option>
+        <option value="missing" {% if status == 'missing' %}selected{% endif %}>Datei fehlt</option>
+      </select>
+    </label>
+    <label>Suche
+      <input type="search" name="search" value="{{ search }}" placeholder="Motiv, Beschreibung, Fotograf/in">
+    </label>
+    <button>Filtern</button>
+  </form>
+
+  <form method="post" action="/media/bulk" class="media-bulk-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <div class="media-bulk-toolbar">
+      <label>Ausgewählte Medien
+        <select name="action" required>
+          <option value="release">Wieder für Automatik freigeben</option>
+          <option value="category">Kategorie ändern in …</option>
+          <option value="team">Mannschaft verschieben zu …</option>
+          <option value="delete">Löschen</option>
+        </select>
+      </label>
+      <label>Neue Kategorie
+        <select name="category">
+          {% for key, label in category_labels.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>Zielmannschaft
+        <select name="target_team_id">
+          {% for team in teams %}<option value="{{ team.id }}">{{ team.display_name }}</option>{% endfor %}
+        </select>
+      </label>
+      <button onclick="return confirm('Ausgewählte Aktion wirklich auf alle markierten Medien anwenden?')">Anwenden</button>
+    </div>
+
+    {% if items %}
+    <div class="media-gallery">
+      {% for item in items %}
+      {% set item_status = item_statuses[item.id] %}
+      <article class="media-card">
+        <label class="media-card-select"><input type="checkbox" name="asset_ids" value="{{ item.id }}"> Auswählen</label>
+        <a href="/media/{{ item.id }}" class="media-card-preview">
+          {% if item.available %}<img src="/media/{{ item.id }}/preview" alt="{{ item.description or item.player_name or category_labels[item.media_category] }}" loading="lazy">{% else %}<span>Datei nicht verfügbar</span>{% endif %}
+        </a>
+        <div class="media-card-body">
+          <div class="media-card-heading">
+            <strong>{{ item.player_name or item.description or category_labels[item.media_category] }}</strong>
+            <span class="status-chip status-{{ item_status }}">
+              {{ {'available':'Verfügbar','reserved':'Reserviert','used':'Verwendet','excluded':'Nicht automatisch','missing':'Datei fehlt'}[item_status] }}
+            </span>
+          </div>
+          <p>{{ category_labels[item.media_category] }}{% if item.captured_at %} · {{ item.captured_at.strftime('%d.%m.%Y') }}{% endif %}</p>
+          {% if team_by_id.get(item.team_id) %}<p class="media-team-name">{{ team_by_id[item.team_id].display_name }}</p>{% endif %}
+          {% if item_status == 'reserved' and reservation_games.get(item.reserved_game_id) %}
+          {% set reserved_game = reservation_games[item.reserved_game_id] %}
+          <p class="media-reservation-note">Vorgemerkt für {{ reserved_game.home_team }} – {{ reserved_game.away_team }} am {{ reserved_game.kickoff|berlin }}</p>
+          {% endif %}
+          {% if item.description and item.player_name %}<p class="media-description">{{ item.description }}</p>{% endif %}
+          <div class="button-row">
+            <a class="button secondary" href="/media/{{ item.id }}">Ansehen und verwalten</a>
+            <button class="danger secondary" formmethod="post" formaction="/media/{{ item.id }}/delete" onclick="return confirm('Medium wirklich löschen? Reservierte oder künftig ausgewählte Bilder werden nicht stillschweigend entfernt.')">Löschen</button>
+          </div>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state"><strong>Noch keine {{ category_labels.get(category, 'passenden Bilder') }}</strong><p>{% if search or status != 'all' %}Passe die Suche oder den Statusfilter an.{% elif selected %}Lade Bilder für {{ selected.display_name }} hoch.{% else %}Wähle eine Mannschaft für den Upload oder passe die Filter an.{% endif %}</p></div>
+    {% endif %}
+  </form>
+</section>
+{% endif %}
+
+{% if selected and external_import_available %}
+<details class="technical-details">
+  <summary>Optionale externe Importquelle</summary>
+  <p>Für diese Mannschaft ist eine bestehende externe Importquelle erreichbar.</p>
+  <form method="post" action="/media/{{ selected.id }}/scan">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <button>Dateien aus externer Quelle neu einlesen</button>
+  </form>
+</details>
 {% endif %}
 {% endblock %}

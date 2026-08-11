@@ -85,6 +85,21 @@ KI-Generierungsablauf, ist aber keine pixelgenaue Simulation eines generativen
 Bildmodells. Die tatsächliche Ausgabe bleibt deshalb vor der Freigabe visuell
 zu prüfen.
 
+## Automatische Bildauswahl
+
+Der Branding-Assistent verwaltet je Beitragstyp die erlaubten Medienkategorien
+und deren Priorität. Als sichere Voreinstellung verwenden Spielankündigung,
+Spielerinnerung und Ergebnismeldung ausschließlich Spielbilder. Das Live Center
+bevorzugt Einzelfotos und darf auf Spielbilder ausweichen. Die Werte werden in
+`ClubMediaUsagePolicy` gespeichert; zentrale Promptinhalte sind dabei weder im
+Formular noch in der Vorschau enthalten.
+
+Eine bewusste Auswahl direkt am Spiel hat Vorrang. Sie darf nach einer
+ausdrücklichen Bestätigung auch ein bereits verwendetes Bild einmalig nutzen,
+ohne dieses Bild global wieder in den automatischen Zufallspool aufzunehmen.
+Bei gemeinsamen Spieltagen wird die Auswahl für jedes beteiligte Spiel und jede
+Mannschaft getrennt aufgelöst.
+
 ## Sponsoren und Spielstätten
 
 Bei einer KI-Erzeugung werden die validierten Brandingwerte nicht als roher

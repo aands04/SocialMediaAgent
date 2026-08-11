@@ -144,7 +144,7 @@ def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
     assert page.status_code == 200
     assert '<header class="app-header">' in page.text
     assert '<nav class="app-nav">' in page.text
-    assert "/static/style.css?v=20260811-games-workspace" in page.text
+    assert "/static/style.css?v=20260811-media-library" in page.text
 
     stylesheet = client.get("/static/style.css?v=20260811-publishing-workspace")
     assert stylesheet.status_code == 200
@@ -1503,7 +1503,7 @@ def test_player_images_can_be_uploaded_from_dashboard(browser, tmp_path, monkeyp
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert "2%20Spielerbilder%20hochgeladen" in response.headers["location"]
+    assert "2%20Medien%20hochgeladen" in response.headers["location"]
 
     with factory() as db:
         assets = db.query(MediaAsset).filter_by(team_id=team_id).order_by(MediaAsset.filename).all()
@@ -1530,8 +1530,8 @@ def test_player_images_can_be_uploaded_from_dashboard(browser, tmp_path, monkeyp
     assert preview.headers["content-type"] in {"image/jpeg", "image/png"}
     page = client.get(f"/media?team_id={team_id}")
     assert page.status_code == 200
-    assert "Spielerbilder hochladen" in page.text
-    assert "Dashboard-Upload" in page.text
+    assert "Bilder hochladen" in page.text
+    assert "Dashboard-Upload" not in page.text
     assert f"/media/{asset_id}/preview" in page.text
 
     duplicate = client.post(
@@ -1600,7 +1600,7 @@ def test_player_images_can_be_uploaded_as_safe_zip_archive(browser, tmp_path, mo
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert "25%20Spielerbilder%20hochgeladen" in response.headers["location"]
+    assert "25%20Medien%20hochgeladen" in response.headers["location"]
     with factory() as db:
         assets = db.query(MediaAsset).filter_by(team_id=team_id).all()
         assert len(assets) == 25
@@ -1620,7 +1620,7 @@ def test_player_images_can_be_uploaded_as_safe_zip_archive(browser, tmp_path, mo
         assert db.query(MediaAsset).filter_by(team_id=team_id).count() == 25
 
     page = client.get(f"/media?team_id={team_id}")
-    assert "Alternativ ZIP-Archiv auswählen" in page.text
+    assert "Oder ZIP-Archiv auswählen" in page.text
 
 
 def test_nginx_allows_large_requests_only_for_player_image_uploads():
@@ -1768,7 +1768,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260811-games-workspace" in teams_page
+    assert "/static/style.css?v=20260811-media-library" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text

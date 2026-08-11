@@ -17,6 +17,12 @@ from app.branding.service import STANDARD_FONTS, branding_form_state, branding_s
 from app.config import get_settings
 from app.games.identity import resolve_team_side, team_aliases
 from app.logos.service import LogoCompositor, LogoValidationError, frozen_logo_set
+from app.media.library import (
+    MediaLibraryError,
+    mark_asset_used,
+    reserve_media,
+    set_game_preference,
+)
 from app.models import (
     ClubBrandingConfiguration,
     DesignTemplate,
@@ -90,27 +96,25 @@ def _revision_prompt(prompt, instruction: str | None):
     return replace(prompt, rendered=prompt.rendered + addition)
 
 
-def reserve_image(db: Session, team_id: str, game_id: str) -> MediaAsset | None:
-    existing = db.scalar(select(MediaAsset).where(MediaAsset.reserved_game_id == game_id))
-    if existing:
-        return existing
-    asset = db.scalar(
-        select(MediaAsset)
-        .where(
-            MediaAsset.team_id == team_id,
-            MediaAsset.active.is_(True),
-            MediaAsset.available.is_(True),
-            MediaAsset.reserved_game_id.is_(None),
-            MediaAsset.uses == 0,
-        )
-        .order_by(MediaAsset.size.desc(), MediaAsset.filename)
-        .with_for_update(skip_locked=True)
+def reserve_image(
+    db: Session,
+    team_id: str,
+    game_id: str,
+    contribution_type: str = "announcement",
+) -> MediaAsset | None:
+    """Backward-compatible entry point for the tenant-safe media selector."""
+
+    team = db.get(Team, team_id)
+    game = db.get(Game, game_id)
+    if not team or not game or game.team_id != team.id or game.club_id != team.club_id:
+        raise MediaLibraryError("Spiel oder Mannschaft gehört nicht zu diesem Verein")
+    return reserve_media(
+        db,
+        club_id=team.club_id,
+        team_id=team.id,
+        game_id=game.id,
+        contribution_type=contribution_type,
     )
-    if asset:
-        asset.reserved_game_id = game_id
-        asset.uses += 1
-        db.flush()
-    return asset
 
 
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -703,7 +707,7 @@ def create_post(
     asset = (
         db.get(MediaAsset, existing.media_asset_id)
         if resuming and existing.media_asset_id
-        else reserve_image(db, team.id, game.id)
+        else reserve_image(db, team.id, game.id, post_type)
     )
     if asset and (asset.club_id != team.club_id or asset.team_id != team.id):
         raise ValueError("Das reservierte Spielerbild gehört nicht zu diesem Beitrag")
@@ -1335,6 +1339,14 @@ def create_post(
     from app.posts.media_versions import synchronize_post_versions
 
     synchronize_post_versions(db, post)
+    if asset:
+        mark_asset_used(
+            db,
+            asset,
+            game_id=game.id,
+            post_id=post.id,
+            contribution_type=post_type,
+        )
     db.commit()
     return post
 
@@ -1520,6 +1532,7 @@ def rerender_post(
     game = db.get(Game, post.game_id)
     team = db.get(Team, post.team_id)
     asset = db.get(MediaAsset, post.media_asset_id) if post.media_asset_id else None
+    selected_asset_changed = False
     if not game or not team:
         raise ValueError("Beitrag hat keine gültigen Spiel- oder Mannschaftsdaten")
     jobs = list(
@@ -1548,25 +1561,47 @@ def rerender_post(
         )
     if media_asset_id and media_asset_id != post.media_asset_id:
         target_asset = db.scalar(
-            select(MediaAsset).where(MediaAsset.id == media_asset_id).with_for_update()
+            select(MediaAsset)
+            .where(
+                MediaAsset.id == media_asset_id,
+                MediaAsset.club_id == post.club_id,
+                MediaAsset.team_id == team.id,
+                MediaAsset.deleted_at.is_(None),
+            )
+            .with_for_update()
         )
-        if not target_asset or target_asset.team_id != team.id:
+        if not target_asset:
             raise RerenderConflict("Das ausgewählte Spielerbild gehört nicht zu dieser Mannschaft")
         if not target_asset.active or not target_asset.available:
             raise RerenderConflict("Das ausgewählte Spielerbild ist nicht mehr verfügbar")
         if target_asset.reserved_game_id not in {None, game.id} or target_asset.uses > 0:
             raise RerenderConflict("Das ausgewählte Spielerbild wurde inzwischen bereits verwendet")
-        if asset:
-            asset = db.scalar(select(MediaAsset).where(MediaAsset.id == asset.id).with_for_update())
-            asset.reserved_game_id = None
-            # Das bisherige Bild wurde bereits für diesen Spieltag verwendet und
-            # bleibt deshalb über uses > 0 verbraucht. Nur seine Reservierung wird
-            # für das neu ausgewählte Bild freigegeben.
-            db.flush()
-        target_asset.reserved_game_id = game.id
-        target_asset.uses += 1
+        try:
+            set_game_preference(
+                db,
+                club_id=post.club_id,
+                team_id=team.id,
+                game_id=game.id,
+                contribution_type=post.post_type,
+                selection_mode="manual",
+                selected_media_asset_id=target_asset.id,
+                allow_used_once=False,
+                actor_user_id=None,
+            )
+            target_asset = reserve_media(
+                db,
+                club_id=post.club_id,
+                team_id=team.id,
+                game_id=game.id,
+                contribution_type=post.post_type,
+            )
+        except MediaLibraryError as exc:
+            raise RerenderConflict(str(exc)) from exc
+        if not target_asset:
+            raise RerenderConflict("Das ausgewählte Bild konnte nicht vorgemerkt werden")
         post.media_asset_id = target_asset.id
         asset = target_asset
+        selected_asset_changed = True
         db.flush()
     logos = logo_snapshot or frozen_logo_set(db, game, team)
     facts = _facts(db, game, team, asset, post.post_type, logos)
@@ -1947,6 +1982,14 @@ def rerender_post(
 
     synchronize_post_versions(db, post)
     db.flush()
+    if selected_asset_changed and asset:
+        mark_asset_used(
+            db,
+            asset,
+            game_id=game.id,
+            post_id=post.id,
+            contribution_type=post.post_type,
+        )
     return post
 
 
