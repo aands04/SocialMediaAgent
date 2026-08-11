@@ -1,0 +1,85 @@
+{% extends 'base.html' %}
+{% block content %}
+<header class="section-heading">
+  <div>
+    <p class="eyebrow">Spiele · Bildauswahl</p>
+    <h1>Bild für den Beitrag festlegen</h1>
+    <p>{{game.home_team}} – {{game.away_team}} · {{game.kickoff|berlin}}</p>
+  </div>
+  <a class="button secondary" href="/games">Zurück zu den Spielen</a>
+</header>
+
+<section class="card">
+  <form method="get" action="/games/{{game.id}}/media-selection" class="media-filter-form">
+    <label>Beitragstyp
+      <select name="contribution_type" onchange="this.form.submit()">
+        {% for value, label in contribution_labels.items() %}
+        <option value="{{value}}" {% if contribution_type==value %}selected{% endif %}>{{label}}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <noscript><button>Anzeigen</button></noscript>
+  </form>
+  <p class="help-text">Die Vereinsregel berücksichtigt für diesen Beitragstyp zuerst: {% for category in policy_categories %}<strong>{{media_category_labels[category]}}</strong>{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+  {% if existing_post %}
+  <div class="notice warning"><strong>Beitrag bereits erzeugt.</strong> Entscheide beim Speichern, ob die Auswahl erst künftig gilt oder die noch unveröffentlichten Grafiken dieses Beitrags sofort neu erzeugt werden.</div>
+  {% endif %}
+</section>
+
+<form method="post" action="/games/{{game.id}}/media-selection" id="game-media-form">
+  <input type="hidden" name="csrf_token" value="{{csrf}}">
+  <input type="hidden" name="contribution_type" value="{{contribution_type}}">
+  <section class="card">
+    <h2>Auswahlverfahren</h2>
+    <label class="media-mode-choice"><input type="radio" name="selection_mode" value="automatic" {% if not preference or preference.selection_mode=='automatic' %}checked{% endif %}> <span><strong>Automatisch auswählen</strong><small>Die Vereinszentrale verwendet ein verfügbares Bild nach den Regeln im Vereinsbranding.</small></span></label>
+    <label class="media-mode-choice"><input type="radio" name="selection_mode" value="manual" {% if preference and preference.selection_mode=='manual' %}checked{% endif %}> <span><strong>Bild bewusst festlegen</strong><small>Dieses Bild hat für {{contribution_labels[contribution_type]}} Vorrang.</small></span></label>
+  </section>
+
+  <section class="card">
+    <div class="section-heading"><div><h2>Bilder von {{team.display_name}}</h2><p>Nur Medien dieses Vereins und dieser Mannschaft werden angezeigt.</p></div><a class="button secondary" href="/media?team_id={{team.id}}">Medienbibliothek öffnen</a></div>
+    {% if media_assets %}
+    <div class="media-gallery media-selection-gallery">
+      {% for asset in media_assets %}
+      {% set state=usage_status(asset) %}
+      {% set unavailable=(state in ['missing','deleted']) or (state=='reserved' and asset.reserved_game_id != game.id) %}
+      <label class="media-card media-select-card{% if preference and preference.selected_media_asset_id==asset.id %} media-select-card--selected{% endif %}">
+        <input type="radio" name="selected_media_asset_id" value="{{asset.id}}" data-unavailable="{{'true' if unavailable else 'false'}}" {% if unavailable %}disabled{% endif %} {% if preference and preference.selected_media_asset_id==asset.id %}checked{% endif %}>
+        <img src="/media/{{asset.id}}/preview" alt="{{asset.description or asset.player_name or asset.filename}}" loading="lazy">
+        <span class="media-card__body">
+          <strong>{{asset.description or asset.player_name or asset.filename}}</strong>
+          <small>{{media_category_labels[asset.media_category]}}</small>
+          {% if asset.media_category not in policy_categories %}<small class="warning-text">Außerhalb der aktuellen Vereinsregel; eine bewusste Auswahl ist trotzdem möglich.</small>{% endif %}
+          <span class="badge media-status media-status--{{state}}">{% if state=='available' %}Verfügbar{% elif state=='used' %}Bereits verwendet{% elif state=='reserved' %}Reserviert{% elif state=='excluded' %}Von Automatik ausgeschlossen{% else %}Nicht verfügbar{% endif %}</span>
+        </span>
+      </label>
+      {% endfor %}
+    </div>
+    <label class="checkbox-label media-reuse-confirmation"><input type="checkbox" name="allow_used_once"> Ein bereits verwendetes Bild für diesen Beitrag einmalig wiederverwenden</label>
+    {% else %}
+    <p>Für diese Mannschaft sind noch keine Bilder vorhanden.</p>
+    {% endif %}
+  </section>
+  {% if existing_post %}
+  <section class="card">
+    <h2>Bestehender Beitrag</h2>
+    <label class="media-mode-choice"><input type="radio" name="apply_existing" value="future" checked> <span><strong>Nur für künftige Generierungen speichern</strong><small>Die vorhandenen Grafiken bleiben unverändert.</small></span></label>
+    <label class="media-mode-choice"><input type="radio" name="apply_existing" value="regenerate"> <span><strong>Bestehende Grafiken neu erzeugen</strong><small>Feed und noch unveröffentlichte Storys werden mit dem bewusst gewählten Bild neu erstellt. Dafür ist eine manuelle Bildauswahl erforderlich.</small></span></label>
+  </section>
+  {% endif %}
+  <div class="sticky-action-bar"><button>Bildauswahl speichern</button></div>
+</form>
+
+<script>
+(function(){
+  var form=document.getElementById('game-media-form');
+  if(!form){return;}
+  function sync(){
+    var manual=form.querySelector('input[name="selection_mode"][value="manual"]').checked;
+    form.querySelectorAll('input[name="selected_media_asset_id"]').forEach(function(input){input.disabled=!manual || input.dataset.unavailable==='true';});
+    form.querySelectorAll('input[name="allow_used_once"]').forEach(function(input){input.disabled=!manual;});
+  }
+  form.querySelectorAll('input[name="selection_mode"]').forEach(function(input){input.addEventListener('change',sync);});
+  sync();
+})();
+</script>
+{% endblock %}

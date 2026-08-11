@@ -158,8 +158,33 @@
         <template id="sponsor-template"><article class="sponsor-row"><div class="branding-field-grid"><label>Sponsorname<input data-sponsor-name maxlength="500" required></label><label>Logo / Medienobjekt<select data-sponsor-media><option value="">Kein Medium</option>{% for asset in media_assets %}<option value="{{asset.id}}">{{asset.filename}}</option>{% endfor %}</select></label><label>Instagram-Erwähnung<input data-sponsor-mention placeholder="@benutzername"></label><label>Bevorzugter Bildbereich (ungefähr)<select data-sponsor-placement><option value="auto" selected>KI wählt passend</option><option value="top">Eher oben</option><option value="bottom">Eher unten</option><option value="left">Eher links</option><option value="right">Eher rechts</option><option value="footer">Dezent im unteren Bereich</option></select><small>Keine feste Position: Das Logo wird als Referenz an die KI übergeben und natürlich in die Komposition integriert.</small></label></div><div class="checkbox-grid"><label><input type="checkbox" data-sponsor-flag="use_feed" checked> Im Feed</label><label><input type="checkbox" data-sponsor-flag="use_story" checked> In Storys</label><label><input type="checkbox" data-sponsor-flag="use_announcement" checked> Bei Ankündigungen</label><label><input type="checkbox" data-sponsor-flag="use_result" checked> Bei Ergebnissen</label><label><input type="checkbox" data-sponsor-flag="required"> Pflichtangabe</label></div><fieldset><legend>Zugeordnete Mannschaften</legend><div class="chip-group">{% for team in teams %}<label><input type="checkbox" data-sponsor-team value="{{team.id}}"><span>{{team.display_name}}</span></label>{% endfor %}</div></fieldset><div class="branding-field-grid"><label>Gültig ab<input type="date" data-sponsor-valid-from></label><label>Gültig bis<input type="date" data-sponsor-valid-until></label></div><button type="button" class="button danger remove-sponsor">Sponsor entfernen</button></article></template>
       </section>
 
+      <section id="mediennutzung" class="branding-section">
+        <h2>5. Automatische Bildauswahl</h2>
+        <p>Lege fest, welche Bildarten die Vereinszentrale je Beitrag verwenden darf. Die bevorzugte Bildart wird zuerst gesucht; ist dort nichts verfügbar, folgen die weiteren erlaubten Bildarten.</p>
+        <div class="notice"><strong>Sichere Voreinstellung:</strong> Spielankündigungen, Erinnerungen und Ergebnisse verwenden Spielbilder. Das Live Center bevorzugt Einzelfotos und kann auf Spielbilder ausweichen.</div>
+        <div class="media-policy-grid">
+        {% for contribution_type, contribution_label in contribution_type_labels.items() %}
+          {% set policy=media_policies[contribution_type] %}
+          <fieldset class="media-policy-card">
+            <legend>{{contribution_label}}</legend>
+            <div class="checkbox-grid">
+              {% for category in media_categories %}
+              <label><input type="checkbox" name="media_allowed_{{contribution_type}}" value="{{category}}" {% if category in policy.allowed %}checked{% endif %}> {{media_category_labels[category]}}</label>
+              {% endfor %}
+            </div>
+            <label>Bevorzugte Bildart
+              <select name="media_primary_{{contribution_type}}">
+                {% for category in media_categories %}<option value="{{category}}" {% if category==policy.primary %}selected{% endif %}>{{media_category_labels[category]}}</option>{% endfor %}
+              </select>
+            </label>
+          </fieldset>
+        {% endfor %}
+        </div>
+        <p class="help-text">Eine bewusste Bildauswahl direkt am Spiel hat Vorrang vor diesen automatischen Regeln.</p>
+      </section>
+
       <details id="erweitert" class="branding-section branding-advanced">
-        <summary><span><strong>5. Erweiterte Vorgaben</strong><small>Optionale Feinabstimmung für Feed, Story und besondere Gestaltungsregeln</small></span></summary>
+        <summary><span><strong>6. Erweiterte Vorgaben</strong><small>Optionale Feinabstimmung für Feed, Story und besondere Gestaltungsregeln</small></span></summary>
         <div class="advanced-content">
           <h3>Angaben auf Ergebnisbildern</h3>
           <p>Lege fest, welche bestätigten Spieldaten beim Umbau der Ankündigungsgrafik zur Ergebnismeldung sichtbar sein dürfen. Ergebnis und Mannschaften sind immer erforderlich.</p>

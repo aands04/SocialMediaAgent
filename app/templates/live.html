@@ -40,6 +40,7 @@
       </header>
       <h3>{{game.home_team}} – {{game.away_team}}</h3>
       <p>{{game.venue or 'Spielort noch offen'}}</p>
+      {% if user.role.value in ['admin', 'editor', 'approver'] %}<p><a class="button secondary" href="/games/{{game.id}}/media-selection?contribution_type=live">Bild für Live-Beiträge auswählen</a></p>{% endif %}
       {% if state and state.live_publishing_paused %}<p class="warning"><strong>Externe Live-Veröffentlichungen für dieses Spiel sind pausiert.</strong> Ereignisse werden weiterhin erfasst.</p>{% endif %}
       {% if user.role.value in ['admin','approver','reviewer'] %}
       <form method="post" action="/live/games/{{game.id}}/pause">

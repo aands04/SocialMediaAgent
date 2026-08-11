@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block content %}
+<p><a href="/media?team_id={{ asset.team_id }}">← Zur Medienbibliothek</a></p>
+<header class="page-heading">
+  <div><p class="eyebrow">MEDIUM VERWALTEN</p><h1>{{ asset.player_name or asset.description or category_labels[asset.media_category] }}</h1><p>{{ team.display_name }} · {{ category_labels[asset.media_category] }}</p></div>
+  <span class="status-chip status-{{ media_status }}">{{ {'available':'Verfügbar','reserved':'Reserviert','used':'Verwendet','excluded':'Nicht automatisch','missing':'Datei fehlt','deleted':'Gelöscht'}[media_status] }}</span>
+</header>
+
+<div class="media-detail-layout">
+  <section class="media-detail-preview">
+    {% if asset.available %}<img src="/media/{{ asset.id }}/preview" alt="Vorschau">{% else %}<div class="empty-state">Datei nicht verfügbar</div>{% endif %}
+  </section>
+  <div>
+    <section>
+      <h2>Angaben zum Bild</h2>
+      <form method="post" action="/media/{{ asset.id }}/edit">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <div class="form-grid">
+          <label>Kategorie
+            <select name="media_category">{% for key, label in category_labels.items() %}<option value="{{ key }}" {% if asset.media_category == key %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+          </label>
+          <label>Zugehöriges Spiel <span class="optional-marker">Optional</span>
+            <select name="game_id"><option value="">Keinem Spiel zugeordnet</option>{% for game in games %}<option value="{{ game.id }}" {% if asset.game_id == game.id %}selected{% endif %}>{{ game.kickoff|berlin }} · {{ game.home_team }} – {{ game.away_team }}</option>{% endfor %}</select>
+          </label>
+          <label>Spieler oder Motiv <input name="player_name" maxlength="160" value="{{ asset.player_name or '' }}"></label>
+          <label>Aufnahmedatum <input type="date" name="captured_date" value="{{ asset.captured_at.strftime('%Y-%m-%d') if asset.captured_at else '' }}"></label>
+          <label>Fotograf/in <input name="photographer" maxlength="160" value="{{ asset.photographer or '' }}"></label>
+        </div>
+        <label>Beschreibung <textarea name="description" maxlength="500" rows="3">{{ asset.description or '' }}</textarea></label>
+        <button>Angaben speichern</button>
+      </form>
+    </section>
+    <section>
+      <h2>Automatische Verwendung</h2>
+      {% if media_status == 'reserved' %}<p>Dieses Bild ist derzeit für einen Beitrag reserviert{% if reservation_game %}: {{ reservation_game.home_team }} – {{ reservation_game.away_team }} am {{ reservation_game.kickoff|berlin }}{% endif %}.</p>{% elif asset.automatic_usage_enabled %}<p>Dieses Bild darf automatisch für passende neue Beiträge ausgewählt werden.</p>{% else %}<p>Dieses Bild wird bei der automatischen Auswahl übersprungen.</p>{% endif %}
+      <div class="button-row">
+        <form method="post" action="/media/{{ asset.id }}/automatic"><input type="hidden" name="csrf_token" value="{{ csrf }}"><input type="hidden" name="enabled" value="{{ 'false' if asset.automatic_usage_enabled else 'true' }}"><button class="secondary">{{ 'Von automatischer Auswahl ausschließen' if asset.automatic_usage_enabled else 'Für automatische Auswahl freigeben' }}</button></form>
+        {% if asset.uses > 0 or asset.reserved_game_id %}<form method="post" action="/media/{{ asset.id }}/release"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Global wieder freigeben</button></form>{% endif %}
+      </div>
+      <p class="field-help">Eine globale Freigabe löscht keine frühere Verwendung aus der Historie.</p>
+    </section>
+  </div>
+</div>
+
+<section>
+  <h2>Nutzungshistorie</h2>
+  {% if history %}<ol class="media-history">{% for item in history %}<li><strong>{{ {'reserved':'Für Beitrag reserviert','reservation_released':'Reservierung aufgehoben','used':'Im Beitrag verwendet','released':'Wieder freigegeben','manual_reuse':'Bewusst erneut verwendet','automatic_excluded':'Von Automatik ausgeschlossen','automatic_enabled':'Für Automatik freigegeben','soft_deleted':'Gelöscht'}[item.action] }}</strong><span>{{ item.created_at|berlin }}{% if item.game_id and history_games.get(item.game_id) %} · {{ history_games[item.game_id].home_team }} – {{ history_games[item.game_id].away_team }}{% endif %}</span></li>{% endfor %}</ol>{% else %}<p>Noch keine Verwendung protokolliert.</p>{% endif %}
+</section>
+
+<details class="technical-details"><summary>Technische Dateiinformationen</summary><dl class="detail-list"><dt>Dateiname</dt><dd>{{ asset.filename }}</dd><dt>Dateityp</dt><dd>{{ asset.mime_type }}</dd><dt>Auflösung</dt><dd>{% if asset.width and asset.height %}{{ asset.width }} × {{ asset.height }} Pixel{% else %}Nicht erfasst{% endif %}</dd><dt>Größe</dt><dd>{{ '%.2f'|format(asset.size / 1024 / 1024) }} MB</dd><dt>Hochgeladen am</dt><dd>{{ asset.created_at|berlin }}</dd><dt>Hochgeladen von</dt><dd>{{ uploader.email if uploader else 'Externe Quelle oder gelöschtes Konto' }}</dd><dt>Speicherart</dt><dd>{{ 'Direkter Upload' if asset.storage_kind == 'upload' else 'Externe Importquelle' }}</dd></dl></details>
+
+{% if not asset.deleted_at %}<section class="danger-zone"><h2>Medium löschen</h2><p>Unbenutzte Uploads werden auch aus dem Speicher entfernt. Bereits verwendete Bilder und ihre Historie bleiben für bestehende Beiträge erhalten, werden aber nicht mehr für neue Beiträge angeboten. Reservierte oder künftig ausgewählte Bilder können nicht gelöscht werden.</p><form method="post" action="/media/{{ asset.id }}/delete"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="danger" onclick="return confirm('Medium wirklich löschen? Diese Aktion kann bei unbenutzten Uploads nicht rückgängig gemacht werden.')">Medium löschen</button></form></section>{% endif %}
+{% endblock %}

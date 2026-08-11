@@ -3,12 +3,14 @@ import mimetypes
 import secrets
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -36,7 +38,7 @@ from app.db import get_db
 from app.file_delivery import detached_file_response
 from app.games.bundles import connect_games, dashboard_game_groups, separate_games
 from app.games.identity import team_name_variants
-from app.limits.service import LimitExceeded, assert_resource_capacity
+from app.limits.service import LimitExceeded, assert_resource_capacity, effective_limits
 from app.logos.service import (
     LogoValidationError,
     import_shared_opponent_logo,
@@ -46,6 +48,20 @@ from app.logos.service import (
     shared_logo_path,
     store_logo,
 )
+from app.media.library import (
+    CONTRIBUTION_TYPE_LABELS,
+    MEDIA_CATEGORIES,
+    MEDIA_CATEGORY_LABELS,
+    SAFE_DEFAULT_POLICIES,
+    MediaLibraryError,
+    effective_policy,
+    release_asset,
+    save_policy,
+    set_automatic_usage,
+    set_game_preference,
+    soft_delete_asset,
+    usage_status,
+)
 from app.media.storage import LocalStorageProvider, StorageError, media_asset_path
 from app.media.uploads import (
     MAX_PLAYER_IMAGE_BYTES,
@@ -53,6 +69,7 @@ from app.media.uploads import (
     PlayerImageUploadError,
     ValidatedPlayerImage,
     iter_player_images_from_zip,
+    move_uploaded_media_to_team,
     store_player_image,
     validate_player_image,
 )
@@ -65,6 +82,7 @@ from app.models import (
     FontAsset,
     FussballSyncState,
     Game,
+    GameMediaPreference,
     GeneratedMediaSlot,
     GeneratedMediaVersion,
     GenerationJob,
@@ -73,6 +91,7 @@ from app.models import (
     JobStatus,
     LogoAsset,
     MediaAsset,
+    MediaUsageHistory,
     MetaPublishingAttempt,
     Post,
     PostChannelContent,
@@ -142,6 +161,14 @@ from app.publishing.schedule import (
     EDITABLE_JOB_STATUSES,
     PublicationScheduleError,
     reschedule_publication_job,
+)
+from app.storage.service import (
+    StorageQuotaError,
+    commit_local_media_upload,
+    mark_local_media_deleted,
+    move_local_media_storage_object,
+    reserve_storage,
+    storage_usage,
 )
 from app.teams.service import (
     derived_team_short_name,
@@ -314,6 +341,13 @@ def club_branding(
         image=image,
         text=text,
     )
+    media_policies = {}
+    for contribution_type in CONTRIBUTION_TYPE_LABELS:
+        ordered_categories = effective_policy(db, club.id, contribution_type)
+        media_policies[contribution_type] = {
+            "allowed": ordered_categories,
+            "primary": ordered_categories[0],
+        }
     return render(
         request,
         "branding.html",
@@ -332,6 +366,10 @@ def club_branding(
         venues=venues,
         examples=examples,
         progress=progress,
+        media_policies=media_policies,
+        media_categories=MEDIA_CATEGORIES,
+        media_category_labels=MEDIA_CATEGORY_LABELS,
+        contribution_type_labels=CONTRIBUTION_TYPE_LABELS,
         title="Vereinsbranding",
     )
 
@@ -407,6 +445,14 @@ def update_club_branding(
     story_show_call_to_action: str = Form(default=""),
     story_countdown_area: str = Form(default=""),
     story_extra_rules: str = Form(default=""),
+    media_allowed_announcement: list[str] = Form(default=[]),
+    media_primary_announcement: str = Form(default="match_photo"),
+    media_allowed_reminder: list[str] = Form(default=[]),
+    media_primary_reminder: str = Form(default="match_photo"),
+    media_allowed_result: list[str] = Form(default=[]),
+    media_primary_result: str = Form(default="match_photo"),
+    media_allowed_live: list[str] = Form(default=[]),
+    media_primary_live: str = Form(default="player_portrait"),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -618,6 +664,48 @@ def update_club_branding(
     if club.logo_asset_id != selected_logo_id:
         club.logo_asset_id = selected_logo_id
         club.version += 1
+    posted_media_policies = {
+        "announcement": (media_allowed_announcement, media_primary_announcement),
+        "reminder": (media_allowed_reminder, media_primary_reminder),
+        "result": (media_allowed_result, media_primary_result),
+        "live": (media_allowed_live, media_primary_live),
+    }
+    # Older clients and forms created before the media-library extension do
+    # not submit these fields. Preserve the tenant's effective policy instead
+    # of rejecting an otherwise valid branding update or resetting it.
+    posted_media_policies = {
+        contribution_type: (
+            values
+            if values[0]
+            else (
+                effective_policy(db, current.club_id, contribution_type),
+                effective_policy(db, current.club_id, contribution_type)[0],
+            )
+        )
+        for contribution_type, values in posted_media_policies.items()
+    }
+    if action in {"reset", "recommended"}:
+        posted_media_policies = {
+            contribution_type: (list(categories), categories[0])
+            for contribution_type, categories in SAFE_DEFAULT_POLICIES.items()
+        }
+    try:
+        saved_media_policies = {
+            contribution_type: save_policy(
+                db,
+                club_id=current.club_id,
+                contribution_type=contribution_type,
+                allowed_categories=allowed_categories,
+                primary_category=primary_category,
+                actor_user_id=current.id,
+            )
+            for contribution_type, (
+                allowed_categories,
+                primary_category,
+            ) in posted_media_policies.items()
+        }
+    except MediaLibraryError as exc:
+        raise HTTPException(422, str(exc)) from exc
     audit(
         db,
         current,
@@ -628,6 +716,13 @@ def update_club_branding(
             "version": config.version,
             "image_keys": sorted(image_settings),
             "text_keys": sorted(text_settings),
+            "media_usage_policies": {
+                contribution_type: {
+                    "allowed": policy.allowed_media_categories,
+                    "priority": policy.category_priority,
+                }
+                for contribution_type, policy in saved_media_policies.items()
+            },
         },
     )
     db.commit()
@@ -1356,20 +1451,100 @@ def assign_user_role(
 def media(
     request: Request,
     team_id: str | None = None,
+    category: str = "all",
+    status: str = "all",
+    search: str = "",
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    teams = db.scalars(select(Team).where(Team.archived_at.is_(None))).all()
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
+    teams = db.scalars(
+        select(Team).where(
+            Team.club_id == current.club_id,
+            Team.archived_at.is_(None),
+        )
+    ).all()
     visible = [t for t in teams if require_visible(db, current, t.id)]
-    selected = next((t for t in visible if t.id == team_id), visible[0] if visible else None)
-    items = (
+    selected = next((t for t in visible if t.id == team_id), None)
+    filtered_team_ids = [selected.id] if selected else [team.id for team in visible]
+    all_items = (
         db.scalars(
             select(MediaAsset)
-            .where(MediaAsset.team_id == selected.id)
-            .order_by(MediaAsset.filename)
+            .where(
+                MediaAsset.club_id == current.club_id,
+                MediaAsset.team_id.in_(filtered_team_ids),
+                MediaAsset.deleted_at.is_(None),
+            )
+            .order_by(MediaAsset.created_at.desc(), MediaAsset.filename)
+        ).all()
+        if filtered_team_ids
+        else []
+    )
+    if category not in {*MEDIA_CATEGORIES, "all"}:
+        category = "all"
+    allowed_statuses = {"available", "reserved", "used", "excluded", "missing", "all"}
+    if status not in allowed_statuses:
+        status = "all"
+    search_term = search.strip().casefold()
+    item_statuses = {item.id: usage_status(item) for item in all_items}
+    items = [
+        item
+        for item in all_items
+        if (category == "all" or item.media_category == category)
+        and (status == "all" or item_statuses[item.id] == status)
+        and (
+            not search_term
+            or any(
+                search_term in (value or "").casefold()
+                for value in (
+                    item.filename,
+                    item.player_name,
+                    item.description,
+                    item.photographer,
+                )
+            )
+        )
+    ]
+    category_counts = {
+        key: sum(item.media_category == key for item in all_items) for key in MEDIA_CATEGORIES
+    }
+    reservation_game_ids = {
+        item.reserved_game_id for item in all_items if item.reserved_game_id
+    }
+    reservation_games = (
+        {
+            game.id: game
+            for game in db.scalars(
+                select(Game).where(
+                    Game.id.in_(reservation_game_ids),
+                    Game.club_id == current.club_id,
+                )
+            ).all()
+        }
+        if reservation_game_ids
+        else {}
+    )
+    games = (
+        db.scalars(
+            select(Game)
+            .where(Game.team_id == selected.id, Game.club_id == current.club_id)
+            .order_by(Game.kickoff.desc())
+            .limit(100)
         ).all()
         if selected
         else []
+    )
+    storage_committed, storage_reserved = storage_usage(db, current.club_id)
+    storage_bytes = storage_committed + storage_reserved
+    try:
+        storage_limit_bytes = effective_limits(db, current.club_id)["storage_bytes"].value
+    except LimitExceeded:
+        storage_limit_bytes = 0
+    storage_percent = (
+        min(100, round(storage_bytes * 100 / storage_limit_bytes))
+        if storage_limit_bytes
+        else 0
     )
     folders = []
     external_import_available = False
@@ -1392,10 +1567,24 @@ def media(
         current,
         teams=visible,
         selected=selected,
+        filter_team_id=selected.id if selected else "all",
+        team_by_id={team.id: team for team in visible},
         items=items,
         folders=folders,
         external_import_available=external_import_available,
         storage_ok=settings.upload_root.is_dir(),
+        games=games,
+        category=category,
+        status=status,
+        search=search,
+        item_statuses=item_statuses,
+        category_counts=category_counts,
+        total_media_count=len(all_items),
+        reservation_games=reservation_games,
+        category_labels=MEDIA_CATEGORY_LABELS,
+        storage_used_gb=float(storage_bytes or 0) / (1024**3),
+        storage_limit_gb=float(storage_limit_bytes or 0) / (1024**3),
+        storage_percent=storage_percent,
         title="Medienbibliothek",
     )
 
@@ -1408,6 +1597,21 @@ def require_visible(db, current, team_id):
         return False
 
 
+def _tenant_media_asset(
+    db: Session,
+    current: User,
+    asset_id: str,
+    *,
+    include_deleted: bool = False,
+) -> MediaAsset | None:
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
+    conditions = [MediaAsset.id == asset_id, MediaAsset.club_id == current.club_id]
+    if not include_deleted:
+        conditions.append(MediaAsset.deleted_at.is_(None))
+    return db.scalar(select(MediaAsset).where(*conditions))
+
+
 @router.post("/media/{team_id}/scan")
 def scan_media(
     team_id: str,
@@ -1418,7 +1622,11 @@ def scan_media(
 ):
     check_csrf(request, csrf_token_value)
     require(current, db, "generate", team_id)
-    team = db.get(Team, team_id)
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
+    team = db.scalar(
+        select(Team).where(Team.id == team_id, Team.club_id == current.club_id)
+    )
     if not team:
         raise HTTPException(404)
     store = LocalStorageProvider(settings.media_root)
@@ -1444,8 +1652,14 @@ def scan_media(
             raise HTTPException(409, f"Datei wurde während des Scans verändert: {relative}")
         seen.add(relative)
         stat = after
+        try:
+            with Image.open(BytesIO(content)) as probe:
+                width, height = probe.size
+        except (UnidentifiedImageError, OSError):
+            continue
         asset = db.scalar(
             select(MediaAsset).where(
+                MediaAsset.club_id == current.club_id,
                 MediaAsset.team_id == team.id,
                 MediaAsset.storage_kind == "external",
                 MediaAsset.relative_path == relative,
@@ -1455,6 +1669,8 @@ def scan_media(
             "filename": path.name,
             "mime_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
             "size": stat.st_size,
+            "width": width,
+            "height": height,
             "checksum": hashlib.sha256(content).hexdigest(),
             "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc),
             "available": True,
@@ -1465,15 +1681,19 @@ def scan_media(
         else:
             db.add(
                 MediaAsset(
+                    club_id=team.club_id,
                     team_id=team.id,
                     storage_kind="external",
                     relative_path=relative,
+                    media_category="match_photo",
+                    automatic_usage_enabled=True,
                     active=True,
                     **values,
                 )
             )
     for asset in db.scalars(
         select(MediaAsset).where(
+            MediaAsset.club_id == current.club_id,
             MediaAsset.team_id == team.id,
             MediaAsset.storage_kind == "external",
         )
@@ -1493,14 +1713,47 @@ async def upload_player_images(
     csrf_token_value: str = Form(alias="csrf_token"),
     files: list[UploadFile] | None = File(default=None),
     archive: UploadFile | None = File(default=None),
+    media_category: str = Form(default="match_photo"),
+    game_id: str = Form(default=""),
+    description: str = Form(default=""),
+    captured_date: str = Form(default=""),
+    player_name: str = Form(default=""),
+    photographer: str = Form(default=""),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
     check_csrf(request, csrf_token_value)
     require(current, db, "generate", team_id)
-    team = db.get(Team, team_id)
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
+    team = db.scalar(
+        select(Team).where(Team.id == team_id, Team.club_id == current.club_id)
+    )
     if not team:
         raise HTTPException(404)
+    try:
+        media_category = MEDIA_CATEGORIES[MEDIA_CATEGORIES.index(media_category)]
+    except ValueError as exc:
+        raise HTTPException(422, "Unbekannte Medienkategorie") from exc
+    related_game = None
+    if game_id:
+        related_game = db.scalar(
+            select(Game).where(
+                Game.id == game_id,
+                Game.club_id == current.club_id,
+                Game.team_id == team.id,
+            )
+        )
+        if not related_game:
+            raise HTTPException(422, "Das gewählte Spiel gehört nicht zu dieser Mannschaft")
+    if len(description) > 500 or len(player_name) > 160 or len(photographer) > 160:
+        raise HTTPException(422, "Mindestens eine Beschreibung ist zu lang")
+    captured_at = None
+    if captured_date:
+        try:
+            captured_at = datetime.fromisoformat(captured_date).replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise HTTPException(422, "Ungültiges Aufnahmedatum") from exc
     direct_files = files or []
     has_archive = archive is not None and bool(archive.filename)
     if not direct_files and not has_archive:
@@ -1530,6 +1783,7 @@ async def upload_player_images(
         batch_checksums.add(image.checksum)
         existing = db.scalar(
             select(MediaAsset).where(
+                MediaAsset.club_id == current.club_id,
                 MediaAsset.team_id == team.id,
                 MediaAsset.checksum == image.checksum,
                 MediaAsset.available.is_(True),
@@ -1544,6 +1798,13 @@ async def upload_player_images(
                 skipped.append(image.original_filename)
                 return
 
+        ledger = reserve_storage(
+            db,
+            club_id=team.club_id,
+            bytes_requested=len(image.content),
+            idempotency_key=f"dashboard-media:{secrets.token_hex(16)}",
+            actor_user_id=current.id,
+        )
         relative, target = store_player_image(
             settings.upload_root,
             team.id,
@@ -1554,19 +1815,41 @@ async def upload_player_images(
         created_paths.append(target)
         stat = target.stat()
         asset = MediaAsset(
+            club_id=team.club_id,
             team_id=team.id,
             storage_kind="upload",
             relative_path=relative,
             filename=image.original_filename,
             mime_type=image.mime_type,
             size=stat.st_size,
+            width=image.width,
+            height=image.height,
             checksum=image.checksum,
             mtime=datetime.fromtimestamp(stat.st_mtime, timezone.utc),
-            player_name=image.player_name or None,
+            player_name=player_name.strip() or image.player_name or None,
+            media_category=media_category,
+            game_id=related_game.id if related_game else None,
+            description=description.strip() or None,
+            captured_at=captured_at,
+            photographer=photographer.strip() or None,
+            uploaded_by=current.id,
+            automatic_usage_enabled=True,
             active=True,
             available=True,
         )
         db.add(asset)
+        db.flush()
+        commit_local_media_upload(
+            db,
+            ledger,
+            club_id=team.club_id,
+            media_asset_id=asset.id,
+            team_id=team.id,
+            object_key=relative,
+            size_bytes=stat.st_size,
+            checksum=image.checksum,
+            mime_type=image.mime_type,
+        )
         created_assets.append(asset)
 
     try:
@@ -1595,7 +1878,7 @@ async def upload_player_images(
                     {
                         "asset_id": asset.id,
                         "filename": asset.filename,
-                        "checksum": asset.checksum,
+                        "category": asset.media_category,
                     }
                     for asset in created_assets
                 ],
@@ -1604,7 +1887,7 @@ async def upload_player_images(
             },
         )
         db.commit()
-    except PlayerImageUploadError as exc:
+    except (PlayerImageUploadError, StorageQuotaError) as exc:
         db.rollback()
         for path in created_paths:
             path.unlink(missing_ok=True)
@@ -1615,7 +1898,7 @@ async def upload_player_images(
             path.unlink(missing_ok=True)
         raise
 
-    message = f"{len(created_assets)} Spielerbilder hochgeladen"
+    message = f"{len(created_assets)} Medien hochgeladen"
     if skipped:
         message += f", {len(skipped)} Duplikate übersprungen"
     return redirect(f"/media?team_id={team.id}", message)
@@ -1627,7 +1910,7 @@ def preview_media(
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    asset = db.get(MediaAsset, asset_id)
+    asset = _tenant_media_asset(db, current, asset_id, include_deleted=True)
     if not asset:
         raise HTTPException(404)
     require(current, db, "view", asset.team_id)
@@ -1647,16 +1930,433 @@ def toggle_media(
     db: Session = Depends(get_db),
 ):
     check_csrf(request, csrf_token_value)
-    asset = db.get(MediaAsset, asset_id)
+    asset = _tenant_media_asset(db, current, asset_id)
     if not asset:
         raise HTTPException(404)
     require(current, db, "generate", asset.team_id)
-    asset.active = not asset.active
-    if asset.active and not asset.available:
-        raise HTTPException(422, "Eine fehlende Datei kann nicht aktiviert werden")
-    audit(db, current, "media.toggled", "media", asset.id, asset.team_id, {"active": asset.active})
+    try:
+        set_automatic_usage(
+            db,
+            asset,
+            enabled=not asset.automatic_usage_enabled,
+            actor_user_id=current.id,
+        )
+    except MediaLibraryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    audit(
+        db,
+        current,
+        "media.automatic_usage_changed",
+        "media",
+        asset.id,
+        asset.team_id,
+        {"enabled": asset.automatic_usage_enabled},
+    )
     db.commit()
     return redirect(f"/media?team_id={asset.team_id}")
+
+
+@router.post("/media/{asset_id}/automatic")
+def change_media_automatic_usage(
+    asset_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    enabled: str = Form(default=""),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    asset = _tenant_media_asset(db, current, asset_id)
+    if not asset or asset.deleted_at is not None:
+        raise HTTPException(404)
+    require(current, db, "generate", asset.team_id)
+    try:
+        set_automatic_usage(
+            db,
+            asset,
+            enabled=enabled == "true",
+            actor_user_id=current.id,
+        )
+    except MediaLibraryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    audit(
+        db,
+        current,
+        "media.automatic_usage_changed",
+        "media",
+        asset.id,
+        asset.team_id,
+        {"enabled": asset.automatic_usage_enabled},
+    )
+    db.commit()
+    return redirect(f"/media/{asset.id}", "Automatische Bildauswahl wurde angepasst")
+
+
+@router.post("/media/{asset_id}/release")
+def release_media_asset(
+    asset_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    asset = _tenant_media_asset(db, current, asset_id)
+    if not asset or asset.deleted_at is not None:
+        raise HTTPException(404)
+    require(current, db, "generate", asset.team_id)
+    release_asset(db, asset, actor_user_id=current.id)
+    audit(
+        db,
+        current,
+        "media.released_globally",
+        "media",
+        asset.id,
+        asset.team_id,
+        {"historical_usage_preserved": True},
+    )
+    db.commit()
+    return redirect(f"/media/{asset.id}", "Bild ist wieder für die Automatik verfügbar")
+
+
+@router.post("/media/{asset_id}/delete")
+def delete_media_asset(
+    asset_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    asset = _tenant_media_asset(db, current, asset_id)
+    if not asset or asset.deleted_at is not None:
+        raise HTTPException(404)
+    require(current, db, "generate", asset.team_id)
+    source_path = None
+    try:
+        remove_source_file = soft_delete_asset(db, asset, actor_user_id=current.id)
+        if remove_source_file:
+            source_path = media_asset_path(asset, settings.media_root, settings.upload_root)
+            mark_local_media_deleted(
+                db,
+                club_id=asset.club_id,
+                media_asset_id=asset.id,
+                actor_user_id=current.id,
+            )
+    except MediaLibraryError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except StorageError:
+        source_path = None
+    audit(
+        db,
+        current,
+        "media.soft_deleted",
+        "media",
+        asset.id,
+        asset.team_id,
+        {
+            "file_retained_for_history": not remove_source_file,
+            "source_file_removed": remove_source_file,
+        },
+    )
+    db.commit()
+    if source_path is not None:
+        source_path.unlink(missing_ok=True)
+    return redirect(f"/media?team_id={asset.team_id}", "Medium wurde gelöscht")
+
+
+def _update_media_metadata(
+    db: Session,
+    asset: MediaAsset,
+    *,
+    media_category: str,
+    game_id: str,
+    description: str,
+    captured_date: str,
+    player_name: str,
+    photographer: str,
+) -> None:
+    if media_category not in MEDIA_CATEGORIES:
+        raise MediaLibraryError("Unbekannte Medienkategorie")
+    related_game = (
+        db.scalar(
+            select(Game).where(
+                Game.id == game_id,
+                Game.club_id == asset.club_id,
+                Game.team_id == asset.team_id,
+            )
+        )
+        if game_id
+        else None
+    )
+    if game_id and not related_game:
+        raise MediaLibraryError("Das gewählte Spiel gehört nicht zur Mannschaft")
+    if len(description) > 500 or len(player_name) > 160 or len(photographer) > 160:
+        raise MediaLibraryError("Mindestens eine Beschreibung ist zu lang")
+    captured_at = None
+    if captured_date:
+        try:
+            captured_at = datetime.fromisoformat(captured_date).replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise MediaLibraryError("Ungültiges Aufnahmedatum") from exc
+    asset.media_category = media_category
+    asset.game_id = related_game.id if related_game else None
+    asset.description = description.strip() or None
+    asset.captured_at = captured_at
+    asset.player_name = player_name.strip() or None
+    asset.photographer = photographer.strip() or None
+
+
+@router.post("/media/{asset_id}/edit")
+def edit_media_asset(
+    asset_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    media_category: str = Form(),
+    game_id: str = Form(default=""),
+    description: str = Form(default=""),
+    captured_date: str = Form(default=""),
+    player_name: str = Form(default=""),
+    photographer: str = Form(default=""),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    asset = _tenant_media_asset(db, current, asset_id)
+    if not asset or asset.deleted_at is not None:
+        raise HTTPException(404)
+    require(current, db, "generate", asset.team_id)
+    try:
+        _update_media_metadata(
+            db,
+            asset,
+            media_category=media_category,
+            game_id=game_id,
+            description=description,
+            captured_date=captured_date,
+            player_name=player_name,
+            photographer=photographer,
+        )
+    except MediaLibraryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    audit(
+        db,
+        current,
+        "media.metadata_changed",
+        "media",
+        asset.id,
+        asset.team_id,
+        {"category": asset.media_category, "game_id": asset.game_id},
+    )
+    db.commit()
+    return redirect(f"/media/{asset.id}", "Medienangaben wurden gespeichert")
+
+
+@router.post("/media/bulk")
+def bulk_media_action(
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    asset_ids: list[str] = Form(default=[]),
+    action: str = Form(),
+    category: str = Form(default=""),
+    target_team_id: str = Form(default=""),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
+    if not asset_ids or len(asset_ids) > 100:
+        raise HTTPException(422, "Bitte mindestens ein und höchstens 100 Medien auswählen")
+    assets = db.scalars(
+        select(MediaAsset).where(
+            MediaAsset.id.in_(set(asset_ids)),
+            MediaAsset.club_id == current.club_id,
+            MediaAsset.deleted_at.is_(None),
+        )
+    ).all()
+    if len(assets) != len(set(asset_ids)):
+        raise HTTPException(404, "Mindestens ein Medium ist nicht verfügbar")
+    for asset in assets:
+        require(current, db, "generate", asset.team_id)
+
+    target_team = None
+    if action == "category":
+        if category not in MEDIA_CATEGORIES:
+            raise HTTPException(422, "Unbekannte Medienkategorie")
+    elif action == "team":
+        target_team = db.scalar(
+            select(Team).where(
+                Team.id == target_team_id,
+                Team.club_id == current.club_id,
+            )
+        )
+        if not target_team or target_team.club_id != current.club_id:
+            raise HTTPException(422, "Zielmannschaft gehört nicht zum Verein")
+        require(current, db, "generate", target_team.id)
+        if any(asset.uses or asset.reserved_game_id for asset in assets):
+            raise HTTPException(
+                409,
+                "Bereits verwendete oder reservierte Medien können nicht verschoben werden",
+            )
+        if any(asset.storage_kind != "upload" for asset in assets):
+            raise HTTPException(
+                409,
+                "Medien aus einer externen Importquelle können nicht verschoben werden",
+            )
+        selected_asset_ids = {asset.id for asset in assets}
+        if db.scalar(
+            select(GameMediaPreference.id)
+            .where(
+                GameMediaPreference.club_id == current.club_id,
+                GameMediaPreference.selected_media_asset_id.in_(selected_asset_ids),
+            )
+            .limit(1)
+        ):
+            raise HTTPException(
+                409,
+                "Mindestens ein Medium ist noch bewusst für ein Spiel ausgewählt",
+            )
+    elif action not in {"release", "delete"}:
+        raise HTTPException(422, "Unbekannte Mehrfachaktion")
+    if action == "delete" and any(asset.reserved_game_id for asset in assets):
+        raise HTTPException(409, "Mindestens ein Bild ist noch reserviert")
+
+    moved: list[tuple[Path, Path]] = []
+    deleted_source_paths: list[Path] = []
+    try:
+        for asset in assets:
+            if action == "release":
+                release_asset(db, asset, actor_user_id=current.id)
+            elif action == "delete":
+                remove_source_file = soft_delete_asset(
+                    db, asset, actor_user_id=current.id
+                )
+                if remove_source_file:
+                    mark_local_media_deleted(
+                        db,
+                        club_id=asset.club_id,
+                        media_asset_id=asset.id,
+                        actor_user_id=current.id,
+                    )
+                    try:
+                        deleted_source_paths.append(
+                            media_asset_path(
+                                asset, settings.media_root, settings.upload_root
+                            )
+                        )
+                    except StorageError:
+                        pass
+            elif action == "category":
+                asset.media_category = category
+            elif action == "team" and target_team:
+                old_path = (settings.upload_root / asset.relative_path).resolve()
+                relative, new_path = move_uploaded_media_to_team(
+                    settings.upload_root,
+                    asset.relative_path,
+                    club_id=asset.club_id,
+                    team_id=target_team.id,
+                    team_slug=target_team.slug,
+                )
+                moved.append((new_path, old_path))
+                asset.relative_path = relative
+                asset.team_id = target_team.id
+                asset.game_id = None
+                move_local_media_storage_object(
+                    db,
+                    club_id=asset.club_id,
+                    media_asset_id=asset.id,
+                    team_id=target_team.id,
+                    object_key=relative,
+                )
+        audit(
+            db,
+            current,
+            f"media.bulk_{action}",
+            "media",
+            details={"count": len(assets), "category": category or None},
+        )
+        db.commit()
+        for source_path in deleted_source_paths:
+            source_path.unlink(missing_ok=True)
+    except Exception:
+        db.rollback()
+        for new_path, old_path in reversed(moved):
+            if new_path.exists():
+                old_path.parent.mkdir(parents=True, exist_ok=True)
+                new_path.replace(old_path)
+        raise
+    return redirect("/media", f"{len(assets)} Medien wurden aktualisiert")
+
+
+@router.get("/media/{asset_id}", response_class=HTMLResponse)
+def media_detail(
+    asset_id: str,
+    request: Request,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    asset = _tenant_media_asset(db, current, asset_id, include_deleted=True)
+    if not asset:
+        raise HTTPException(404)
+    require(current, db, "view", asset.team_id)
+    team = db.scalar(
+        select(Team).where(Team.id == asset.team_id, Team.club_id == current.club_id)
+    )
+    games = db.scalars(
+        select(Game)
+        .where(Game.team_id == asset.team_id, Game.club_id == current.club_id)
+        .order_by(Game.kickoff.desc())
+        .limit(100)
+    ).all()
+    history = db.scalars(
+        select(MediaUsageHistory)
+        .where(
+            MediaUsageHistory.media_asset_id == asset.id,
+            MediaUsageHistory.club_id == current.club_id,
+        )
+        .order_by(MediaUsageHistory.created_at.desc())
+    ).all()
+    game_ids = {item.game_id for item in history if item.game_id}
+    history_games = {
+        game.id: game
+        for game in db.scalars(
+            select(Game).where(Game.id.in_(game_ids), Game.club_id == current.club_id)
+        ).all()
+    } if game_ids else {}
+    reservation_game = (
+        db.scalar(
+            select(Game).where(
+                Game.id == asset.reserved_game_id,
+                Game.club_id == current.club_id,
+                Game.team_id == asset.team_id,
+            )
+        )
+        if asset.reserved_game_id
+        else None
+    )
+    uploader = (
+        db.scalar(
+            select(User).where(User.id == asset.uploaded_by, User.club_id == current.club_id)
+        )
+        if asset.uploaded_by
+        else None
+    )
+    return render(
+        request,
+        "media_detail.html",
+        current,
+        asset=asset,
+        team=team,
+        games=games,
+        history=history,
+        history_games=history_games,
+        reservation_game=reservation_game,
+        uploader=uploader,
+        media_status=usage_status(asset),
+        category_labels=MEDIA_CATEGORY_LABELS,
+        title="Medium verwalten",
+    )
 
 
 @router.get("/assets", response_class=HTMLResponse)
@@ -6065,6 +6765,180 @@ def games(
         views_by_game=views_by_game,
         suppressed_items=suppressed_items,
         title="Spiele",
+    )
+
+
+@router.get("/games/{game_id}/media-selection", response_class=HTMLResponse)
+def game_media_selection(
+    game_id: str,
+    request: Request,
+    contribution_type: str = Query(default="announcement"),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
+    game = db.scalar(
+        select(Game).where(Game.id == game_id, Game.club_id == current.club_id)
+    )
+    if not game:
+        raise HTTPException(404, "Spiel nicht gefunden")
+    require(current, db, "generate", game.team_id)
+    team = db.scalar(
+        select(Team).where(Team.id == game.team_id, Team.club_id == current.club_id)
+    )
+    if not team:
+        raise HTTPException(404, "Mannschaft nicht gefunden")
+    if contribution_type not in CONTRIBUTION_TYPE_LABELS:
+        raise HTTPException(422, "Unbekannter Beitragstyp")
+
+    preference = db.scalar(
+        select(GameMediaPreference).where(
+            GameMediaPreference.club_id == current.club_id,
+            GameMediaPreference.game_id == game.id,
+            GameMediaPreference.team_id == team.id,
+            GameMediaPreference.contribution_type == contribution_type,
+        )
+    )
+    media_assets = list(
+        db.scalars(
+            select(MediaAsset)
+            .where(
+                MediaAsset.club_id == current.club_id,
+                MediaAsset.team_id == team.id,
+                MediaAsset.deleted_at.is_(None),
+            )
+            .order_by(MediaAsset.captured_at.desc(), MediaAsset.created_at.desc())
+        )
+    )
+    policy_categories = effective_policy(db, current.club_id, contribution_type)
+    existing_post = db.scalar(
+        select(Post).where(
+            Post.club_id == current.club_id,
+            Post.game_id == game.id,
+            Post.post_type == contribution_type,
+            Post.active_key == "active",
+        )
+    )
+    return render(
+        request,
+        "game_media_selection.html",
+        current,
+        game=game,
+        team=team,
+        contribution_type=contribution_type,
+        contribution_labels=CONTRIBUTION_TYPE_LABELS,
+        media_assets=media_assets,
+        media_category_labels=MEDIA_CATEGORY_LABELS,
+        usage_status=usage_status,
+        preference=preference,
+        policy_categories=policy_categories,
+        existing_post=existing_post,
+        title="Bildauswahl für das Spiel",
+    )
+
+
+@router.post("/games/{game_id}/media-selection")
+def update_game_media_selection(
+    game_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    contribution_type: str = Form(),
+    selection_mode: str = Form(),
+    selected_media_asset_id: str = Form(default=""),
+    allow_used_once: str = Form(default=""),
+    apply_existing: str = Form(default="future"),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    if not current.club_id:
+        raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
+    game = db.scalar(
+        select(Game).where(Game.id == game_id, Game.club_id == current.club_id)
+    )
+    if not game:
+        raise HTTPException(404, "Spiel nicht gefunden")
+    require(current, db, "generate", game.team_id)
+    try:
+        preference = set_game_preference(
+            db,
+            club_id=current.club_id,
+            team_id=game.team_id,
+            game_id=game.id,
+            contribution_type=contribution_type,
+            selection_mode=selection_mode,
+            selected_media_asset_id=selected_media_asset_id or None,
+            allow_used_once=allow_used_once == "on",
+            actor_user_id=current.id,
+        )
+    except MediaLibraryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    audit(
+        db,
+        current,
+        "game.media_selection_updated",
+        "game_media_preference",
+        preference.id,
+        game.team_id,
+        {
+            "game_id": game.id,
+            "contribution_type": contribution_type,
+            "selection_mode": selection_mode,
+            "selected_media_asset_id": preference.selected_media_asset_id,
+            "allow_used_once": preference.allow_used_once,
+        },
+    )
+    existing_post = db.scalar(
+        select(Post).where(
+            Post.club_id == current.club_id,
+            Post.game_id == game.id,
+            Post.post_type == contribution_type,
+            Post.active_key == "active",
+        )
+    )
+    if apply_existing == "regenerate":
+        if not existing_post:
+            raise HTTPException(409, "Für dieses Spiel ist kein bestehender Beitrag vorhanden")
+        if selection_mode != "manual" or not preference.selected_media_asset_id:
+            raise HTTPException(
+                422,
+                "Für eine sofortige Neuerzeugung muss ein Bild bewusst ausgewählt sein",
+            )
+        from app.jobs.generation import enqueue_rerender
+
+        story_job_ids = list(
+            db.scalars(
+                select(PublicationJob.id).where(
+                    PublicationJob.club_id == current.club_id,
+                    PublicationJob.post_id == existing_post.id,
+                    PublicationJob.kind == "story",
+                    PublicationJob.status != JobStatus.PUBLISHED,
+                )
+            )
+        )
+        job = enqueue_rerender(
+            db,
+            existing_post,
+            current,
+            existing_post.version,
+            story_job_ids,
+            preference.selected_media_asset_id,
+            rerender_feed=True,
+        )
+        return redirect(
+            f"/generation-jobs/{job.id}",
+            "Bildauswahl gespeichert und Neuerzeugung eingereiht",
+        )
+    db.commit()
+    message = (
+        "Die automatische Bildauswahl wurde gespeichert"
+        if selection_mode == "automatic"
+        else "Das Bild wurde für diesen Beitragstyp vorgemerkt"
+    )
+    return redirect(
+        f"/games/{game.id}/media-selection?contribution_type={contribution_type}",
+        message,
     )
 
 

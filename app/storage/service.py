@@ -15,6 +15,7 @@ from app.limits.service import effective_limits
 from app.models import (
     DirectUploadSession,
     LedgerStatus,
+    MediaAsset,
     StorageLedgerEntry,
     StorageObject,
     StorageReconciliationRun,
@@ -57,8 +58,13 @@ def object_key(club_id: str, category: str) -> str:
     return f"clubs/{club_id}/{category}/{uuid4()}"
 
 
-def _storage_usage(db: Session, club_id: str) -> tuple[int, int]:
-    committed = int(
+def _storage_usage(
+    db: Session,
+    club_id: str,
+    *,
+    exclude_media_asset_ids: set[str] | None = None,
+) -> tuple[int, int]:
+    committed_objects = int(
         db.scalar(
             select(func.coalesce(func.sum(StorageObject.size_bytes), 0)).where(
                 StorageObject.club_id == club_id,
@@ -68,6 +74,34 @@ def _storage_usage(db: Session, club_id: str) -> tuple[int, int]:
         )
         or 0
     )
+    # Media uploaded through the historical dashboard predates the storage
+    # ledger.  Count it until it is represented by a StorageObject so an
+    # upgrade cannot silently reset a club's consumed quota.
+    tracked_media_ids = {
+        str(references.get("media_asset_id"))
+        for references in db.scalars(
+            select(StorageObject.references).where(
+                StorageObject.club_id == club_id,
+                StorageObject.deleted_at.is_(None),
+            )
+        )
+        if isinstance(references, dict) and references.get("media_asset_id")
+    }
+    excluded = exclude_media_asset_ids or set()
+    legacy_media_bytes = sum(
+        int(size or 0)
+        for media_id, size in db.execute(
+            select(MediaAsset.id, MediaAsset.size).where(
+                MediaAsset.club_id == club_id,
+                # A used, soft-deleted asset remains available to historical
+                # posts and therefore still occupies storage.  An unused
+                # deleted upload is marked unavailable after physical removal.
+                (MediaAsset.deleted_at.is_(None)) | (MediaAsset.available.is_(True)),
+            )
+        )
+        if media_id not in tracked_media_ids and media_id not in excluded
+    )
+    committed = committed_objects + legacy_media_bytes
     reserved = int(
         db.scalar(
             select(func.coalesce(func.sum(StorageLedgerEntry.reserved_bytes), 0)).where(
@@ -78,6 +112,131 @@ def _storage_usage(db: Session, club_id: str) -> tuple[int, int]:
         or 0
     )
     return committed, reserved
+
+
+def storage_usage(db: Session, club_id: str) -> tuple[int, int]:
+    """Return committed and currently reserved billable bytes for one club."""
+
+    return _storage_usage(db, club_id)
+
+
+def commit_local_media_upload(
+    db: Session,
+    ledger: StorageLedgerEntry,
+    *,
+    club_id: str,
+    media_asset_id: str,
+    team_id: str,
+    object_key: str,
+    size_bytes: int,
+    checksum: str,
+    mime_type: str,
+) -> StorageObject:
+    """Commit one validated dashboard upload to the shared storage ledger."""
+
+    if ledger.club_id != club_id or ledger.status != LedgerStatus.RESERVED:
+        raise StorageQuotaError("Die Speicherreservierung ist nicht mehr gültig")
+    if not object_key.startswith(f"clubs/{club_id}/"):
+        raise StorageQuotaError("Upload liegt außerhalb des Vereinsspeichers")
+    limit = effective_limits(db, club_id, lock=True)["storage_bytes"].value
+    committed, reserved = _storage_usage(
+        db, club_id, exclude_media_asset_ids={media_asset_id}
+    )
+    other_reserved = max(0, reserved - int(ledger.reserved_bytes))
+    if committed + other_reserved + size_bytes > limit:
+        raise StorageQuotaError("Speicherlimit wird durch den tatsächlichen Upload überschritten")
+    item = StorageObject(
+        club_id=club_id,
+        provider="local",
+        bucket="application-uploads",
+        object_key=object_key,
+        category="players",
+        size_bytes=size_bytes,
+        checksum=checksum,
+        mime_type=mime_type,
+        references={"media_asset_id": media_asset_id, "team_id": team_id},
+        billable=True,
+        provider_metadata={"source": "dashboard_media_library"},
+    )
+    db.add(item)
+    db.flush()
+    ledger.storage_object_id = item.id
+    ledger.status = LedgerStatus.COMMITTED
+    ledger.actual_bytes = size_bytes
+    ledger.reserved_bytes = 0
+    return item
+
+
+def mark_local_media_deleted(
+    db: Session,
+    *,
+    club_id: str,
+    media_asset_id: str,
+    actor_user_id: str | None,
+) -> None:
+    """Release billed storage after a physical dashboard upload is removed."""
+
+    objects = db.scalars(
+        select(StorageObject).where(
+            StorageObject.club_id == club_id,
+            StorageObject.provider == "local",
+            StorageObject.deleted_at.is_(None),
+        )
+    ).all()
+    item = next(
+        (
+            candidate
+            for candidate in objects
+            if (candidate.references or {}).get("media_asset_id") == media_asset_id
+        ),
+        None,
+    )
+    if item is None:
+        return
+    item.deleted_at = datetime.now(timezone.utc)
+    db.add(
+        StorageLedgerEntry(
+            club_id=club_id,
+            storage_object_id=item.id,
+            action="delete",
+            status=LedgerStatus.DELETED,
+            reserved_bytes=0,
+            actual_bytes=0,
+            actor_user_id=actor_user_id,
+            idempotency_key=f"dashboard-media-delete:{media_asset_id}",
+            details={"released_bytes": item.size_bytes, "media_asset_id": media_asset_id},
+        )
+    )
+
+
+def move_local_media_storage_object(
+    db: Session,
+    *,
+    club_id: str,
+    media_asset_id: str,
+    team_id: str,
+    object_key: str,
+) -> None:
+    """Keep ledger metadata aligned when an unused upload changes teams."""
+
+    objects = db.scalars(
+        select(StorageObject).where(
+            StorageObject.club_id == club_id,
+            StorageObject.provider == "local",
+            StorageObject.deleted_at.is_(None),
+        )
+    ).all()
+    item = next(
+        (
+            candidate
+            for candidate in objects
+            if (candidate.references or {}).get("media_asset_id") == media_asset_id
+        ),
+        None,
+    )
+    if item:
+        item.object_key = object_key
+        item.references = {**(item.references or {}), "team_id": team_id}
 
 
 def reserve_storage(

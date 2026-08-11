@@ -234,11 +234,15 @@ def test_rerender_can_switch_to_an_unused_player_image_without_reusing_old_one(d
  db.add_all([old,replacement]); db.commit()
  renderer=Renderer(tmp_path/"out",upload_root=tmp_path)
  post=create_post(db,game,team,FixtureTextGenerator(),renderer)
- assert post.media_asset_id==old.id and old.reserved_game_id==game.id and old.uses==1
+ initially_used = db.get(MediaAsset, post.media_asset_id)
+ replacement = replacement if initially_used.id == old.id else old
+ assert initially_used.reserved_game_id is None and initially_used.uses==1
+ assert initially_used.automatic_usage_enabled is False
  rerender_post(db,post,renderer,[],media_asset_id=replacement.id); db.commit()
  assert post.media_asset_id==replacement.id
- assert old.reserved_game_id is None and old.uses==1
- assert replacement.reserved_game_id==game.id and replacement.uses==1
+ assert initially_used.reserved_game_id is None and initially_used.uses==1
+ assert replacement.reserved_game_id is None and replacement.uses==1
+ assert replacement.automatic_usage_enabled is False
  other_game=Game(team_id=team.id,external_id="g2",home_team="SV",away_team="FC Zwei",kickoff=game.kickoff+timedelta(days=7),source_url=team.fussball_url)
  db.add(other_game); db.commit()
  assert reserve_image(db,team.id,other_game.id) is None

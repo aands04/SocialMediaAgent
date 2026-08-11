@@ -7,6 +7,7 @@ from PIL import Image
 from app.approvals.service import approve, approve_matchday_bundle
 from app.config import Settings
 from app.games.bundles import connect_games, generation_bundle_games, separate_games
+from app.media.library import set_game_preference
 from app.models import (
     AuditLog,
     Game,
@@ -460,6 +461,52 @@ def test_shared_matchday_generation_uses_one_text_prompt_and_per_game_media(
     second_game = _game(db, second, hour=15, number=2)
     games = [first_game, second_game]
     teams = {first.id: first, second.id: second}
+    first_asset = MediaAsset(
+        team_id=first.id,
+        storage_kind="upload",
+        relative_path="clubs/test/teams/first/match.jpg",
+        filename="first-match.jpg",
+        mime_type="image/jpeg",
+        size=1024,
+        checksum="1" * 64,
+        mtime=datetime.now(timezone.utc),
+        media_category="match_photo",
+    )
+    second_asset = MediaAsset(
+        team_id=second.id,
+        storage_kind="upload",
+        relative_path="clubs/test/teams/second/match.jpg",
+        filename="second-match.jpg",
+        mime_type="image/jpeg",
+        size=1024,
+        checksum="2" * 64,
+        mtime=datetime.now(timezone.utc),
+        media_category="match_photo",
+    )
+    db.add_all([first_asset, second_asset])
+    db.flush()
+    set_game_preference(
+        db,
+        club_id=first.club_id,
+        team_id=first.id,
+        game_id=first_game.id,
+        contribution_type="announcement",
+        selection_mode="manual",
+        selected_media_asset_id=first_asset.id,
+        allow_used_once=False,
+        actor_user_id=None,
+    )
+    set_game_preference(
+        db,
+        club_id=second.club_id,
+        team_id=second.id,
+        game_id=second_game.id,
+        contribution_type="announcement",
+        selection_mode="manual",
+        selected_media_asset_id=second_asset.id,
+        allow_used_once=False,
+        actor_user_id=None,
+    )
     calls: list[dict] = []
 
     class SharedTextGenerator:
@@ -528,6 +575,7 @@ def test_shared_matchday_generation_uses_one_text_prompt_and_per_game_media(
         },
     ]
     assert len(posts) == 2
+    assert [item.media_asset_id for item in posts] == [first_asset.id, second_asset.id]
     assert {item.text for item in posts} == {
         "Gemeinsam: SV Ehlen 1 und SV Ehlen 2 spielen am Sonntag."
     }

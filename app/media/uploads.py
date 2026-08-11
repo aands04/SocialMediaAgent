@@ -253,3 +253,29 @@ def store_player_image(
         target.unlink(missing_ok=True)
         raise
     return relative, target
+
+
+def move_uploaded_media_to_team(
+    upload_root: Path,
+    relative_path: str,
+    *,
+    club_id: str,
+    team_id: str,
+    team_slug: str,
+) -> tuple[str, Path]:
+    """Move an uploaded media object into another team namespace safely."""
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", team_id):
+        raise PlayerImageUploadError("Ungültige Mannschafts-ID")
+    root = Path(upload_root).resolve()
+    source = (root / relative_path).resolve()
+    if not source.is_relative_to(root) or not source.is_file() or source.is_symlink():
+        raise PlayerImageUploadError("Die Mediendatei ist nicht sicher verschiebbar")
+    folder = (root / team_media_prefix(club_id, team_id, team_slug) / "players").resolve()
+    folder.mkdir(parents=True, exist_ok=True)
+    if not folder.is_relative_to(root) or folder.is_symlink():
+        raise PlayerImageUploadError("Unsicherer Zielordner")
+    suffix = source.suffix.lower()
+    target = folder / f"{uuid4().hex}{suffix}"
+    source.replace(target)
+    return target.relative_to(root).as_posix(), target
