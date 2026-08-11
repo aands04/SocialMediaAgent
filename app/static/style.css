@@ -103,3 +103,25 @@ main nav{position:static;top:auto;bottom:auto;width:auto;overflow:visible;border
 .guided-upload-team-choice{display:grid;grid-template-columns:minmax(240px,1fr) auto;align-items:end;gap:12px}.upload-requirements{margin:.65rem 0 1rem}.media-upload-category{border:0;padding:0;margin:0}.media-upload-category legend{font-weight:700;margin-bottom:.55rem}.media-category-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.media-category-option{display:flex;gap:9px;align-items:flex-start;padding:12px;border:2px solid #dbe3f0;border-radius:10px;background:#fff;cursor:pointer}.media-category-option:has(input:checked){border-color:#2563eb;background:#eff6ff}.media-category-option input{width:auto;margin:.18rem 0 0}.media-category-option span{display:grid;gap:3px}.media-category-option small{color:#64748b;line-height:1.35}.media-reservation-note{padding:.5rem;border-radius:7px;background:#eff6ff;color:#1e40af!important;font-size:.82rem}
 .media-category-overview{grid-template-columns:repeat(4,minmax(150px,1fr))}
 @media(max-width:700px){.media-category-overview,.media-category-options,.guided-upload-team-choice{grid-template-columns:1fr}}
+
+/* Öffentliche Datenschutz- und Datenlöschungsseiten. */
+.legal-page{max-width:920px;margin:0 auto;padding:0;background:transparent;color:#1e293b;line-height:1.65}
+.legal-page__header{height:auto;display:block;padding:28px 30px;background:#172554;color:#fff;border-radius:14px;margin-bottom:18px}
+.legal-page__header h1{margin:.25rem 0;font-size:clamp(2rem,5vw,3rem)}
+.legal-page__header p{max-width:760px;margin:.6rem 0;color:#e2e8f0}
+.legal-page__header .eyebrow{color:#93c5fd}
+.legal-page__version{font-size:.9rem}
+.legal-page__nav{position:static;display:flex;flex-wrap:wrap;gap:6px;width:auto;padding:12px;margin:0 0 18px;background:#fff;border:1px solid #dbe3f0;border-radius:10px;overflow:visible}
+.legal-page__nav a{display:inline-block;padding:7px 10px;border-radius:6px;color:#1d4ed8;text-decoration:none}
+.legal-page__nav a:hover,.legal-page__nav a:focus-visible{background:#eff6ff}
+.legal-page section{padding:24px 28px;margin:14px 0;border:1px solid #e2e8f0;box-shadow:0 1px 5px #0f172a0d}
+.legal-page section h2{margin-top:0;color:#172554}
+.legal-page address{padding:14px;border-left:4px solid #2563eb;background:#f8fafc;font-style:normal}
+.legal-page li+li{margin-top:.4rem}
+.legal-page a:not(.button){color:#1d4ed8}
+.legal-page__highlight{border-color:#93c5fd!important;background:#eff6ff!important}
+.site-footer{display:flex;justify-content:center;gap:18px;padding:18px 24px;color:#64748b;font-size:.9rem}
+.site-footer a{color:#475569}
+body:has(.app-nav)>.site-footer{margin-left:240px}
+@media(max-width:800px){.legal-page__header{padding:22px 20px}.legal-page section{padding:20px}.legal-page__nav{display:grid;grid-template-columns:1fr 1fr}body:has(.app-nav)>.site-footer{margin-left:0}}
+@media(max-width:480px){.legal-page__nav{grid-template-columns:1fr}.site-footer{align-items:center;flex-direction:column}}

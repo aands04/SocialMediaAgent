@@ -1,0 +1,61 @@
+{% extends 'base.html' %}
+{% set title = 'Datenlöschung | Vereinszentrale' %}
+{% set description = 'Anleitung zum Trennen von Meta-Konten und zum Beantragen der Datenlöschung in der Vereinszentrale.' %}
+{% block content %}
+<article class="legal-page">
+  <header class="legal-page__header">
+    <p class="eyebrow">Vereinszentrale</p>
+    <h1>Datenlöschung beantragen</h1>
+    <p>Hier erfahren Sie, wie Sie eine Social-Media-Verbindung trennen, WhatsApp-Nachrichten abbestellen oder die Löschung personenbezogener Daten beantragen.</p>
+    <p class="legal-page__version">Stand: {{ effective_date }}</p>
+  </header>
+
+  <section class="legal-page__highlight">
+    <h2>Löschanfrage per E-Mail</h2>
+    <p>Senden Sie Ihre Anfrage mit dem Betreff <strong>„Datenlöschung Vereinszentrale“</strong> an:</p>
+    <p><a class="button" href="mailto:{{ contact_email }}?subject=Datenl%C3%B6schung%20Vereinszentrale">{{ contact_email }}</a></p>
+    <p>Geben Sie bitte die verwendete E-Mail-Adresse, den zugehörigen Verein und die betroffene Verbindung oder Telefonnummer an. Senden Sie niemals ein Passwort oder einen Zugriffstoken.</p>
+  </section>
+
+  <section>
+    <h2>1. Instagram- oder Facebook-Verbindung trennen</h2>
+    <ol>
+      <li>Melden Sie sich in der Vereinszentrale an.</li>
+      <li>Öffnen Sie <strong>Social-Media-Kanäle</strong>.</li>
+      <li>Wählen Sie beim betroffenen Konto <strong>Verwalten</strong> und anschließend <strong>Verbindung trennen</strong>.</li>
+      <li>Bestätigen Sie die Sicherheitsabfrage.</li>
+    </ol>
+    <p>Neue Veröffentlichungen über diese Verbindung werden damit gestoppt. Bei Meta kann der Zugriff zusätzlich in den Einstellungen des jeweiligen Meta-Kontos entfernt werden.</p>
+  </section>
+
+  <section>
+    <h2>2. WhatsApp-Nachrichten abbestellen</h2>
+    <p>Antworten Sie auf eine erhaltene Vereinsnachricht mit <strong>STOP</strong>, <strong>STOPP</strong> oder <strong>ABMELDEN</strong>. Alternativ kann die Vereinsadministration den Empfänger in der Vereinszentrale deaktivieren oder Sie senden eine Anfrage an <a href="mailto:{{ contact_email }}">{{ contact_email }}</a>.</p>
+    <p>Nach der Abmeldung werden keine neuen proaktiven Vereinsnachrichten an diese Telefonnummer geplant.</p>
+  </section>
+
+  <section>
+    <h2>3. Vollständige Löschanfrage</h2>
+    <p>Nach Eingang einer Anfrage prüfen wir zum Schutz vor unberechtigten Löschungen die Identität und die Berechtigung für das betroffene Konto oder den Verein. Wir informieren anschließend über den Umfang und den Abschluss der Löschung.</p>
+    <p>Je nach Anfrage werden insbesondere Kontodaten, Social-Media-Verbindungen, gespeicherte Token, Empfängerdaten, Einwilligungen und nicht mehr benötigte Medien gelöscht oder anonymisiert.</p>
+    <p>Die Bearbeitung erfolgt grundsätzlich innerhalb der gesetzlichen Fristen, in der Regel innerhalb eines Monats. Ist eine Verlängerung zulässig und erforderlich, werden Sie darüber informiert.</p>
+  </section>
+
+  <section>
+    <h2>4. Daten, die nicht sofort gelöscht werden können</h2>
+    <p>Bestimmte Angaben können für gesetzliche Aufbewahrungspflichten, den Nachweis erteilter oder widerrufener Einwilligungen, die Sicherheit des Systems oder die Abwehr und Aufklärung von Missbrauch vorübergehend gesperrt aufbewahrt werden. Sie werden nicht für neue Veröffentlichungen oder Nachrichten verwendet und nach Ablauf der jeweiligen Frist gelöscht.</p>
+    <p>Bereits bei Instagram oder Facebook veröffentlichte Inhalte müssen gegebenenfalls zusätzlich auf der jeweiligen Plattform gelöscht werden. Bereits zugestellte WhatsApp-Nachrichten können nicht aus den Endgeräten der Empfänger entfernt werden.</p>
+  </section>
+
+  <section>
+    <h2>5. Verantwortlicher Kontakt</h2>
+    <address>
+      <strong>{{ controller_name }}</strong><br>
+      {{ controller_street }}<br>
+      {{ controller_city }}<br>
+      E-Mail: <a href="mailto:{{ contact_email }}">{{ contact_email }}</a>
+    </address>
+    <p>Weitere Informationen finden Sie in unserer <a href="/datenschutz">Datenschutzerklärung</a> und im <a href="{{ imprint_url }}" rel="noopener noreferrer">Impressum</a>.</p>
+  </section>
+</article>
+{% endblock %}
