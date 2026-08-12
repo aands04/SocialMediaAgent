@@ -4,7 +4,7 @@
   <div>
     <p class="eyebrow">Sport und Beiträge</p>
     <h1>Spiele</h1>
-    <p>Hier findest du die Spiele deiner Mannschaften sowie den Status der dazugehörigen Beiträge und Veröffentlichungen.</p>
+    <p>Spiele, automatische Beitragserstellung und Veröffentlichungen auf einen Blick.</p>
   </div>
   <div class="games-heading__actions">
     <button type="button" data-toggle-details="manual-game">+ Spiel manuell anlegen</button>
@@ -14,8 +14,7 @@
 
 <details id="manual-game" class="game-admin-tools">
   <summary>Spiel manuell anlegen</summary>
-  <p>Lege hier ein Spiel an, das nicht automatisch von FUSSBALL.DE übernommen wurde.</p>
-  <p class="help-text">Manuell angelegte Spiele können genauso für automatische Beiträge, Storys und Ergebnismeldungen verwendet werden wie automatisch eingelesene Spiele.</p>
+  <p>Lege ein Spiel an, das nicht automatisch von FUSSBALL.DE übernommen wurde.</p>
   <form method="post" action="/games/mock" enctype="multipart/form-data" class="gridform">
     <input type="hidden" name="csrf_token" value="{{csrf}}">
     <label>Mannschaft<select name="team_id" required>{% for t in teams %}<option value="{{t.id}}">{{t.display_name}}</option>{% endfor %}</select></label>
@@ -25,14 +24,14 @@
     <label>Wettbewerb<input name="competition" maxlength="160"></label>
     <label>Spielort<input name="venue" maxlength="250"></label>
     <label>Platzart<select name="pitch"><option value="">Noch nicht bekannt</option><option value="Rasenplatz">Rasenplatz</option><option value="Kunstrasenplatz">Kunstrasenplatz</option></select></label>
-    <label>Gegnerlogo (optional)<input type="file" name="opponent_logo" accept="image/png,image/webp,image/jpeg"><small>PNG, WebP oder JPG. Das Logo kann später jederzeit geändert werden.</small></label>
+    <label>Gegnerlogo (optional)<input type="file" name="opponent_logo" accept="image/png,image/webp,image/jpeg"><small>PNG, WebP oder JPG. Das Logo kann später geändert werden.</small></label>
     <button>Spiel anlegen</button>
   </form>
 </details>
 
 <details id="connect-games" class="game-admin-tools">
   <summary>Spiele zu einem gemeinsamen Spieltag zusammenfassen</summary>
-  <p>Wähle mindestens zwei Spiele verschiedener Mannschaften am selben Spieltag. Die ausgewählten Spiele können anschließend gemeinsam in einem Feed-Beitrag verwendet werden.</p>
+  <p>Wähle mindestens zwei Spiele verschiedener Mannschaften am selben Spieltag.</p>
   <form id="connect-games-form" method="post" action="/games/bundles/connect" onsubmit="return confirm('Möchtest du die ausgewählten Spiele zu einem gemeinsamen Spieltag zusammenfassen?');">
     <input type="hidden" name="csrf_token" value="{{csrf}}">
     <button>Ausgewählte Spiele zusammenfassen</button>
@@ -72,11 +71,30 @@
   </form>
 </section>
 
+{% macro render_automation_details(group) %}
+  {% if group.automation.generation_count > 1 or group.grouped %}
+  <details class="game-automation-details">
+    <summary>
+      {% if group.automation.additional_generation_count %}+ {{group.automation.additional_generation_count}} weitere automatische Erstellung{% if group.automation.additional_generation_count != 1 %}en{% endif %}{% else %}Automatikdetails{% endif %}
+    </summary>
+    <ul>
+      {% for item in group.automation.generation_items %}
+      <li>
+        {% if group.grouped %}<strong>{{item.team_name}}</strong> · {% endif %}{{item.post_type_label}}:
+        <span class="game-tone--{{item.tone}}">{{item.label}}</span>
+        {% if item.detail %}<small>{{item.detail}}</small>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+{% endmacro %}
+
 {% macro render_days(day_groups, past=false) %}
 {% for day, groups in day_groups %}
 <section class="game-day{% if day==today %} game-day--today{% endif %}">
   <header>
-    <div><p class="eyebrow">{% if day==today %}Heute{% else %}Spieltag{% endif %}</p><h2>{{day.strftime('%d.%m.%Y')}}</h2></div>
+    <div><p class="eyebrow">{% if day==today %}Heute{% else %}Spieltag{% endif %}</p><h2>{{weekday_labels[day.weekday()]}} · {{day.strftime('%d.%m.%Y')}}</h2></div>
     {% if day==today %}<span class="badge game-today-badge">Heute</span>{% endif %}
   </header>
   {% for group in groups %}
@@ -85,53 +103,69 @@
       <div>
         <h3>{% if group.grouped %}Gemeinsamer Spieltag · {{group.games|length}} Spiele{% else %}{{group.teams[group.games[0].team_id].display_name}}{% endif %}</h3>
         {% if group.grouped %}
-        <p>Für diese Spiele wird nach deinen Automatisierungsregeln ein gemeinsamer Feed-Beitrag erstellt. Storys bleiben den jeweiligen Spielen und Mannschaften zugeordnet.</p>
-        <small>Der gemeinsame Feed enthält mehrere Bilder, durch die bei Instagram gewischt werden kann.</small>
+        <p>Ein gemeinsamer Feed-Beitrag bündelt die Spiele; Storys bleiben den einzelnen Mannschaften zugeordnet.</p>
+        <details class="game-bundle-help"><summary>Was bedeutet das?</summary><small>Für jedes Spiel entsteht ein eigenes Feed-Bild. Die Bilder werden gemeinsam als Karussell veröffentlicht. Automatikzeiten werden weiterhin nach den Regeln der jeweiligen Mannschaft berechnet.</small></details>
         {% endif %}
       </div>
       {% if group.grouped %}
       <form method="post" action="/games/bundles/separate" onsubmit="return confirm('Möchtest du diese Spiele künftig getrennt behandeln?');">
         <input type="hidden" name="csrf_token" value="{{csrf}}">
         {% for x in group.games %}<input type="hidden" name="game_ids" value="{{x.id}}">{% endfor %}
-        <button class="secondary">Spiele getrennt behandeln</button>
+        <button class="secondary">Spiele trennen</button>
       </form>
       {% endif %}
     </header>
 
-    <section class="game-publication-summary" aria-label="Beitragsstatus">
-      <div><span class="eyebrow">Beitrag</span><strong>{{group.contribution_label}}</strong></div>
-      <div><span class="eyebrow">Nächste Veröffentlichung</span><strong>{% if group.next_publication %}{{group.next_publication.job.scheduled_at|berlin}}{% else %}Noch nicht geplant{% endif %}</strong></div>
-      <div><span class="eyebrow">Kanäle</span><strong>{{group.channel_labels|join(' · ') if group.channel_labels else 'Noch keine'}}</strong></div>
-      <div><span class="eyebrow">Status</span><strong class="game-status game-status--{{group.status_key}}">{{group.status_label}}</strong></div>
-      <div class="game-publication-summary__action">
-      {% if group.detail_post %}
-        <a class="button" href="/posts/{{group.detail_post.id}}">{{group.action_label}}</a>
-      {% else %}
-        <form method="post" action="/games/{{group.games[0].id}}/generate"><input type="hidden" name="csrf_token" value="{{csrf}}"><button name="post_type" value="announcement">{{group.action_label}}</button></form>
-      {% endif %}
+    <section class="game-publication-summary" aria-label="Automatik- und Veröffentlichungsstatus">
+      <div><span class="eyebrow">Beitrag</span><strong class="game-tone--{{group.automation.contribution_tone}}">{{group.automation.contribution_label}}</strong></div>
+      <div>
+        <span class="eyebrow">Automatische Erstellung</span>
+        <strong class="game-tone--{{group.automation.generation_tone}}">{{group.automation.next_generation_label}}</strong>
+        {% if group.automation.next_generation_detail %}<small>{{group.automation.next_generation_detail}}</small>{% endif %}
+        {{render_automation_details(group)}}
+      </div>
+      <div><span class="eyebrow">Nächste Veröffentlichung</span><strong>{{group.automation.next_publication_label}}</strong></div>
+      <div><span class="eyebrow">Kanäle</span><strong>{{group.automation.active_channels|join(' · ') if group.automation.active_channels else 'Noch keine'}}</strong></div>
+      <div class="game-publication-summary__status">
+        <span class="eyebrow">Status</span>
+        <strong class="game-status game-status--{{group.status_key}}">{{group.status_label}}</strong>
+        {% if group.detail_post %}
+          <a class="button" href="/posts/{{group.detail_post.id}}">{{group.action_label}}</a>
+        {% elif group.problem_generation_job %}
+          <a class="button" href="/generation-jobs/{{group.problem_generation_job.id}}">{{group.action_label}}</a>
+        {% else %}
+          <form method="post" action="/games/{{group.games[0].id}}/generate"><input type="hidden" name="csrf_token" value="{{csrf}}"><button name="post_type" value="announcement">{{group.action_label}}</button></form>
+        {% endif %}
       </div>
     </section>
 
     <div class="game-card-list">
     {% for x in group.games %}
+      {% set team=group.teams[x.team_id] %}
+      {% set logo=logo_map.get(x.id) %}
+      {% set media_pref=media_preferences_by_game.get(x.id) %}
       <article class="game-card">
-        <label class="game-select"><input type="checkbox" name="game_ids" value="{{x.id}}" form="connect-games-form" aria-label="{{x.home_team}} gegen {{x.away_team}} auswählen"> Für Zusammenfassung auswählen</label>
+        <label class="game-select"><input type="checkbox" name="game_ids" value="{{x.id}}" form="connect-games-form" aria-label="{{x.home_team}} gegen {{x.away_team}} auswählen"> Auswählen</label>
         <div class="game-scoreline">
-          <span class="game-team-name">{{group.teams[x.team_id].display_name}}</span>
+          <span class="game-team-name">{{team.display_name}}</span>
           <h4>{{x.home_team}} – {{x.away_team}}</h4>
           <time>{{x.kickoff|berlin}}</time>
           {% if x.result_confirmed and x.home_score is not none and x.away_score is not none %}<strong class="game-result">{{x.home_score}} : {{x.away_score}}</strong><small>Ergebnis bestätigt: {{x.home_score}}:{{x.away_score}}</small>{% endif %}
         </div>
-        <dl class="game-facts">
-          <div><dt>Wettbewerb</dt><dd>{{x.competition or 'Noch nicht angegeben'}}</dd></div>
-          <div><dt>Spielort</dt><dd>{{x.venue or 'Noch nicht angegeben'}}</dd></div>
-          <div><dt>Platz</dt><dd>{{x.pitch or 'Noch nicht angegeben'}}</dd></div>
-          {% if x.overrides.get('provider_status')=='provisional' %}<div class="game-provisional"><dt>Status</dt><dd><span class="badge">Spielplan vorläufig</span><small>Der Termin wurde von FUSSBALL.DE noch nicht als endgültig bestätigt.</small></dd></div>{% endif %}
-        </dl>
-        <div class="game-opponent-logo">
-          {% set logo=logo_map.get(x.id) %}<strong>{{opponents.get(x.id,'Gegner')}}</strong>
-          {% if logo %}<img class="logo-thumb" width="72" height="72" src="/logos/{{logo.id}}/preview?game_id={{x.id}}" alt="Gegnerlogo {{logo.display_name}}"><a href="/games/{{x.id}}/opponent-logo">Logo auswählen</a>
-          {% else %}<small class="game-logo-missing">Gegnerlogo fehlt</small><a href="/games/{{x.id}}/opponent-logo">Logo auswählen</a>{% endif %}
+        <div class="game-card__main">
+          <p class="game-facts-inline">
+            {{x.competition or 'Wettbewerb offen'}} · {{x.venue or 'Spielort offen'}}{% if x.pitch %} · {{x.pitch}}{% endif %}
+            {% if x.overrides.get('provider_status')=='provisional' %}<span class="badge game-provisional-inline">Spielplan vorläufig</span>{% endif %}
+          </p>
+          <p class="game-media-choice">
+            <strong>Bildauswahl:</strong>
+            {% if media_pref and media_pref.selection_mode == 'manual' %}manuell festgelegt{% else %}automatisch{% endif %}
+            · <a href="/games/{{x.id}}/media-selection?contribution_type=announcement">{% if media_pref and media_pref.selection_mode == 'manual' %}ändern{% else %}Bild festlegen{% endif %}</a>
+          </p>
+        </div>
+        <div class="game-opponent-logo game-logo-compact">
+          {% if logo %}<img class="logo-thumb" width="48" height="48" src="/logos/{{logo.id}}/preview?game_id={{x.id}}" alt="Gegnerlogo {{logo.display_name}}">{% endif %}
+          <div><strong>{{opponents.get(x.id,'Gegner')}}</strong>{% if not logo %}<small class="game-logo-missing">Gegnerlogo fehlt</small>{% endif %}<a href="/games/{{x.id}}/opponent-logo">Logo {% if logo %}ändern{% else %}auswählen{% endif %}</a></div>
         </div>
 
         <details class="game-card-details">
@@ -147,7 +181,6 @@
         <details class="game-card-details game-more-actions">
           <summary>Weitere Aktionen</summary>
           <div class="game-more-actions__content">
-            <a class="button secondary" href="/games/{{x.id}}/media-selection?contribution_type=announcement">Bildauswahl für Beiträge</a>
             {% if x.overrides.get('provider_status')=='provisional' and not x.overrides.get('provisional_confirmed_by') %}
             <form method="post" action="/games/{{x.id}}/confirm-provisional" onsubmit="return confirm('Diesen vorläufigen Spieltermin für die Beitragserstellung manuell bestätigen?');">
               <input type="hidden" name="csrf_token" value="{{csrf}}"><button class="secondary">Termin manuell bestätigen</button>
@@ -167,7 +200,7 @@
               <button name="post_type" value="reminder">Spielerinnerung erzeugen</button>
               {% if not group.grouped or not group.result_grouped %}<button name="post_type" value="result" {% if not x.result_confirmed %}disabled title="Ergebnis zuerst bestätigen"{% endif %}>Ergebnismeldung erzeugen</button>{% endif %}
             </form>
-            <details class="game-delete-details"><summary>Spiel verwalten</summary><p>Beim Löschen werden neue Automatikläufe gestoppt. Bereits veröffentlichte Inhalte und die Historie bleiben erhalten.</p><form method="post" action="/games/{{x.id}}/delete" onsubmit="return confirm('Dieses Spiel wirklich löschen beziehungsweise ausblenden? Bestehende veröffentlichte Inhalte bleiben erhalten.');"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Spiel löschen</button></form></details>
+            <details class="game-delete-details"><summary>Spiel verwalten</summary><p>Neue Automatikläufe werden gestoppt. Veröffentlichte Inhalte und die Historie bleiben erhalten.</p><form method="post" action="/games/{{x.id}}/delete" onsubmit="return confirm('Dieses Spiel wirklich löschen beziehungsweise ausblenden? Bestehende veröffentlichte Inhalte bleiben erhalten.');"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">Spiel löschen</button></form></details>
           </div>
         </details>
       </article>
@@ -183,7 +216,7 @@
 {% endmacro %}
 
 {% if selected_period != 'past' %}
-<div class="games-list-heading"><div><p class="eyebrow">Als Nächstes</p><h2>Kommende Spiele</h2></div><span>{{upcoming_day_groups|length}} Spieltage</span></div>
+<div class="games-list-heading"><div><p class="eyebrow">Als Nächstes</p><h2>Kommende Spiele</h2></div><span>{{upcoming_day_groups|length}} kommende Spieltage</span></div>
 {% if upcoming_day_groups %}{{render_days(upcoming_day_groups)}}{% else %}<section class="games-empty"><h2>Keine kommenden Spiele</h2><p>Aktuell sind keine zukünftigen Spiele für deine Mannschaften hinterlegt.</p><button type="button" data-toggle-details="manual-game">Spiel manuell anlegen</button></section>{% endif %}
 {% endif %}
 
@@ -198,7 +231,7 @@
 <section class="games-empty"><h2>Keine vergangenen Spiele</h2><p>Für die gewählte Mannschaft und den gewählten Beitragsstatus wurden keine vergangenen Spiele gefunden.</p></section>
 {% endif %}
 
-{% if suppressed_items %}<details class="game-admin-tools"><summary>Ausgeblendete Spiele ({{suppressed_items|length}})</summary><table><tr><th>Spiel</th><th>Anpfiff</th><th>Aktion</th></tr>{% for x in suppressed_items %}<tr><td>{{x.home_team}} – {{x.away_team}}</td><td>{{x.kickoff|berlin}}</td><td><form method="post" action="/games/{{x.id}}/restore"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Wiederherstellen</button></form></td></tr>{% endfor %}</table></details>{% endif %}
+{% if suppressed_items %}<details class="game-admin-tools"><summary>Ausgeblendete Spiele ({{suppressed_items|length}})</summary><div class="table-scroll"><table><tr><th>Spiel</th><th>Anpfiff</th><th>Aktion</th></tr>{% for x in suppressed_items %}<tr><td>{{x.home_team}} – {{x.away_team}}</td><td>{{x.kickoff|berlin}}</td><td><form method="post" action="/games/{{x.id}}/restore"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Wiederherstellen</button></form></td></tr>{% endfor %}</table></div></details>{% endif %}
 
 <script>
 document.querySelectorAll('[data-toggle-details]').forEach(function(button){

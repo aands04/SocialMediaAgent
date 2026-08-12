@@ -8,6 +8,7 @@ from app.config import Settings
 from app.games.automatic import (
     _next_interval,
     _observe_results,
+    automatic_generation_due_at,
     claim_due_team,
     plan_generation_jobs,
 )
@@ -256,6 +257,26 @@ def test_weekday_fixed_feed_and_story_times_use_berlin_match_date(db):
     assert story_time(story, game) == datetime(2026, 8, 9, 8, 30, tzinfo=timezone.utc)
 
 
+def test_generation_due_uses_exact_productive_weekday_schedule(db):
+    now = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
+    team, game = _base(db, now)
+    game.kickoff = datetime(2026, 8, 16, 13, 0, tzinfo=timezone.utc)
+    team.rules = {
+        **team.rules,
+        "generation_lead_minutes": 0,
+        "announcement_timing_mode": "weekday_fixed",
+        "announcement_weekday_times": {"6": "18:00"},
+        "announcement_weekday_targets": {"6": "4"},
+    }
+    db.commit()
+
+    # Sunday match, Friday at 18:00 Europe/Berlin.  This is the same helper
+    # used by the worker and the games dashboard.
+    assert automatic_generation_due_at(db, team, game) == datetime(
+        2026, 8, 14, 16, 0, tzinfo=timezone.utc
+    )
+
+
 def test_weekday_mapping_uses_previous_day_for_announcement_and_next_for_result(db):
     now = datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc)
     team, game = _base(db, now)
@@ -273,9 +294,7 @@ def test_weekday_mapping_uses_previous_day_for_announcement_and_next_for_result(
         "result_weekday_targets": {"4": "5"},
     }
     db.commit()
-    announcement_at, announcement_absolute = feed_time(
-        team, game, "announcement"
-    )
+    announcement_at, announcement_absolute = feed_time(team, game, "announcement")
     result_at, result_absolute = feed_time(team, game, "result")
     assert announcement_absolute is True
     assert announcement_at == datetime(2026, 8, 6, 13, 0, tzinfo=timezone.utc)

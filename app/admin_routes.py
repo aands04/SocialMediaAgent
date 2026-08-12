@@ -38,6 +38,7 @@ from app.db import get_db
 from app.file_delivery import detached_file_response
 from app.games.bundles import connect_games, dashboard_game_groups, separate_games
 from app.games.identity import team_name_variants
+from app.games.overview import build_game_automation_summary
 from app.limits.service import LimitExceeded, assert_resource_capacity, effective_limits
 from app.logos.service import (
     LogoValidationError,
@@ -6569,7 +6570,8 @@ def games(
         or bool((game.overrides or {}).get("import_suppressed"))
     ]
     local_zone = ZoneInfo(settings.timezone)
-    now_local = datetime.now(timezone.utc).astimezone(local_zone)
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(local_zone)
     today = now_local.date()
 
     def local_kickoff(game: Game) -> datetime:
@@ -6605,8 +6607,22 @@ def games(
             game.id,
         )
     )
+    logo_ids = {game.opponent_logo_id for game in items if game.opponent_logo_id}
+    logos_by_id = (
+        {
+            logo.id: logo
+            for logo in db.scalars(
+                select(LogoAsset).where(
+                    LogoAsset.club_id == current.club_id,
+                    LogoAsset.id.in_(logo_ids),
+                )
+            )
+        }
+        if logo_ids
+        else {}
+    )
     logo_map = {
-        game.id: db.get(LogoAsset, game.opponent_logo_id) if game.opponent_logo_id else None
+        game.id: logos_by_id.get(game.opponent_logo_id) if game.opponent_logo_id else None
         for game in items
     }
     opponents = {
@@ -6629,6 +6645,47 @@ def games(
         else []
     )
     post_ids = {post.id for post in game_posts}
+    generation_jobs = (
+        list(
+            db.scalars(
+                select(GenerationJob).where(
+                    GenerationJob.club_id == current.club_id,
+                    GenerationJob.game_id.in_(game_ids),
+                )
+            )
+        )
+        if game_ids
+        else []
+    )
+    story_rules = (
+        list(
+            db.scalars(
+                select(StoryRule).where(
+                    StoryRule.club_id == current.club_id,
+                    StoryRule.team_id.in_(team_map),
+                    StoryRule.active.is_(True),
+                )
+            )
+        )
+        if team_map
+        else []
+    )
+    media_preferences = (
+        list(
+            db.scalars(
+                select(GameMediaPreference).where(
+                    GameMediaPreference.club_id == current.club_id,
+                    GameMediaPreference.game_id.in_(game_ids),
+                    GameMediaPreference.contribution_type == "announcement",
+                )
+            )
+        )
+        if game_ids
+        else []
+    )
+    media_preferences_by_game = {
+        preference.game_id: preference for preference in media_preferences
+    }
     publication_jobs = (
         list(
             db.scalars(
@@ -6656,6 +6713,12 @@ def games(
     for post in game_posts:
         if post.game_id in posts_by_game:
             posts_by_game[post.game_id].append(post)
+    generation_jobs_by_game: dict[str, list[GenerationJob]] = {
+        game_id: [] for game_id in game_ids
+    }
+    for job in generation_jobs:
+        if job.game_id in generation_jobs_by_game:
+            generation_jobs_by_game[job.game_id].append(job)
     for group in game_groups:
         group["games"].sort(
             key=lambda game: (
@@ -6667,6 +6730,11 @@ def games(
         rows = [row for game in group["games"] for row in views_by_game.get(game.id, [])]
         posts_for_group = [
             post for game in group["games"] for post in posts_by_game.get(game.id, [])
+        ]
+        generation_jobs_for_group = [
+            job
+            for game in group["games"]
+            for job in generation_jobs_by_game.get(game.id, [])
         ]
         group["publication_rows"] = sorted(rows, key=lambda row: row.scheduled_at)
         group["publication_targets"] = list(
@@ -6688,9 +6756,48 @@ def games(
             (row.post for row in rows if row.post),
             posts_for_group[0] if posts_for_group else None,
         )
+        group["automation"] = build_game_automation_summary(
+            db,
+            club_id=current.club_id,
+            games=group["games"],
+            teams={game.team_id: team_map[game.team_id] for game in group["games"]},
+            posts=posts_for_group,
+            generation_jobs=generation_jobs_for_group,
+            story_rules=story_rules,
+            publication_rows=group["publication_rows"],
+            settings=settings,
+            bundle_id=group["key"],
+            now=now_utc,
+        )
         job_statuses = {row.job.status for row in rows}
         post_statuses = {post.status for post in posts_for_group}
-        if JobStatus.FAILED in job_statuses or JobStatus.UNCERTAIN in job_statuses or PostStatus.ERROR in post_statuses:
+        failed_generation = any(
+            job.status
+            in {
+                GenerationJobStatus.FAILED,
+                GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
+            }
+            for job in generation_jobs_for_group
+        ) and not posts_for_group
+        group["problem_generation_job"] = max(
+            (
+                job
+                for job in generation_jobs_for_group
+                if job.status
+                in {
+                    GenerationJobStatus.FAILED,
+                    GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
+                }
+            ),
+            key=lambda job: job.updated_at or job.created_at,
+            default=None,
+        )
+        if (
+            failed_generation
+            or JobStatus.FAILED in job_statuses
+            or JobStatus.UNCERTAIN in job_statuses
+            or PostStatus.ERROR in post_statuses
+        ):
             status_key, status_label = "problem", "Problem"
         elif (
             any(row.attention for row in rows)
@@ -6722,27 +6829,43 @@ def games(
             status_key, status_label = "planned", "Geplant"
         elif posts_for_group:
             status_key, status_label = "attention", "Manuelle Planung erforderlich"
+        elif group["automation"].contribution_status == "planned":
+            status_key, status_label = "planned", "Automatisch geplant"
+        elif group["automation"].contribution_status == "problem":
+            status_key, status_label = "problem", "Erstellung prüfen"
+        elif group["automation"].contribution_status == "manual":
+            status_key, status_label = "attention", "Manuelle Erstellung erforderlich"
         else:
             status_key, status_label = "missing", "Beitrag kann erstellt werden"
         group["status_key"] = status_key
         group["status_label"] = status_label
-        group["contribution_label"] = "Erstellt" if posts_for_group else "Noch nicht erstellt"
+        group["contribution_label"] = group["automation"].contribution_label
         group["channel_labels"] = list(
             dict.fromkeys(row.channel.label for row in group["publication_rows"])
         )
-        group["action_label"] = {
-            "missing": "Gemeinsamen Beitrag erstellen" if group["grouped"] else "Beitrag erstellen",
-            "attention": "Gemeinsamen Beitrag prüfen" if group["grouped"] else "Beitrag prüfen",
-            "planned": "Beitrag ansehen",
-            "published": "Veröffentlichung ansehen",
-            "problem": "Beitrag prüfen",
-        }[status_key]
+        if group["detail_post"]:
+            group["action_label"] = {
+                "attention": "Beitrag prüfen",
+                "published": "Veröffentlichung ansehen",
+                "problem": "Problem prüfen",
+            }.get(status_key, "Beitrag ansehen")
+        elif group["automation"].action_type == "create_early":
+            group["action_label"] = "Jetzt vorzeitig erstellen"
+        elif group["automation"].action_type == "problem":
+            group["action_label"] = "Problem prüfen"
+        elif group["automation"].action_type == "overdue":
+            group["action_label"] = "Jetzt erstellen"
+        else:
+            group["action_label"] = (
+                "Gemeinsamen Beitrag erstellen"
+                if group["grouped"]
+                else "Beitrag jetzt erstellen"
+            )
 
     if contribution_status != "all":
         game_groups = [
             group for group in game_groups if group["status_key"] == contribution_status
         ]
-
     upcoming_groups: dict[object, list[dict]] = {}
     past_groups: dict[object, list[dict]] = {}
     for group in game_groups:
@@ -6763,10 +6886,12 @@ def games(
         upcoming_day_groups=upcoming_day_groups,
         past_day_groups=past_day_groups,
         today=today,
+        weekday_labels=WEEKDAY_LABELS,
         selected_team_id=team_id,
         selected_period=period,
         selected_contribution_status=contribution_status,
         views_by_game=views_by_game,
+        media_preferences_by_game=media_preferences_by_game,
         suppressed_items=suppressed_items,
         title="Spiele",
     )
