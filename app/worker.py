@@ -9,7 +9,7 @@ from sqlalchemy import select
 from app.channels.delivery import ChannelDeliveryError, run_cross_channel_delivery_cycle
 from app.config import Settings, get_settings
 from app.db import SessionLocal
-from app.games.automatic import run_automatic_fussball_cycle
+from app.games.automatic import run_automatic_fussball_cycle, run_due_generation_cycle
 from app.jobs.generation import claim_next, process_generation_job
 from app.live.publishing import LivePublishingError, run_live_delivery_cycle
 from app.meta.connection_health import run_automatic_connection_check_cycle
@@ -134,6 +134,7 @@ def run():
         connection_check_result = None
         live_delivery_result = None
         fussball_result = None
+        generation_planning_result = None
         with SessionLocal() as db:
             if loops == 1 or loops % 240 == 0:
                 try:
@@ -148,6 +149,17 @@ def run():
                     log.error("direct_upload_cleanup_failed", error=str(exc))
             if fussball_enabled:
                 fussball_result = run_automatic_fussball_cycle(db, settings)
+                # Provider polling may intentionally happen only once per day.
+                # Due contribution times need a separate, minute-level planner.
+                if settings.automatic_post_generation_enabled and (
+                    loops == 1 or loops % 4 == 0
+                ):
+                    generation_planning_result = run_due_generation_cycle(db, settings)
+                    if generation_planning_result.generation_jobs:
+                        log.info(
+                            "automatic_generation_jobs_planned",
+                            **generation_planning_result.__dict__,
+                        )
             generation_ids = []
             for _ in range(5):
                 with system_scope("Generierungsauftrag global beanspruchen"):
@@ -261,6 +273,11 @@ def run():
                 else None
             ),
             "fussball_cycle": (fussball_result.__dict__ if fussball_result is not None else None),
+            "generation_planning_cycle": (
+                generation_planning_result.__dict__
+                if generation_planning_result is not None
+                else None
+            ),
         }
         temporary = settings.log_root / "worker-heartbeat.tmp"
         temporary.write_text(json.dumps(payload))

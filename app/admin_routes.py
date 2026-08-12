@@ -46,6 +46,7 @@ from app.logos.service import (
     normalize_club_name,
     opponent_name,
     publish_shared_opponent_logo,
+    refresh_pending_generation_logo_snapshots,
     shared_logo_path,
     store_logo,
 )
@@ -6372,6 +6373,9 @@ def manage_opponent_logo(
         team=team,
         opponent=name,
         current_logo=current_logo,
+        opponent_logo_enabled=bool(
+            current_logo and (game.overrides or {}).get("use_opponent_logo", True)
+        ),
         suggestions=suggestions,
         library=library,
         shared_suggestions=shared_suggestions,
@@ -6400,6 +6404,7 @@ async def update_opponent_logo(
     require(current, db, "edit_game", game.team_id)
     team = db.get(Team, game.team_id)
     old = db.get(LogoAsset, game.opponent_logo_id) if game.opponent_logo_id else None
+    old_enabled = bool(old and (game.overrides or {}).get("use_opponent_logo", True))
     selected = None
     created = False
     if action == "upload":
@@ -6451,9 +6456,15 @@ async def update_opponent_logo(
             )
         except LogoValidationError as exc:
             raise HTTPException(422, str(exc)) from exc
+    elif action in {"enable_usage", "disable_usage"}:
+        if not old:
+            raise HTTPException(422, "Es ist kein Gegnerlogo zugeordnet")
+        selected = old
     elif action != "remove":
         raise HTTPException(422, "Unbekannte Logoaktion")
-    if action == "select_shared" and selected:
+    if action in {"enable_usage", "disable_usage"}:
+        source = str((game.overrides or {}).get("opponent_logo_source") or "manuell")
+    elif action == "select_shared" and selected:
         source = "shared_catalog_confirmed"
     elif selected and selected.normalized_name != normalize_club_name(opponent_name(game, team)):
         # Abweichende Schreibweisen sind erlaubt, aber nur nach dieser bewussten Auswahl.
@@ -6462,22 +6473,31 @@ async def update_opponent_logo(
         source = "exact_name_confirmed"
     else:
         source = "removed"
+    opponent_logo_enabled = bool(selected and action not in {"disable_usage", "remove"})
     game.opponent_logo_id = selected.id if selected else None
     game.overrides = {
         **(game.overrides or {}),
         "opponent_logo_source": source,
+        "use_opponent_logo": opponent_logo_enabled,
         "opponent_logo_confirmed_by": current.id if selected else None,
         "opponent_logo_confirmed_at": datetime.now(timezone.utc).isoformat(),
     }
     game.version += 1
     affected = []
-    if (old.id if old else None) != (selected.id if selected else None):
+    selection_changed = (old.id if old else None) != (selected.id if selected else None)
+    usage_changed = old_enabled != opponent_logo_enabled
+    refreshed_jobs = refresh_pending_generation_logo_snapshots(db, game, team)
+    if selection_changed or usage_changed:
         reason = "Gegnerlogo wurde geändert; erneute Freigabe erforderlich"
         affected = _invalidate_posts_for_logo_change(db, game, reason)
         _audit_logo_approval_revocations(db, current, game.team_id, game.id, affected, reason)
     action_name = (
         "opponent_logo.removed"
-        if not selected
+        if action == "remove"
+        else "opponent_logo.usage_enabled"
+        if action == "enable_usage"
+        else "opponent_logo.usage_disabled"
+        if action == "disable_usage"
         else (
             "opponent_logo.shared_catalog_assigned"
             if action == "select_shared"
@@ -6501,6 +6521,8 @@ async def update_opponent_logo(
             "old_logo": {"id": old.id, "version": old.version} if old else None,
             "new_logo": ({"id": selected.id, "version": selected.version} if selected else None),
             "source": source,
+            "use_opponent_logo": opponent_logo_enabled,
+            "refreshed_generation_jobs": refreshed_jobs,
             "affected_posts": affected,
         },
     )

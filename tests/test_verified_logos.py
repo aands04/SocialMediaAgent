@@ -13,6 +13,7 @@ from app.logos.service import (
     LogoValidationError,
     frozen_logo_set,
     normalize_club_name,
+    refresh_pending_generation_logo_snapshots,
     store_logo,
 )
 from app.models import (
@@ -284,6 +285,68 @@ def test_deterministic_compositor_embeds_both_verified_logos(db, tmp_path):
         ]
     assert any(red > 200 and green < 50 for red, green, _ in colors)
     assert any(green > 180 and red < 50 for red, green, _ in colors)
+
+
+def test_opponent_logo_can_be_explicitly_disabled_without_removing_assignment(db, tmp_path):
+    user, _, team, game = graph(db)
+    root = tmp_path / "uploads"
+    opponent_logo = upload(db, root, user, team, "opponent", game.away_team, (10, 225, 20, 255))
+    game.opponent_logo_id = opponent_logo.id
+    game.overrides = {"use_opponent_logo": False}
+    db.commit()
+
+    logos = frozen_logo_set(db, game, team)
+
+    assert game.opponent_logo_id == opponent_logo.id
+    assert logos["opponent"]["fallback"] is True
+    assert logos["opponent"]["disabled"] is True
+    assert "id" not in logos["opponent"]
+
+
+def test_new_logo_choice_refreshes_queued_generation_snapshot(db, tmp_path):
+    user, _, team, game = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    assert job.parameters["logos"]["opponent"]["fallback"] is True
+
+    opponent_logo = upload(
+        db, tmp_path / "uploads", user, team, "opponent", game.away_team, (10, 225, 20, 255)
+    )
+    game.opponent_logo_id = opponent_logo.id
+    game.overrides = {"use_opponent_logo": True}
+    refreshed = refresh_pending_generation_logo_snapshots(db, game, team)
+    db.commit()
+
+    db.refresh(job)
+    assert refreshed == [job.id]
+    assert job.parameters["logos"]["opponent"]["id"] == opponent_logo.id
+    assert job.parameters["logo_selection_refreshed"] is True
+
+
+def test_manual_retry_refreshes_logo_selected_after_original_job(db, tmp_path):
+    user, _, team, game = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    assert job.parameters["logos"]["opponent"]["fallback"] is True
+    job.status = GenerationJobStatus.FAILED
+    job.active_key = None
+    db.commit()
+
+    opponent_logo = upload(
+        db,
+        tmp_path / "uploads",
+        user,
+        team,
+        "opponent",
+        game.away_team,
+        (10, 225, 20, 255),
+    )
+    game.opponent_logo_id = opponent_logo.id
+    game.overrides = {"use_opponent_logo": True}
+    db.commit()
+
+    retry = generation.retry_job(db, job, user)
+
+    assert retry.parameters["logos"]["opponent"]["id"] == opponent_logo.id
+    assert retry.parameters["logo_selection_refreshed"] is True
 
 
 def test_logo_only_recomposition_reuses_ai_base_and_preserves_published_story(

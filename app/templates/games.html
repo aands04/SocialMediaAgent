@@ -165,7 +165,7 @@
         </div>
         <div class="game-opponent-logo game-logo-compact">
           {% if logo %}<img class="logo-thumb" width="48" height="48" src="/logos/{{logo.id}}/preview?game_id={{x.id}}" alt="Gegnerlogo {{logo.display_name}}">{% endif %}
-          <div><strong>{{opponents.get(x.id,'Gegner')}}</strong>{% if not logo %}<small class="game-logo-missing">Gegnerlogo fehlt</small>{% endif %}<a href="/games/{{x.id}}/opponent-logo">Logo {% if logo %}ändern{% else %}auswählen{% endif %}</a></div>
+          <div><strong>{{opponents.get(x.id,'Gegner')}}</strong>{% if logo and not x.overrides.get('use_opponent_logo', true) %}<small class="game-logo-missing">Logo bewusst deaktiviert</small>{% elif not logo %}<small class="game-logo-missing">Gegnerlogo fehlt</small>{% endif %}<a href="/games/{{x.id}}/opponent-logo">Logo {% if logo %}ändern{% else %}auswählen{% endif %}</a></div>
         </div>
 
         <details class="game-card-details">

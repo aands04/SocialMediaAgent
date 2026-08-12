@@ -11,6 +11,7 @@ from app.games.automatic import (
     automatic_generation_due_at,
     claim_due_team,
     plan_generation_jobs,
+    run_due_generation_cycle,
 )
 from app.games.provider import FussballDeProvider, ProviderError, _validated_digit_cmap
 from app.models import (
@@ -186,6 +187,84 @@ def test_announcement_is_queued_once_and_stays_unapproved(db):
     job = db.query(GenerationJob).one()
     assert job.parameters["trigger_mode"] == "automatic_fussball"
     assert job.status.value == "queued"
+
+
+def test_due_generation_cycle_does_not_wait_for_next_provider_poll(db):
+    now = datetime.now(timezone.utc)
+    team, _ = _base(db, now)
+    settings = Settings(automatic_post_generation_enabled=True)
+
+    # The normal provider poll is intentionally not due until tomorrow. The
+    # publication schedule itself must still trigger generation today.
+    db.add(
+        FussballSyncState(
+            team_id=team.id,
+            club_id=team.club_id,
+            status="idle",
+            next_poll_at=now + timedelta(hours=23),
+        )
+    )
+    db.commit()
+    result = run_due_generation_cycle(db, settings, now=now)
+
+    assert result.failed == 0
+    assert result.teams == 1
+    assert result.generation_jobs == 1
+    job = db.query(GenerationJob).one()
+    assert job.parameters["trigger_mode"] == "automatic_fussball"
+    assert job.parameters["automatic_planned_at"] == now.isoformat()
+
+    repeated = run_due_generation_cycle(db, settings, now=now + timedelta(minutes=1))
+    assert repeated.generation_jobs == 0
+    assert db.query(GenerationJob).count() == 1
+
+
+def test_automatic_planner_queues_one_complete_matchday_bundle(db):
+    now = datetime.now(timezone.utc)
+    first, first_game = _base(db, now)
+    first.rules = {
+        **first.rules,
+        "club_matchday_feed_mode": "announcements_and_results",
+    }
+    second = Team(
+        internal_name="two",
+        display_name="SV Ehlen II",
+        short_name="SVE II",
+        slug="sve-two",
+        club=first.club,
+        fussball_url="https://www.fussball.de/mannschaft/test-two",
+        instagram_page_id=first.instagram_page_id,
+        media_subdir="two",
+        rules={
+            **first.rules,
+            "club_matchday_feed_mode": "announcements_and_results",
+        },
+    )
+    db.add(second)
+    db.flush()
+    second_game = Game(
+        team_id=second.id,
+        provider="fussball.de",
+        external_id="MATCH2",
+        home_team="SV Ehlen II",
+        away_team="Gast II",
+        kickoff=first_game.kickoff + timedelta(hours=2),
+        competition="Liga",
+        status="scheduled",
+        source_url="https://www.fussball.de/spiel/x/-/spiel/MATCH2",
+        checked_at=now,
+        overrides={},
+    )
+    db.add(second_game)
+    db.commit()
+
+    settings = Settings(automatic_post_generation_enabled=True)
+    result = run_due_generation_cycle(db, settings, now=now)
+
+    assert result.generation_jobs == 1
+    job = db.query(GenerationJob).one()
+    assert job.parameters["bundle_game_ids"] == [first_game.id, second_game.id]
+    assert set(job.parameters["logos_by_game"]) == {first_game.id, second_game.id}
 
 
 def test_announcement_generation_uses_configured_day_lead(db):
