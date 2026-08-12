@@ -241,6 +241,73 @@ def test_generation_job_overview_collapses_manual_retry_history(browser):
     assert "durch Folgeauftrag ersetzt" in history.text
 
 
+def test_confirmed_generation_retry_redirects_to_fresh_job(browser):
+    client, factory = browser
+    team_id = create_automation_team(factory, suffix="manual-retry")
+    with factory() as db:
+        team = db.get(Team, team_id)
+        user = db.scalar(select(User).where(User.email == "admin@test.invalid"))
+        game = Game(
+            team_id=team.id,
+            provider="mock",
+            external_id="dashboard-manual-retry",
+            home_team=team.display_name,
+            away_team="FC Wiederholung",
+            kickoff=datetime.now(timezone.utc) + timedelta(days=1),
+            source_url="fixture://dashboard-manual-retry",
+        )
+        db.add(game)
+        db.flush()
+        old_post = Post(
+            game_id=game.id,
+            team_id=team.id,
+            instagram_page_id=team.instagram_page_id,
+            post_type="announcement",
+            status=PostStatus.PENDING,
+            text="Inhalt eines vorherigen technischen Versuchs",
+            feed_path="older/feed.png",
+            active_key="previous-attempt",
+        )
+        db.add(old_post)
+        db.flush()
+        failed = GenerationJob(
+            job_type=GenerationJobType.CREATE_POST,
+            game_id=game.id,
+            team_id=team.id,
+            post_id=old_post.id,
+            post_type="announcement",
+            requested_by=user.id,
+            status=GenerationJobStatus.FAILED,
+            phase="generating_text",
+            planned_outputs=2,
+            completed_outputs=0,
+            idempotency_key="dashboard-manual-retry-failed",
+            active_key=None,
+        )
+        db.add(failed)
+        db.commit()
+        failed_id = failed.id
+
+    response = client.post(
+        f"/generation-jobs/{failed_id}/retry",
+        data={"csrf_token": session_csrf(client)},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/generation-jobs/")
+    assert response.headers["location"] != f"/generation-jobs/{failed_id}"
+    with factory() as db:
+        retry = db.scalar(
+            select(GenerationJob).where(
+                GenerationJob.parameters["manual_retry_of_job_id"].as_string() == failed_id
+            )
+        )
+        assert retry is not None
+        assert retry.post_id is None
+        assert retry.parameters["manual_retry_allow_selected_media_reuse"] is True
+
+
 def test_publication_time_can_be_changed_from_post_detail(browser):
     client, factory = browser
     with factory() as db:

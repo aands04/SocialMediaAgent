@@ -309,6 +309,44 @@ def test_manual_selection_still_rejects_consumed_saved_preference(db):
         )
 
 
+def test_confirmed_manual_retry_can_reuse_selected_asset_without_global_release(db):
+    team, games = _graph(db)
+    selected = _asset(db, team, "manual-retry-consumed")
+    set_game_preference(
+        db,
+        club_id=team.club_id,
+        team_id=team.id,
+        game_id=games[0].id,
+        contribution_type="announcement",
+        selection_mode="manual",
+        selected_media_asset_id=selected.id,
+        allow_used_once=False,
+        actor_user_id=None,
+    )
+    selected.uses = 1
+    selected.automatic_usage_enabled = False
+    selected.active = False
+
+    reused = reserve_media(
+        db,
+        club_id=team.club_id,
+        team_id=team.id,
+        game_id=games[0].id,
+        contribution_type="announcement",
+        allow_manual_retry_reuse=True,
+    )
+
+    assert reused.id == selected.id
+    assert selected.uses == 2
+    assert selected.automatic_usage_enabled is False
+    history = (
+        db.query(MediaUsageHistory)
+        .filter_by(media_asset_id=selected.id, action="manual_reuse")
+        .one()
+    )
+    assert history.details["manual_retry_reuse"] is True
+
+
 def test_manual_one_time_reuse_overrides_policy_without_global_release(db):
     team, games = _graph(db)
     portrait = _asset(

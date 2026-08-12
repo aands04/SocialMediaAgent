@@ -101,6 +101,8 @@ def reserve_image(
     team_id: str,
     game_id: str,
     contribution_type: str = "announcement",
+    *,
+    allow_manual_retry_reuse: bool = False,
 ) -> MediaAsset | None:
     """Backward-compatible entry point for the tenant-safe media selector."""
 
@@ -114,6 +116,7 @@ def reserve_image(
         team_id=team.id,
         game_id=game.id,
         contribution_type=contribution_type,
+        allow_manual_retry_reuse=allow_manual_retry_reuse,
     )
 
 
@@ -679,6 +682,7 @@ def create_post(
     generated_text: GeneratedText | None = None,
     text_prompt_override=None,
     matchday_bundle: dict | None = None,
+    allow_manual_retry_reuse: bool = False,
 ) -> Post:
     if game.status == "provisional" or game.overrides.get("automation_blocked"):
         raise ValueError("Vorläufige Spiele sind für die Beitragserstellung gesperrt")
@@ -707,7 +711,13 @@ def create_post(
     asset = (
         db.get(MediaAsset, existing.media_asset_id)
         if resuming and existing.media_asset_id
-        else reserve_image(db, team.id, game.id, post_type)
+        else reserve_image(
+            db,
+            team.id,
+            game.id,
+            post_type,
+            allow_manual_retry_reuse=allow_manual_retry_reuse,
+        )
     )
     if asset and (asset.club_id != team.club_id or asset.team_id != team.id):
         raise ValueError("Das reservierte Spielerbild gehört nicht zu diesem Beitrag")
@@ -1360,6 +1370,8 @@ def create_matchday_bundle_posts(
     post_type: str,
     logo_snapshots: dict[str, dict],
     bundle_key: str,
+    *,
+    allow_manual_retry_reuse: bool = False,
 ) -> list[Post]:
     """Create all game-specific media with one shared publication text.
 
@@ -1511,6 +1523,7 @@ def create_matchday_bundle_posts(
                 generated_text=shared_text,
                 text_prompt_override=shared_prompt,
                 matchday_bundle=bundle_snapshot,
+                allow_manual_retry_reuse=allow_manual_retry_reuse,
             )
         )
     return posts

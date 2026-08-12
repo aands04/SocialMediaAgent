@@ -293,6 +293,7 @@ def reserve_media(
     game_id: str,
     contribution_type: str,
     actor_user_id: str | None = None,
+    allow_manual_retry_reuse: bool = False,
 ) -> MediaAsset | None:
     """Atomically reserve the explicit choice or an eligible policy candidate."""
 
@@ -322,7 +323,7 @@ def reserve_media(
                 raise MediaLibraryError(
                     "Das bewusst gewählte Bild ist für ein anderes Spiel reserviert"
                 )
-            if asset.uses > 0 and not preference.allow_used_once:
+            if asset.uses > 0 and not preference.allow_used_once and not allow_manual_retry_reuse:
                 raise MediaLibraryError("Das bewusst gewählte Bild wurde bereits verwendet")
             asset.reserved_game_id = game_id
             asset.uses += 1
@@ -333,7 +334,10 @@ def reserve_media(
                 game_id=game_id,
                 contribution_type=contribution_type,
                 actor_user_id=actor_user_id,
-                details={"selection_mode": "manual"},
+                details={
+                    "selection_mode": "manual",
+                    "manual_retry_reuse": bool(allow_manual_retry_reuse),
+                },
             )
             db.flush()
             return asset
