@@ -9,9 +9,22 @@
   <p>{{current_logo.display_name}} · Version {{current_logo.version}} · SHA-256 {{current_logo.checksum}}</p>
   <small>Hochgeladen {{current_logo.created_at|berlin}} durch {{uploaders.get(current_logo.uploaded_by,current_logo.uploaded_by)}}</small>
   <p><span class="badge">verifiziert</span> · Quelle: {{game.overrides.get('opponent_logo_source','manuell')}}</p>
+  {% if opponent_logo_enabled %}
+  <div class="success">Dieses Gegnerlogo wird bei jeder neu erzeugten Grafik ausdrücklich als Referenz verwendet.</div>
+  <form method="post" action="/games/{{game.id}}/opponent-logo" onsubmit="return confirm('Das zugeordnete Gegnerlogo bei neuen Grafiken bewusst nicht mehr verwenden?');">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <button class="secondary" name="action" value="disable_usage">Bei neuen Grafiken nicht verwenden</button>
+  </form>
+  {% else %}
+  <div class="warning">Das Logo bleibt zugeordnet, wird bei neuen Grafiken aber bewusst nicht an die KI übergeben.</div>
   <form method="post" action="/games/{{game.id}}/opponent-logo">
     <input type="hidden" name="csrf_token" value="{{csrf}}">
-    <button class="danger" name="action" value="remove">Gegnerlogo entfernen</button>
+    <button name="action" value="enable_usage">Gegnerlogo wieder verwenden</button>
+  </form>
+  {% endif %}
+  <form method="post" action="/games/{{game.id}}/opponent-logo">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <button class="danger" name="action" value="remove">Zuordnung vollständig entfernen</button>
   </form>
 </section>
 {% else %}
@@ -24,7 +37,7 @@
     <input type="hidden" name="csrf_token" value="{{csrf}}">
     <input type="hidden" name="action" value="upload">
     <input type="file" name="file" accept=".png,.webp,image/png,image/webp" required>
-    <button>Gegnerlogo hochladen und zuordnen</button>
+    <button>Gegnerlogo hochladen, zuordnen und verwenden</button>
   </form>
 </section>
 {% if suggestions %}

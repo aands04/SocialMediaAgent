@@ -1797,6 +1797,8 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     assert opponent_upload.status_code == 303
     opponent_page = client.get(f"/games/{game_id}/opponent-logo").text
     assert 'class="logo-preview" width="240" height="240"' in opponent_page
+    assert "bei jeder neu erzeugten Grafik" in opponent_page
+    assert "als Referenz verwendet" in opponent_page
     second_version = client.post(
         f"/games/{game_id}/opponent-logo",
         data={"csrf_token": token, "action": "upload"},
@@ -1809,6 +1811,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
         second = db.get(Game, second_id)
         logo = db.get(LogoAsset, first.opponent_logo_id)
         assert logo and logo.uploaded_by == admin_id
+        assert first.overrides["use_opponent_logo"] is True
         team_logo = db.query(LogoAsset).filter_by(team_id=team_id, logo_type="team").one()
         assert Path(team_logo.original_path).parts[:2] == ("clubs", team_logo.club_id)
         assert Path(team_logo.original_path).parts[-2] == "logos"
@@ -1816,6 +1819,26 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
         assert Path(logo.original_path).parts[2:4] == ("logos", "opponents")
         assert second.opponent_logo_id is None
         logo_id = logo.id
+    disabled = client.post(
+        f"/games/{game_id}/opponent-logo",
+        data={"csrf_token": token, "action": "disable_usage"},
+        follow_redirects=False,
+    )
+    assert disabled.status_code == 303
+    with factory() as db:
+        first = db.get(Game, game_id)
+        assert first.opponent_logo_id == logo_id
+        assert first.overrides["use_opponent_logo"] is False
+    disabled_page = client.get(f"/games/{game_id}/opponent-logo").text
+    assert "bewusst nicht an die KI" in disabled_page
+    enabled = client.post(
+        f"/games/{game_id}/opponent-logo",
+        data={"csrf_token": token, "action": "enable_usage"},
+        follow_redirects=False,
+    )
+    assert enabled.status_code == 303
+    with factory() as db:
+        assert db.get(Game, game_id).overrides["use_opponent_logo"] is True
     suggestion = client.get(f"/games/{second_id}/opponent-logo")
     assert suggestion.text.count("Vorschlag ausdrücklich bestätigen") == 2
     assert "Passende Logos aus der systemweiten Bibliothek" in suggestion.text

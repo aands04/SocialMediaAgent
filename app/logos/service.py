@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.games.identity import normalize_team_name, opponent_for_game
-from app.models import LogoAsset, SharedOpponentLogo
+from app.models import GenerationJob, GenerationJobStatus, LogoAsset, SharedOpponentLogo
 from app.teams.service import team_media_prefix
 
 MAX_LOGO_SIZE = 10 * 1024 * 1024
@@ -300,15 +300,58 @@ def snapshot(asset: LogoAsset | None) -> dict | None:
 
 def frozen_logo_set(db: Session, game, team) -> dict:
     team_logo = db.get(LogoAsset, team.logo_asset_id) if team.logo_asset_id else None
-    opponent_logo = db.get(LogoAsset, game.opponent_logo_id) if game.opponent_logo_id else None
+    opponent_logo_enabled = bool(
+        game.opponent_logo_id and (game.overrides or {}).get("use_opponent_logo", True)
+    )
+    opponent_logo = db.get(LogoAsset, game.opponent_logo_id) if opponent_logo_enabled else None
     opponent = opponent_name(game, team)
+    opponent_snapshot = snapshot(opponent_logo) or {
+        "fallback": True,
+        "name": opponent,
+        "verified": False,
+    }
+    if game.opponent_logo_id and not opponent_logo_enabled:
+        opponent_snapshot["disabled"] = True
     return {
         "team": snapshot(team_logo),
-        "opponent": snapshot(opponent_logo)
-        or {"fallback": True, "name": opponent, "verified": False},
+        "opponent": opponent_snapshot,
         "opponent_name": opponent,
         "compositor": {"version": COMPOSITOR_VERSION},
     }
+
+
+def refresh_pending_generation_logo_snapshots(db: Session, game, team) -> list[str]:
+    """Refresh logo inputs for jobs that have not started yet.
+
+    Logo references are deliberately frozen when a job is queued. If an editor
+    changes the explicit opponent-logo choice before the worker starts, the
+    pending job must nevertheless use that newer deliberate choice. Running
+    jobs are not mutated underneath the image provider.
+    """
+
+    fresh = frozen_logo_set(db, game, team)
+    refreshed: list[str] = []
+    jobs = db.scalars(
+        select(GenerationJob).where(
+            GenerationJob.club_id == team.club_id,
+            GenerationJob.status == GenerationJobStatus.QUEUED,
+        )
+    ).all()
+    for job in jobs:
+        parameters = dict(job.parameters or {})
+        bundle_game_ids = [str(item) for item in parameters.get("bundle_game_ids") or []]
+        if game.id in bundle_game_ids:
+            logos_by_game = dict(parameters.get("logos_by_game") or {})
+            logos_by_game[game.id] = fresh
+            parameters["logos_by_game"] = logos_by_game
+        elif job.game_id == game.id and not bundle_game_ids:
+            parameters["logos"] = fresh
+        else:
+            continue
+        parameters["logo_selection_refreshed"] = True
+        job.parameters = parameters
+        refreshed.append(job.id)
+    return refreshed
 
 
 def validate_frozen_logo(db: Session, item: dict | None, expected_type: str) -> LogoAsset | None:

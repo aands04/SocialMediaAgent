@@ -13,11 +13,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.games.bundles import generation_bundle_games
 from app.games.importer import import_snapshot
 from app.games.live_test import serialize
 from app.games.provider import FussballDeProvider, ProviderError
-from app.jobs.generation import enqueue_create
+from app.jobs.generation import enqueue_bundle_create
 from app.models import (
+    AccountType,
     AuditLog,
     Club,
     ClubStatus,
@@ -25,7 +27,6 @@ from app.models import (
     Game,
     GenerationJob,
     Notification,
-    Post,
     ProviderSnapshot,
     Role,
     StoryRule,
@@ -47,6 +48,14 @@ class AutomaticFussballResult:
     updated_games: int = 0
     results_confirmed: int = 0
     generation_jobs: int = 0
+
+
+@dataclass
+class AutomaticGenerationSweepResult:
+    clubs: int = 0
+    teams: int = 0
+    generation_jobs: int = 0
+    failed: int = 0
 
 
 @dataclass(frozen=True)
@@ -334,10 +343,12 @@ def _observe_results(
     return confirmed
 
 
-def _automatic_actor(db: Session) -> User | None:
+def _automatic_actor(db: Session, club_id: str) -> User | None:
     return db.scalar(
         select(User)
         .where(
+            User.club_id == club_id,
+            User.account_type == AccountType.CLUB_USER,
             User.active.is_(True),
             User.archived_at.is_(None),
             User.role == Role.ADMIN,
@@ -465,11 +476,10 @@ def plan_generation_jobs(
         "automatic_generation_enabled"
     ):
         return 0
-    actor = _automatic_actor(db)
+    actor = _automatic_actor(db, team.club_id)
     if not actor:
         return 0
     now = now or _now()
-    rules = team.rules or {}
     story_rules = list(
         db.scalars(
             select(StoryRule).where(
@@ -508,34 +518,37 @@ def plan_generation_jobs(
                 > _utc(game.kickoff) + timedelta(hours=settings.fussball_result_max_age_hours)
             ):
                 continue
-            if db.scalar(
-                select(Post.id).where(
-                    Post.game_id == game.id,
-                    Post.post_type == post_type,
-                    Post.active_key == "active",
-                )
-            ):
+            bundle_games, bundle_teams, bundle_key = generation_bundle_games(
+                db, game, team, post_type
+            )
+            if post_type == "result" and any(not item.result_confirmed for item in bundle_games):
                 continue
+            if bundle_key and len(bundle_games) >= 2:
+                digest = hashlib.sha256(
+                    ":".join(item.id for item in bundle_games).encode("utf-8")
+                ).hexdigest()[:24]
+                idempotency_key = f"create-bundle:{post_type}:{digest}"
+            else:
+                idempotency_key = f"create:{game.id}:{post_type}"
             existing_job = db.scalar(
-                select(GenerationJob.id).where(
-                    GenerationJob.idempotency_key == f"create:{game.id}:{post_type}"
-                )
+                select(GenerationJob.id).where(GenerationJob.idempotency_key == idempotency_key)
             )
             if existing_job:
                 continue
-            job, _ = enqueue_create(db, game, team, actor, post_type)
+            job, _existing_post = enqueue_bundle_create(db, game, team, actor, post_type)
             if job:
+                approval_rule = (
+                    "auto_approve_results"
+                    if post_type == "result"
+                    else "auto_approve_announcements"
+                )
                 job.parameters = {
                     **(job.parameters or {}),
                     "trigger_mode": "automatic_fussball",
-                    "provider_sync_at": now.isoformat(),
-                    "automatic_approval_requested": bool(
-                        rules.get(
-                            "auto_approve_results"
-                            if post_type == "result"
-                            else "auto_approve_announcements",
-                            False,
-                        )
+                    "automatic_planned_at": now.isoformat(),
+                    "automatic_approval_requested": all(
+                        bool((bundle_teams[item.team_id].rules or {}).get(approval_rule, False))
+                        for item in bundle_games
                     ),
                 }
                 db.add(
@@ -545,12 +558,63 @@ def plan_generation_jobs(
                         action="generation.queued_automatically",
                         entity_type="generation_job",
                         entity_id=job.id,
-                        details={"game_id": game.id, "post_type": post_type},
+                        details={
+                            "game_id": game.id,
+                            "game_ids": [item.id for item in bundle_games],
+                            "post_type": post_type,
+                            "bundle": len(bundle_games) >= 2,
+                        },
                     )
                 )
                 db.commit()
                 queued += 1
     return queued
+
+
+def run_due_generation_cycle(
+    db: Session,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+) -> AutomaticGenerationSweepResult:
+    """Plan due contributions independently from the provider polling cadence."""
+
+    result = AutomaticGenerationSweepResult()
+    if not settings.automatic_post_generation_enabled:
+        return result
+    now = now or _now()
+    with system_scope("Fällige automatische Beitragserstellungen ermitteln"):
+        team_rows = db.execute(
+            select(Team.id, Team.club_id)
+            .join(Club, Club.id == Team.club_id)
+            .where(
+                Team.active.is_(True),
+                Team.archived_at.is_(None),
+                Team.fussball_url.is_not(None),
+                Team.fussball_url != "",
+                Club.status.in_([ClubStatus.ACTIVE, ClubStatus.TRIAL]),
+            )
+            .order_by(Team.club_id, Team.id)
+        ).all()
+    result.clubs = len({club_id for _, club_id in team_rows})
+    for team_id, club_id in team_rows:
+        try:
+            with tenant_scope(club_id, "system:automatic-generation-planner"):
+                team = db.get(Team, team_id)
+                if not team:
+                    continue
+                result.teams += 1
+                result.generation_jobs += plan_generation_jobs(db, team, settings, now=now)
+        except Exception as exc:
+            db.rollback()
+            result.failed += 1
+            log.warning(
+                "automatic_generation_planning_failed",
+                club_id=club_id,
+                team_id=team_id,
+                error=str(exc),
+            )
+    return result
 
 
 def _next_interval(db: Session, team_id: str, settings: Settings, now: datetime) -> int:

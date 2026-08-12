@@ -1369,6 +1369,16 @@ def process_generation_job(
                     raise LogoValidationError(
                         f"Gegnerlogo wurde nach dem Einreihen geändert: {member_team.display_name}"
                     )
+                if (
+                    not opponent_logo
+                    and (frozen.get("opponent") or {}).get("fallback")
+                    and not (frozen.get("opponent") or {}).get("disabled")
+                    and item.opponent_logo_id
+                ):
+                    raise LogoValidationError(
+                        "Gegnerlogo wurde nach dem Einreihen zugeordnet: "
+                        f"{member_team.display_name}"
+                    )
                 validate_frozen_file(team_logo, settings.upload_root)
                 validate_frozen_file(opponent_logo, settings.upload_root)
             _phase(db, job, "preparing", 5)
@@ -1433,6 +1443,7 @@ def process_generation_job(
         if needs_images and (
             not opponent_logo
             and (logos.get("opponent") or {}).get("fallback")
+            and not (logos.get("opponent") or {}).get("disabled")
             and game.opponent_logo_id
         ):
             raise LogoValidationError("Die Gegnerlogo-Zuordnung wurde nach dem Einreihen geändert.")
@@ -1811,6 +1822,27 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
     parameters["manual_retry_of_job_id"] = job.id
     parameters["manual_retry_requested_at"] = _now().isoformat()
     parameters["logos"] = logos
+    bundle_game_ids = [
+        str(item).strip() for item in (parameters.get("bundle_game_ids") or []) if str(item).strip()
+    ]
+    if bundle_game_ids:
+        fresh_bundle_logos: dict[str, dict] = {}
+        for bundle_game_id in bundle_game_ids:
+            bundle_game = db.get(Game, bundle_game_id)
+            bundle_team = db.get(Team, bundle_game.team_id) if bundle_game else None
+            if (
+                not bundle_game
+                or not bundle_team
+                or bundle_game.club_id != job.club_id
+                or bundle_team.club_id != job.club_id
+            ):
+                raise ValueError(
+                    "Mindestens ein Teilspiel des gemeinsamen Spieltags fehlt oder gehört "
+                    "zu einem anderen Verein."
+                )
+            fresh_bundle_logos[bundle_game.id] = frozen_logo_set(db, bundle_game, bundle_team)
+        parameters["logos_by_game"] = fresh_bundle_logos
+    parameters["logo_selection_refreshed"] = True
     if resumable_partial:
         parameters["resume_incomplete_post_id"] = partial_post.id
         parameters["resume_generation_job_id"] = job.id
