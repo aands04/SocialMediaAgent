@@ -27,6 +27,7 @@ from app.models import (
     Club,
     ClubStatus,
     Game,
+    GameMediaPreference,
     InstagramPage,
     LedgerStatus,
     MediaAsset,
@@ -235,6 +236,77 @@ def test_automatic_selection_uses_only_policy_categories_and_never_reuses(db):
         contribution_type="live",
     )
     assert live.id == portrait.id
+
+
+def test_automatic_selection_replaces_consumed_saved_preference(db):
+    team, games = _graph(db)
+    consumed = _asset(db, team, "consumed")
+    replacement = _asset(db, team, "replacement")
+
+    first = reserve_media(
+        db,
+        club_id=team.club_id,
+        team_id=team.id,
+        game_id=games[0].id,
+        contribution_type="announcement",
+    )
+    assert first.id in {consumed.id, replacement.id}
+    replacement = replacement if first.id == consumed.id else consumed
+    mark_asset_used(
+        db,
+        first,
+        game_id=games[0].id,
+        post_id="completed-post",
+        contribution_type="announcement",
+    )
+
+    selected = reserve_media(
+        db,
+        club_id=team.club_id,
+        team_id=team.id,
+        game_id=games[0].id,
+        contribution_type="announcement",
+    )
+
+    assert selected.id == replacement.id
+    preference = (
+        db.query(GameMediaPreference)
+        .filter_by(
+            game_id=games[0].id,
+            contribution_type="announcement",
+        )
+        .one()
+    )
+    assert preference.selection_mode == "automatic"
+    assert preference.selected_media_asset_id == replacement.id
+
+
+def test_manual_selection_still_rejects_consumed_saved_preference(db):
+    team, games = _graph(db)
+    selected = _asset(db, team, "manual-consumed")
+    set_game_preference(
+        db,
+        club_id=team.club_id,
+        team_id=team.id,
+        game_id=games[0].id,
+        contribution_type="announcement",
+        selection_mode="manual",
+        selected_media_asset_id=selected.id,
+        allow_used_once=False,
+        actor_user_id=None,
+    )
+    selected.uses = 1
+    selected.automatic_usage_enabled = False
+    selected.active = False
+
+    with pytest.raises(MediaLibraryError, match="bereits verwendet"):
+        reserve_media(
+            db,
+            club_id=team.club_id,
+            team_id=team.id,
+            game_id=games[0].id,
+            contribution_type="announcement",
+        )
 
 
 def test_manual_one_time_reuse_overrides_policy_without_global_release(db):

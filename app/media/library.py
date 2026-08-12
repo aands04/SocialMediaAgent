@@ -309,31 +309,92 @@ def reserve_media(
 
     if preference and preference.selected_media_asset_id:
         asset = _locked_asset(db, preference.selected_media_asset_id)
-        if not asset or asset.club_id != club_id or asset.team_id != team_id:
-            raise MediaLibraryError("Die gespeicherte Bildauswahl gehört nicht zu diesem Verein")
-        if asset.deleted_at is not None or not asset.available:
-            raise MediaLibraryError("Das bewusst gewählte Bild ist nicht mehr verfügbar")
-        if asset.reserved_game_id == game_id:
-            return asset
-        if asset.reserved_game_id is not None:
-            raise MediaLibraryError(
-                "Das bewusst gewählte Bild ist für ein anderes Spiel reserviert"
+        if preference.selection_mode == "manual":
+            if not asset or asset.club_id != club_id or asset.team_id != team_id:
+                raise MediaLibraryError(
+                    "Die gespeicherte Bildauswahl gehört nicht zu diesem Verein"
+                )
+            if asset.deleted_at is not None or not asset.available:
+                raise MediaLibraryError("Das bewusst gewählte Bild ist nicht mehr verfügbar")
+            if asset.reserved_game_id == game_id:
+                return asset
+            if asset.reserved_game_id is not None:
+                raise MediaLibraryError(
+                    "Das bewusst gewählte Bild ist für ein anderes Spiel reserviert"
+                )
+            if asset.uses > 0 and not preference.allow_used_once:
+                raise MediaLibraryError("Das bewusst gewählte Bild wurde bereits verwendet")
+            asset.reserved_game_id = game_id
+            asset.uses += 1
+            add_history(
+                db,
+                asset,
+                "manual_reuse" if asset.uses > 1 else "reserved",
+                game_id=game_id,
+                contribution_type=contribution_type,
+                actor_user_id=actor_user_id,
+                details={"selection_mode": "manual"},
             )
-        if asset.uses > 0 and not preference.allow_used_once:
-            raise MediaLibraryError("Das bewusst gewählte Bild wurde bereits verwendet")
-        asset.reserved_game_id = game_id
-        asset.uses += 1
-        add_history(
-            db,
-            asset,
-            "manual_reuse" if asset.uses > 1 else "reserved",
-            game_id=game_id,
-            contribution_type=contribution_type,
-            actor_user_id=actor_user_id,
-            details={"selection_mode": "manual"},
+            db.flush()
+            return asset
+
+        # Automatic preferences remember the asset chosen for a running job so
+        # retries stay deterministic.  After a completed/deleted contribution,
+        # however, that pointer can legitimately refer to an already consumed,
+        # disabled or otherwise unavailable asset.  Such a pointer is not a
+        # deliberate user choice and must not block the next automatic run.
+        automatic_asset_is_eligible = bool(
+            asset
+            and asset.club_id == club_id
+            and asset.team_id == team_id
+            and asset.deleted_at is None
+            and asset.available
+            and asset.active
+            and asset.automatic_usage_enabled
         )
+        if automatic_asset_is_eligible and asset.reserved_game_id == game_id:
+            return asset
+        if automatic_asset_is_eligible and asset.reserved_game_id is None and asset.uses == 0:
+            asset.reserved_game_id = game_id
+            asset.uses += 1
+            add_history(
+                db,
+                asset,
+                "reserved",
+                game_id=game_id,
+                contribution_type=contribution_type,
+                actor_user_id=actor_user_id,
+                details={"selection_mode": "automatic", "source": "saved_preference"},
+            )
+            db.flush()
+            return asset
+
+        if asset and asset.club_id == club_id and asset.reserved_game_id == game_id:
+            already_used = db.scalar(
+                select(MediaUsageHistory.id).where(
+                    MediaUsageHistory.club_id == club_id,
+                    MediaUsageHistory.media_asset_id == asset.id,
+                    MediaUsageHistory.game_id == game_id,
+                    MediaUsageHistory.contribution_type == contribution_type,
+                    MediaUsageHistory.action == "used",
+                )
+            )
+            if not already_used:
+                asset.reserved_game_id = None
+                asset.uses = max(0, asset.uses - 1)
+                add_history(
+                    db,
+                    asset,
+                    "reservation_released",
+                    game_id=game_id,
+                    contribution_type=contribution_type,
+                    actor_user_id=actor_user_id,
+                    details={"reason": "stale_automatic_preference"},
+                )
+        preference.selected_media_asset_id = None
+        preference.allow_used_once = False
+        preference.selected_at = _now()
         db.flush()
-        return asset
 
     # An older reservation created before the per-contribution preference model
     # remains stable for retries and is adopted into the new preference table.
