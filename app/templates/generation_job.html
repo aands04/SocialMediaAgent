@@ -36,6 +36,6 @@
 {% endif %}
 {% if item.status.value in ['failed','manual_review_required'] %}
 {% if item.status.value=='manual_review_required' %}<form method="post" action="/generation-jobs/{{item.id}}/review"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Prüfvermerk<input name="note" required></label><button>Manuelle Prüfung dokumentieren</button></form>{% endif %}
-<form method="post" action="/generation-jobs/{{item.id}}/retry"><input type="hidden" name="csrf_token" value="{{csrf}}"><button onclick="return confirm('Es wird ein neuer KI-Auftrag mit eigenem Wiederholungsbudget gestartet. Wirklich fortfahren?')">Neuen Auftrag bewusst starten</button></form>
+<form method="post" action="/generation-jobs/{{item.id}}/retry"><input type="hidden" name="csrf_token" value="{{csrf}}"><button onclick="return confirm('Es wird ein neuer KI-Auftrag mit eigenem Wiederholungsbudget gestartet. Ein bewusst ausgewähltes Bild darf dafür erneut verwendet werden. Wirklich fortfahren?')">Neuen Auftrag bewusst starten</button></form>
 {% endif %}
 {% endblock %}

@@ -1179,11 +1179,11 @@ def _has_completed_job_output(db: Session, job: GenerationJob) -> bool:
 
 
 def _has_usable_job_output(db: Session, job: GenerationJob) -> bool:
-    if _has_completed_job_output(db, job):
-        return True
-    post_id = job.result_post_id or job.post_id
-    post = db.get(Post, post_id) if post_id else None
-    return bool(post and ((post.text or "").strip() or post.feed_path))
+    # Only outputs attributed to this technical job may block an explicitly
+    # confirmed retry. ``post_id`` can refer to an older contribution or to a
+    # shell captured while recovering a partial bundle; its contents are not
+    # proof that this job returned a billable result.
+    return _has_completed_job_output(db, job)
 
 
 def _discard_empty_partial_post(db: Session, job: GenerationJob) -> None:
@@ -1399,6 +1399,11 @@ def process_generation_job(
                 job.post_type,
                 logos_by_game,
                 str(parameters.get("matchday_bundle_key") or job.id),
+                **(
+                    {"allow_manual_retry_reuse": True}
+                    if parameters.get("manual_retry_allow_selected_media_reuse")
+                    else {}
+                ),
             )
             carousel = coordinate_club_matchday_feed(db, posts[-1], requested_by=job.requested_by)
             post = db.get(Post, carousel.primary_post_id) if carousel.primary_post_id else posts[0]
@@ -1470,6 +1475,11 @@ def process_generation_job(
                 renderer,
                 job.post_type,
                 logos,
+                **(
+                    {"allow_manual_retry_reuse": True}
+                    if parameters.get("manual_retry_allow_selected_media_reuse")
+                    else {}
+                ),
             )
             job.result_post_id = post.id
             job.post_id = post.id
@@ -1821,6 +1831,10 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
     parameters["manual_retry_root_key"] = root_key
     parameters["manual_retry_of_job_id"] = job.id
     parameters["manual_retry_requested_at"] = _now().isoformat()
+    # The explicit user confirmation covers a fresh provider budget and reuse
+    # of the exact manually selected reference image. The override is scoped
+    # to this job and never re-enables the asset globally.
+    parameters["manual_retry_allow_selected_media_reuse"] = True
     parameters["logos"] = logos
     bundle_game_ids = [
         str(item).strip() for item in (parameters.get("bundle_game_ids") or []) if str(item).strip()
@@ -1873,7 +1887,11 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
         job_type=job.job_type,
         game_id=job.game_id,
         team_id=job.team_id,
-        post_id=partial_post.id if resumable_partial else job.post_id,
+        post_id=(
+            partial_post.id
+            if resumable_partial
+            else (job.post_id if job.job_type == GenerationJobType.RERENDER_POST else None)
+        ),
         result_post_id=None,
         post_type=job.post_type,
         requested_by=user.id,

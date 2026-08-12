@@ -672,6 +672,36 @@ def test_manual_retry_is_blocked_after_usable_output(db):
     assert db.scalar(select(GenerationJob).where(GenerationJob.id != job.id)) is None
 
 
+def test_manual_retry_ignores_content_not_attributed_to_failed_job(db):
+    page, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    older_post = Post(
+        game_id=game.id,
+        team_id=team.id,
+        instagram_page_id=page.id,
+        post_type="announcement",
+        status=PostStatus.PENDING,
+        text="Inhalt eines vorherigen technischen Versuchs",
+        feed_path="older/feed.png",
+    )
+    db.add(older_post)
+    db.flush()
+    older_post.active_key = older_post.id
+    job.status = GenerationJobStatus.FAILED
+    job.phase = "generating_text"
+    job.completed_outputs = 0
+    job.post_id = older_post.id
+    job.result_post_id = None
+    job.active_key = None
+    db.commit()
+
+    retry = generation.retry_job(db, job, user)
+
+    assert retry.status == GenerationJobStatus.QUEUED
+    assert retry.post_id is None
+    assert retry.parameters["manual_retry_allow_selected_media_reuse"] is True
+
+
 def test_manual_retry_continues_linked_incomplete_post_with_fresh_budget(db):
     page, team, game, user = graph(db)
     game.home_score = 2
