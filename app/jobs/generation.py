@@ -1779,7 +1779,13 @@ def request_cancel(db: Session, job: GenerationJob) -> None:
     db.commit()
 
 
-def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
+def retry_job(
+    db: Session,
+    job: GenerationJob,
+    user: User,
+    *,
+    confirm_new_budget_with_existing_output: bool = False,
+) -> GenerationJob:
     if job.status not in {
         GenerationJobStatus.FAILED,
         GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
@@ -1809,7 +1815,11 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
         if job.job_type == GenerationJobType.CREATE_POST
         else _has_completed_job_output(db, job)
     )
-    if usable_output and not resumable_partial:
+    if (
+        usable_output
+        and not resumable_partial
+        and not confirm_new_budget_with_existing_output
+    ):
         raise ValueError(
             "Es wurde bereits mindestens eine verwendbare Ausgabe gespeichert. Prüfen Sie "
             "den Teilbeitrag; ein neuer kostenpflichtiger Auftrag wird nicht gestartet."
@@ -1831,6 +1841,9 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
     parameters["manual_retry_root_key"] = root_key
     parameters["manual_retry_of_job_id"] = job.id
     parameters["manual_retry_requested_at"] = _now().isoformat()
+    parameters["manual_retry_confirmed_new_budget"] = bool(
+        confirm_new_budget_with_existing_output
+    )
     # The explicit user confirmation covers a fresh provider budget and reuse
     # of the exact manually selected reference image. The override is scoped
     # to this job and never re-enables the asset globally.
@@ -1918,7 +1931,12 @@ def retry_job(db: Session, job: GenerationJob, user: User) -> GenerationJob:
         db,
         retry,
         "generation.manual_retry_queued",
-        {"source_job_id": job.id, "source_attempts": int(job.attempts or 0)},
+        {
+            "source_job_id": job.id,
+            "source_attempts": int(job.attempts or 0),
+            "source_had_usable_output": usable_output,
+            "confirmed_new_budget": bool(confirm_new_budget_with_existing_output),
+        },
     )
     db.commit()
     return retry

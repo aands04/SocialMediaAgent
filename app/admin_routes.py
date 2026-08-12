@@ -7723,6 +7723,7 @@ def retry_generation_job(
     job_id: str,
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
+    confirm_new_budget: str = Form(""),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -7734,7 +7735,12 @@ def retry_generation_job(
         raise HTTPException(404)
     require(current, db, "generate", item.team_id)
     try:
-        retry = retry_job(db, item, current)
+        retry = retry_job(
+            db,
+            item,
+            current,
+            confirm_new_budget_with_existing_output=(confirm_new_budget == "1"),
+        )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return redirect(

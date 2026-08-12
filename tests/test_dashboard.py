@@ -280,7 +280,9 @@ def test_confirmed_generation_retry_redirects_to_fresh_job(browser):
             status=GenerationJobStatus.FAILED,
             phase="generating_text",
             planned_outputs=2,
-            completed_outputs=0,
+            # The earlier provider attempt delivered one usable partial output.
+            # The dashboard confirmation deliberately starts a new cost budget.
+            completed_outputs=1,
             idempotency_key="dashboard-manual-retry-failed",
             active_key=None,
         )
@@ -290,7 +292,7 @@ def test_confirmed_generation_retry_redirects_to_fresh_job(browser):
 
     response = client.post(
         f"/generation-jobs/{failed_id}/retry",
-        data={"csrf_token": session_csrf(client)},
+        data={"csrf_token": session_csrf(client), "confirm_new_budget": "1"},
         follow_redirects=False,
     )
 
@@ -305,6 +307,7 @@ def test_confirmed_generation_retry_redirects_to_fresh_job(browser):
         )
         assert retry is not None
         assert retry.post_id is None
+        assert retry.parameters["manual_retry_confirmed_new_budget"] is True
         assert retry.parameters["manual_retry_allow_selected_media_reuse"] is True
 
 
