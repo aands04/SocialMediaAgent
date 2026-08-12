@@ -49,6 +49,19 @@ class AutomaticFussballResult:
     generation_jobs: int = 0
 
 
+@dataclass(frozen=True)
+class AutomaticGenerationCandidate:
+    """One contribution the real FUSSBALL.DE scheduler may create.
+
+    ``due_at`` is deliberately absent for result posts: their trigger is the
+    confirmed result event, not an invented clock time.
+    """
+
+    post_type: str
+    due_at: datetime | None
+    event_based: bool = False
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -334,18 +347,115 @@ def _automatic_actor(db: Session) -> User | None:
     )
 
 
-def _earliest_publication(db: Session, team: Team, game: Game, post_type: str) -> datetime:
+def _earliest_publication(
+    db: Session,
+    team: Team,
+    game: Game,
+    post_type: str,
+    *,
+    story_rules: list[StoryRule] | None = None,
+) -> datetime:
     feed_at, _ = feed_time(team, game, post_type)
     times = [feed_at]
-    for rule in db.scalars(
-        select(StoryRule).where(
-            StoryRule.team_id == team.id,
-            StoryRule.post_type == post_type,
-            StoryRule.active.is_(True),
+    rules = story_rules
+    if rules is None:
+        rules = list(
+            db.scalars(
+                select(StoryRule).where(
+                    StoryRule.club_id == team.club_id,
+                    StoryRule.team_id == team.id,
+                    StoryRule.post_type == post_type,
+                    StoryRule.active.is_(True),
+                )
+            )
         )
-    ):
+    for rule in rules:
+        if rule.team_id != team.id or rule.post_type != post_type or not rule.active:
+            continue
         times.append(_utc(story_time(rule, game)))
     return min(times)
+
+
+def automatic_generation_due_at(
+    db: Session,
+    team: Team,
+    game: Game,
+    *,
+    story_rules: list[StoryRule] | None = None,
+) -> datetime:
+    """Resolve the exact due time used by the automatic generation worker."""
+
+    rules = team.rules or {}
+    if "generation_lead_days" in rules:
+        return _utc(game.kickoff) - timedelta(days=int(rules.get("generation_lead_days", 4)))
+    legacy_lead = timedelta(minutes=int(rules.get("generation_lead_minutes", 120)))
+    return (
+        _earliest_publication(
+            db,
+            team,
+            game,
+            "announcement",
+            story_rules=story_rules,
+        )
+        - legacy_lead
+    )
+
+
+def automatic_generation_candidates(
+    db: Session,
+    team: Team,
+    game: Game,
+    settings: Settings,
+    *,
+    story_rules: list[StoryRule] | None = None,
+) -> list[AutomaticGenerationCandidate]:
+    """Return the contributions considered by the production scheduler.
+
+    The function is shared by the worker and the games overview.  It only
+    describes configured candidates; the worker still decides whether the
+    current time or the confirmed-result event makes a candidate runnable.
+    """
+
+    rules = team.rules or {}
+    if not automatic_generation_is_enabled(team, game, settings):
+        return []
+
+    candidates: list[AutomaticGenerationCandidate] = []
+    if rules.get("announcement_enabled"):
+        candidates.append(
+            AutomaticGenerationCandidate(
+                "announcement",
+                automatic_generation_due_at(db, team, game, story_rules=story_rules),
+            )
+        )
+    if rules.get("reminder_enabled"):
+        candidates.append(
+            AutomaticGenerationCandidate(
+                "reminder",
+                automatic_generation_due_at(db, team, game, story_rules=story_rules),
+            )
+        )
+    if rules.get("result_enabled"):
+        candidates.append(AutomaticGenerationCandidate("result", None, event_based=True))
+    return candidates
+
+
+def automatic_generation_is_enabled(
+    team: Team,
+    game: Game,
+    settings: Settings,
+) -> bool:
+    """Return whether the production scheduler owns this game's generation."""
+
+    rules = team.rules or {}
+    return bool(
+        settings.automatic_post_generation_enabled
+        and rules.get("automatic_generation_enabled")
+        and game.provider == "fussball.de"
+        and game.status not in {"cancelled", "postponed"}
+        and not (game.overrides or {}).get("automation_blocked")
+        and not (game.overrides or {}).get("import_suppressed")
+    )
 
 
 def plan_generation_jobs(
@@ -360,15 +470,15 @@ def plan_generation_jobs(
         return 0
     now = now or _now()
     rules = team.rules or {}
-    if "generation_lead_days" in rules:
-
-        def generation_due(game: Game) -> datetime:
-            return _utc(game.kickoff) - timedelta(days=int(rules.get("generation_lead_days", 4)))
-    else:
-        legacy_lead = timedelta(minutes=int(rules.get("generation_lead_minutes", 120)))
-
-        def generation_due(game: Game) -> datetime:
-            return _earliest_publication(db, team, game, "announcement") - legacy_lead
+    story_rules = list(
+        db.scalars(
+            select(StoryRule).where(
+                StoryRule.club_id == team.club_id,
+                StoryRule.team_id == team.id,
+                StoryRule.active.is_(True),
+            )
+        )
+    )
 
     queued = 0
     games = db.scalars(
@@ -379,30 +489,25 @@ def plan_generation_jobs(
         )
     ).all()
     for game in games:
-        if (game.overrides or {}).get("automation_blocked") or (game.overrides or {}).get(
-            "import_suppressed"
-        ):
-            continue
-        post_types: list[str] = []
-        if (
-            rules.get("announcement_enabled")
-            and now <= _utc(game.kickoff)
-            and now >= generation_due(game)
-        ):
-            post_types.append("announcement")
-        if (
-            rules.get("reminder_enabled")
-            and now <= _utc(game.kickoff)
-            and now >= generation_due(game)
-        ):
-            post_types.append("reminder")
-        if (
-            rules.get("result_enabled")
-            and game.result_confirmed
-            and now <= _utc(game.kickoff) + timedelta(hours=settings.fussball_result_max_age_hours)
-        ):
-            post_types.append("result")
-        for post_type in post_types:
+        candidates = automatic_generation_candidates(
+            db,
+            team,
+            game,
+            settings,
+            story_rules=story_rules,
+        )
+        for candidate in candidates:
+            post_type = candidate.post_type
+            if post_type in {"announcement", "reminder"} and (
+                now > _utc(game.kickoff) or candidate.due_at is None or now < candidate.due_at
+            ):
+                continue
+            if post_type == "result" and (
+                not game.result_confirmed
+                or now
+                > _utc(game.kickoff) + timedelta(hours=settings.fussball_result_max_age_hours)
+            ):
+                continue
             if db.scalar(
                 select(Post.id).where(
                     Post.game_id == game.id,

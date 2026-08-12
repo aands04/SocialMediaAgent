@@ -99,6 +99,40 @@ main nav{position:static;top:auto;bottom:auto;width:auto;overflow:visible;border
 @media(max-width:1100px){.games-filter-panel{align-items:stretch;flex-direction:column}.games-filter-form{width:100%;grid-template-columns:repeat(2,minmax(160px,1fr))}.game-card{grid-template-columns:minmax(190px,1fr) minmax(200px,1fr)}.game-opponent-logo{grid-column:2;grid-row:auto}.game-facts{grid-column:1/-1}.game-publication-summary__action{justify-content:flex-start}}
 @media(max-width:760px){.games-heading,.games-list-heading{align-items:stretch;flex-direction:column}.games-heading__actions,.games-heading__actions button{width:100%}.games-filter-panel{padding:14px}.games-filter-form{grid-template-columns:1fr}.games-filter-form button{width:100%}.game-card{grid-template-columns:1fr;padding-top:42px}.game-select{left:13px;right:auto}.game-team-name{padding-right:0}.game-facts{grid-template-columns:1fr;grid-column:1}.game-opponent-logo{grid-column:1}.game-details-form{grid-template-columns:1fr}.game-more-actions__content,.game-generation-actions{display:grid;width:100%}.game-more-actions__content button,.game-generation-actions button{width:100%}.game-bundle__heading form,.game-bundle__heading button{width:100%}.game-publication-summary__action,.game-publication-summary__action form,.game-publication-summary__action a,.game-publication-summary__action button{width:100%}}
 
+/* Compact game-day workspace. The five status columns deliberately remain
+   independent of the individual match cards so bundles are not repeated. */
+.game-bundle__heading{align-items:flex-start;display:flex;justify-content:space-between;gap:16px}
+.game-bundle__heading p{margin:.35rem 0;color:#526079}
+.game-bundle-help{margin-top:4px}
+.game-bundle-help summary,.game-automation-details summary{cursor:pointer;color:#1d4ed8;font-weight:700}
+.game-publication-summary{grid-template-columns:minmax(115px,.75fr) minmax(210px,1.45fr) minmax(170px,1fr) minmax(110px,.7fr) minmax(160px,1fr);align-items:start;background:#f8fafc;border:1px solid #dbe3f0}
+.game-publication-summary>div{min-width:0}
+.game-publication-summary strong,.game-publication-summary small{display:block;overflow-wrap:anywhere}
+.game-publication-summary__status{display:grid;gap:7px}
+.game-publication-summary__status form{margin:0}
+.game-publication-summary__status .button,.game-publication-summary__status button{width:100%;text-align:center}
+.game-automation-details{margin-top:6px;font-size:.82rem}
+.game-automation-details ul{margin:7px 0 0;padding-left:18px}
+.game-automation-details li{margin:5px 0}
+.game-automation-details small{color:#64748b}
+.game-tone--success{color:#166534}
+.game-tone--warning{color:#9a3412}
+.game-tone--danger{color:#991b1b}
+.game-tone--neutral{color:#172554}
+.game-card{grid-template-columns:minmax(210px,1.05fr) minmax(280px,1.5fr) minmax(175px,.8fr);gap:12px;padding:12px 14px;align-items:center}
+.game-card__main{min-width:0}
+.game-facts-inline,.game-media-choice{margin:.2rem 0;color:#475569;overflow-wrap:anywhere}
+.game-media-choice{font-size:.86rem}
+.game-provisional-inline{display:inline-block;margin-left:6px;background:#ffedd5;color:#9a3412;vertical-align:middle}
+.game-logo-compact{grid-column:auto;grid-row:auto;display:flex;align-items:center;gap:10px;min-width:0}
+.game-logo-compact .logo-thumb{flex:0 0 48px;margin:0;object-fit:contain}
+.game-logo-compact strong,.game-logo-compact small,.game-logo-compact a{display:block}
+.game-logo-compact .game-logo-missing{margin:2px 0;font-size:.8rem}
+.game-card-details{grid-column:1/-1;padding-top:7px}
+.table-scroll{max-width:100%;overflow-x:auto}
+@media(max-width:1180px){.game-publication-summary{grid-template-columns:repeat(3,minmax(150px,1fr))}.game-publication-summary__status{grid-column:auto}.game-card{grid-template-columns:minmax(190px,1fr) minmax(230px,1.25fr)}.game-logo-compact{grid-column:1/-1}}
+@media(max-width:760px){.game-bundle__heading{display:flex;flex-direction:column}.game-publication-summary{grid-template-columns:1fr}.game-publication-summary__status{grid-column:1}.game-card{grid-template-columns:1fr;padding:42px 12px 12px}.game-card__main,.game-logo-compact{grid-column:1}.game-card-details{grid-column:1}.game-logo-compact{padding-top:8px;border-top:1px solid #e2e8f0}.game-publication-summary__status .button,.game-publication-summary__status button{width:100%}}
+
 /* Geführter Medien-Upload und verständliche Reservierungsangaben. */
 .guided-upload-team-choice{display:grid;grid-template-columns:minmax(240px,1fr) auto;align-items:end;gap:12px}.upload-requirements{margin:.65rem 0 1rem}.media-upload-category{border:0;padding:0;margin:0}.media-upload-category legend{font-weight:700;margin-bottom:.55rem}.media-category-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.media-category-option{display:flex;gap:9px;align-items:flex-start;padding:12px;border:2px solid #dbe3f0;border-radius:10px;background:#fff;cursor:pointer}.media-category-option:has(input:checked){border-color:#2563eb;background:#eff6ff}.media-category-option input{width:auto;margin:.18rem 0 0}.media-category-option span{display:grid;gap:3px}.media-category-option small{color:#64748b;line-height:1.35}.media-reservation-note{padding:.5rem;border-radius:7px;background:#eff6ff;color:#1e40af!important;font-size:.82rem}
 .media-category-overview{grid-template-columns:repeat(4,minmax(150px,1fr))}

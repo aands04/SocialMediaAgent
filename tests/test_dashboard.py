@@ -2035,6 +2035,9 @@ def test_games_page_uses_productive_labels_and_orders_dates_and_kickoffs(browser
     assert "Mock-Spiel anlegen" not in html
     assert "<h1>Spiele</h1>" in html
     assert "Spiel manuell anlegen" in html
+    assert "Automatische Erstellung" in html
+    assert "Nächste Veröffentlichung" in html
+    assert "Bildauswahl:" in html
     assert "Vergangener Gegner" not in html
     assert html.index("Früher Gegner") < html.index("Gegner 13 Uhr") < html.index(
         "Später Gegner"
