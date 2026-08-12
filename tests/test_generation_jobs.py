@@ -672,6 +672,28 @@ def test_manual_retry_is_blocked_after_usable_output(db):
     assert db.scalar(select(GenerationJob).where(GenerationJob.id != job.id)) is None
 
 
+def test_confirmed_manual_retry_starts_fresh_job_after_usable_output(db):
+    _, team, game, user = graph(db)
+    job, _ = generation.enqueue_create(db, game, team, user, "announcement")
+    job.status = GenerationJobStatus.MANUAL_REVIEW_REQUIRED
+    job.completed_outputs = 1
+    job.active_key = None
+    db.commit()
+
+    retry = generation.retry_job(
+        db,
+        job,
+        user,
+        confirm_new_budget_with_existing_output=True,
+    )
+
+    assert retry.status == GenerationJobStatus.QUEUED
+    assert retry.id != job.id
+    assert retry.post_id is None
+    assert retry.parameters["manual_retry_confirmed_new_budget"] is True
+    assert retry.parameters["manual_retry_allow_selected_media_reuse"] is True
+
+
 def test_manual_retry_ignores_content_not_attributed_to_failed_job(db):
     page, team, game, user = graph(db)
     job, _ = generation.enqueue_create(db, game, team, user, "announcement")
