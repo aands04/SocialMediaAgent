@@ -263,3 +263,13 @@ Opt-in-Prüfungen. Einrichtung, Datenschutz, Providergrenzen und Rollout sind in
 [`docs/LIVE_CENTER.md`](docs/LIVE_CENTER.md) dokumentiert.
 Die WhatsApp-Einrichtung und der sichere Live-Versand sind in
 [`docs/WHATSAPP.md`](docs/WHATSAPP.md) beschrieben.
+
+## Creative Intelligence
+
+Creative Intelligence speichert Auswahl-, Freigabe-, Ablehnungs-,
+Regenerations- und Veröffentlichungsentscheidungen unveränderlich und streng
+vereinsbezogen. Aus ausreichend neuen Signalen entstehen versionierte Bild-
+und Textpräferenzprofile; ausdrückliches Vereinsbranding und
+PlatformAdmin-Vorgaben behalten Vorrang. Der fortsetzbare Einrichtungsassistent,
+die sichere Promptintegration und die getrennte PlatformAdmin-Steuerung sind in
+[`docs/CREATIVE_INTELLIGENCE.md`](docs/CREATIVE_INTELLIGENCE.md) beschrieben.

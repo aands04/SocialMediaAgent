@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-shell creative-page">
+  <p class="eyebrow">PLATFORMADMIN</p>
+  <h1>Creative Intelligence</h1>
+  <p>Zentrale Rollout-, Lern- und Kostenübersicht. Geschützte Promptinhalte werden hier nicht angezeigt.</p>
+
+  <div class="creative-profile-grid">
+    <article class="creative-profile-card"><strong>{{ active_clubs }}</strong><br>aktive Vereine</article>
+    <article class="creative-profile-card"><strong>{{ total_feedback }}</strong><br>Feedbackereignisse</article>
+    <article class="creative-profile-card"><strong>{{ clubs|length }}</strong><br>Vereine insgesamt</article>
+  </div>
+
+  <section class="card">
+    <h2>Plattformsteuerung</h2>
+    {% set creative = global_flags.creative_intelligence_enabled %}
+    {% set onboarding = global_flags.onboarding_calibration_enabled %}
+    <form method="post" action="/platform/creative-intelligence/flags" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label><input type="checkbox" name="creative_enabled" {% if creative and creative.enabled %}checked{% endif %}> Creative Intelligence technisch freigeben</label>
+      <label><input type="checkbox" name="onboarding_enabled" {% if onboarding and onboarding.enabled %}checked{% endif %}> Onboarding-Kalibrierung technisch freigeben</label>
+      <label><input type="checkbox" name="default_clubs_enabled" {% if creative and creative.value.default_clubs_enabled %}checked{% endif %}> Standardmäßig für neue Vereinsfreigaben aktiv</label>
+      <label><input type="checkbox" name="vision_analysis_enabled" {% if creative and creative.value.vision_analysis_enabled %}checked{% endif %}> Optionale visuelle Merkmalsanalyse aktiv</label>
+      <label>Ankündigungsbilder (2–6)<input type="number" name="announcement_image_count" min="2" max="6" value="{{ onboarding.value.announcement_image_count if onboarding else 4 }}"></label>
+      <label>Ergebnisbilder (2–6)<input type="number" name="result_image_count" min="2" max="6" value="{{ onboarding.value.result_image_count if onboarding else 4 }}"></label>
+      <label>Ankündigungstexte (2–6)<input type="number" name="announcement_text_count" min="2" max="6" value="{{ onboarding.value.announcement_text_count if onboarding else 3 }}"></label>
+      <label>Ergebnistexte (2–6)<input type="number" name="result_text_count" min="2" max="6" value="{{ onboarding.value.result_text_count if onboarding else 3 }}"></label>
+      <label>Mindestzahl Feedbackereignisse<input type="number" name="minimum_feedback_events" min="1" max="100" value="{{ creative.value.minimum_samples if creative else 5 }}"></label>
+      <label>Positive Referenzen<input type="number" name="positive_example_limit" min="1" max="10" value="{{ creative.value.positive_example_limit if creative else 5 }}"></label>
+      <label>Negative Referenzen<input type="number" name="negative_example_limit" min="0" max="10" value="{{ creative.value.negative_example_limit if creative else 3 }}"></label>
+      <label>Aktualitätsgewicht<input type="number" name="preference_recency_weight" min="0.5" max="1" step="0.001" value="{{ creative.value.preference_recency_weight if creative else 0.985 }}"></label>
+      <label>Feedback-Stichprobe (0–1)<input type="number" name="feedback_sampling_rate" min="0" max="1" step="0.01" value="{{ creative.value.feedback_sampling_rate if creative else 1 }}"></label>
+      <label>Modell für Preference Learning<input name="preference_learning_model" maxlength="120" value="{{ creative.value.preference_learning_model if creative else 'deterministic-v1' }}"></label>
+      <label>Modell für Creative Director<input name="creative_director_model" maxlength="120" value="{{ creative.value.creative_director_model if creative else 'structured-v1' }}"></label>
+      <label>Modell für visuelle Analyse<input name="visual_trait_analysis_model" maxlength="120" value="{{ creative.value.visual_trait_analysis_model if creative else '' }}"></label>
+      <label>Profil-Neuberechnung<input name="profile_rebuild_schedule" maxlength="80" value="{{ creative.value.profile_rebuild_schedule if creative else 'nightly' }}"></label>
+      <label>Kostenlimit Kalibrierung (Cent, 0 = aus)<input type="number" name="onboarding_cost_limit_cents" min="0" value="{{ onboarding.value.onboarding_cost_limit_cents if onboarding else 0 }}"></label>
+      <label>Schwelle erste Tendenz<input type="number" name="confidence_first_tendency" min="0" max="1" step="0.01" value="{{ creative.value.confidence_thresholds.first_tendencies if creative else 0.35 }}"></label>
+      <label>Schwelle gut eingelernt<input type="number" name="confidence_well_trained" min="0" max="1" step="0.01" value="{{ creative.value.confidence_thresholds.well_trained if creative else 0.55 }}"></label>
+      <label>Schwelle hohe Sicherheit<input type="number" name="confidence_high" min="0" max="1" step="0.01" value="{{ creative.value.confidence_thresholds.high_confidence if creative else 0.8 }}"></label>
+      <button>Plattformsteuerung speichern</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Creative Recipes</h2>
+    <p>Rezepte sind strukturierte Gestaltungsmerkmale, keine Prompttexte. Jede Änderung erzeugt eine neue, zunächst inaktive Version.</p>
+    <form method="post" action="/platform/creative-intelligence/recipes" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label>Technischer Schlüssel<input name="key" maxlength="100" required placeholder="dynamisch-stadion"></label>
+      <label>Name<input name="name" maxlength="160" required placeholder="Dynamischer Stadion-Look"></label>
+      <label>Modalität<select name="modality"><option value="image">Bild</option><option value="text">Text</option></select></label>
+      <label>Beitragstyp<select name="content_type"><option value="announcement">Ankündigung</option><option value="result">Ergebnis</option><option value="reminder">Erinnerung</option><option value="goal">Tor (nur Bild)</option><option value="live">Live</option></select></label>
+      <label>Merkmal<input name="trait" maxlength="64" required placeholder="background_style"></label>
+      <label>Ausprägung<input name="value" maxlength="100" required placeholder="dunkle Stadionatmosphäre"></label>
+      <label>Beschreibung (optional)<textarea name="description" maxlength="2000"></textarea></label>
+      <button>Neue Entwurfsversion speichern</button>
+    </form>
+    <div class="table-wrap"><table><thead><tr><th>Rezept</th><th>Geltung</th><th>Version</th><th>Status</th><th>Merkmale</th><th>Aktion</th></tr></thead><tbody>
+      {% for recipe in recipes %}<tr>
+        <td><strong>{{ recipe.name }}</strong><br><small>{{ recipe.key }}</small></td>
+        <td>{{ recipe.modality }} · {{ recipe.content_type }}</td>
+        <td>{{ recipe.recipe_version }}</td><td>{{ recipe.status }}</td>
+        <td><code>{{ recipe.traits }}</code></td>
+        <td>{% if recipe.status != 'active' %}<form method="post" action="/platform/creative-intelligence/recipes/{{ recipe.id }}/activate"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Aktivieren</button></form>{% endif %}{% if recipe.status != 'archived' %}<form method="post" action="/platform/creative-intelligence/recipes/{{ recipe.id }}/archive"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="secondary">Archivieren</button></form>{% endif %}</td>
+      </tr>{% else %}<tr><td colspan="6">Noch keine Rezepte vorhanden.</td></tr>{% endfor %}
+    </tbody></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Interne Nutzung und tatsächliche Providerkosten</h2>
+    <p>Es werden ausschließlich vorhandene Ledgerwerte angezeigt; fehlende Kosten werden nicht geschätzt.</p>
+    <div class="table-wrap"><table><thead><tr><th>Nutzungsart</th><th>Vorgänge</th><th>Kosten</th></tr></thead><tbody>
+      {% for kind, calls, cost in total_usage %}<tr><td>{{ kind }}</td><td>{{ calls }}</td><td>{{ cost or '—' }}</td></tr>
+      {% else %}<tr><td colspan="3">Noch keine interne Nutzung verbucht.</td></tr>{% endfor %}
+    </tbody></table></div>
+  </section>
+
+  <section class="card"><h2>Vereine</h2>
+    <div class="table-wrap"><table><thead><tr><th>Verein</th><th>Lernstatus</th><th>Feedback</th><th>Aktive Profile</th><th></th></tr></thead><tbody>
+      {% for row in clubs %}<tr><td>{{ row.club.name }}</td><td>{% if row.feature.enabled %}Aktiv{% else %}Pausiert{% endif %}</td><td>{{ row.feedback_count }}</td><td>{{ row.profile_count }}</td><td><a class="button" href="/platform/creative-intelligence/clubs/{{ row.club.id }}">Öffnen</a></td></tr>
+      {% else %}<tr><td colspan="5">Noch keine Vereine vorhanden.</td></tr>{% endfor %}
+    </tbody></table></div>
+  </section>
+</div>
+{% endblock %}

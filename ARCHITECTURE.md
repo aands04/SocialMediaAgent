@@ -191,6 +191,31 @@ Ersatzzeit aus einem anderen Wochentag angenommen; die Ausgabe bleibt sichtbar
 und wird als manuell zu planen markiert. Details und Migrationsstrategie stehen
 in [`docs/MEDIA_VARIANTS_AND_RULES_PLAN.md`](docs/MEDIA_VARIANTS_AND_RULES_PLAN.md).
 
+## Creative Intelligence und Vereins-Onboarding
+
+`app/creative` ergänzt die bestehende Promptkomposition um einen optionalen,
+fehlertoleranten Lernpfad. `CreativeFeedbackEvent` ist append-only und
+referenziert ausschließlich unveränderliche Medien- und Textversionen desselben
+Vereins. Der `CreativePreferenceLearner` verdichtet Feedback erst nach einer
+konfigurierbaren Mindestzahl neuer Signale in eine neue Profilversion. Ein
+regelmäßiger Worker-Lauf prüft diesen Schwellwert mandantenweise; ohne neue
+Signale entsteht keine Doppelversion.
+
+Der `CreativeDirector` liefert nur ein strukturiertes Supplement. Die
+Reihenfolge Sicherheitsregeln, ausdrückliches Vereinsbranding,
+PlatformAdmin-Override, geschützte Vereinsanpassung, gelerntes Profil und
+Plattformstandard bleibt verbindlich. Fehler im Director, Learner oder in einer
+optionalen Analyse lassen die klassische Generierung weiterlaufen. Club-UI und
+Club-APIs erhalten weder zentrale noch final zusammengesetzte Prompttexte.
+
+`ClubOnboardingSession` bildet den fortsetzbaren elfteiligen Assistenten ab.
+Kalibrierungsbeispiele sind als nicht veröffentlichbar markiert und werden als
+eigene, nicht kontingentwirksame interne Nutzung verbucht. Der aktuelle sichere
+Stand erzeugt reproduzierbare Fixture-Beispiele; kostenpflichtige Live-
+Kalibrierung und die optionale Vision-Analyse sind vorbereitet, aber nicht
+automatisch aktiv. Details und Rolloutgrenzen stehen in
+[`docs/CREATIVE_INTELLIGENCE.md`](docs/CREATIVE_INTELLIGENCE.md).
+
 ## Live-Ereignisse
 
 `MatchEvent` ist die append-orientierte, mandantengebundene Quelle für

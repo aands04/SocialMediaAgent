@@ -228,6 +228,14 @@ def approve(
             },
         )
     )
+    from app.creative.hooks import record_post_decision
+
+    record_post_decision(
+        db,
+        post=post,
+        actor_user_id=user.id,
+        action="approved",
+    )
     if commit:
         db.commit()
     return post
@@ -282,6 +290,14 @@ def approve_matchday_bundle(
 def edit_text(db: Session, post: Post, user: User, text: str, expected_version: int):
     if post.version != expected_version:
         raise ApprovalError("Bearbeitungskonflikt: Beitrag wurde zwischenzeitlich geändert")
+    from app.models import PostTextVersion
+
+    old_text = post.text or ""
+    previous = (
+        db.get(PostTextVersion, post.selected_text_version_id)
+        if post.selected_text_version_id
+        else None
+    )
     post.text = text.strip()
     post.text_version += 1
     post.version += 1
@@ -300,4 +316,14 @@ def edit_text(db: Session, post: Post, user: User, text: str, expected_version: 
     from app.posts.media_versions import ensure_text_version
 
     ensure_text_version(db, post, created_by=user.id, source="manual_edit")
+    from app.creative.hooks import record_material_text_edit
+
+    record_material_text_edit(
+        db,
+        post=post,
+        actor_user_id=user.id,
+        previous=previous,
+        old_text=old_text,
+        new_text=post.text,
+    )
     db.commit()

@@ -33,6 +33,8 @@ from app.auth.service import (
 from app.channels.routes import router as channels_router
 from app.channels.webhooks import router as channel_webhook_router
 from app.config import get_settings
+from app.creative.platform_routes import router as creative_platform_router
+from app.creative.routes import router as creative_router
 from app.db import get_db
 from app.legal.routes import router as legal_router
 from app.limits.service import effective_limits
@@ -731,5 +733,7 @@ app.include_router(channels_router)
 app.include_router(channel_webhook_router)
 app.include_router(live_router)
 app.include_router(platform_router)
+app.include_router(creative_platform_router)
+app.include_router(creative_router)
 app.include_router(storage_router)
 app.include_router(legal_router)

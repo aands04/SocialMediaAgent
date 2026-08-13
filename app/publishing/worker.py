@@ -195,5 +195,13 @@ def process_job(
         post.status = PostStatus.PUBLISHED
     elif any(value == JobStatus.PUBLISHED for value in statuses):
         post.status = PostStatus.PARTIAL
+    from app.creative.hooks import record_publication_success
+
+    record_publication_success(
+        db,
+        post=post,
+        job=job,
+        actor_user_id=post.approved_by,
+    )
     db.commit()
     return job

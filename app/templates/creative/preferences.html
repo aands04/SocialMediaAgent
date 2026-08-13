@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-shell creative-page">
+  <div class="page-heading-row">
+    <div>
+      <p class="eyebrow">CREATIVE INTELLIGENCE</p>
+      <h1>Gelernte Vorlieben</h1>
+      <p>Die Vereinszentrale kann aus bestätigten Entscheidungen lernen. Sicherheits-, Fakten-, Logo-, Sponsor- und Brandingregeln haben dabei immer Vorrang.</p>
+    </div>
+    <a class="button" href="/onboarding">Branding-Assistent öffnen</a>
+  </div>
+
+  {% if not status.feature_enabled %}
+  <div class="warning">Creative Intelligence ist für diesen Verein noch nicht durch den PlatformAdmin freigeschaltet.</div>
+  {% endif %}
+
+  <section class="card">
+    <h2>Lernen und Anwenden</h2>
+    <p>Beide Funktionen können unabhängig voneinander pausiert werden. Das vorhandene Feedback und ältere Profilversionen bleiben erhalten.</p>
+    <form method="post" action="/creative-intelligence/settings" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label class="choice-card"><input type="checkbox" name="learning_enabled" {% if status.learning_enabled %}checked{% endif %}> Aus neuen Entscheidungen weiterlernen</label>
+      <label class="choice-card"><input type="checkbox" name="application_enabled" {% if status.application_enabled %}checked{% endif %}> Gelernte Vorlieben für neue Generierungen anwenden</label>
+      <button {% if not status.feature_enabled %}disabled{% endif %}>Einstellungen speichern</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="page-heading-row">
+      <div>
+        <h2>Lernstatus</h2>
+        <p>{{ status.feedback_count }} berücksichtigte Ereignisse · {{ status.profiles|length }} aktive Profile</p>
+      </div>
+      <form method="post" action="/creative-intelligence/rebuild">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button class="secondary" {% if not status.feature_enabled %}disabled{% endif %}>Jetzt neu berechnen</button>
+      </form>
+    </div>
+    {% if status.profiles %}
+    <div class="creative-profile-grid">
+      {% for profile in status.profiles %}
+      <article class="creative-profile-card">
+        <h3>{{ profile.modality_label }} · {{ profile.content_label }}</h3>
+        <p><strong>{{ profile.confidence_label }}</strong> · {{ profile.sample_count }} relevante Entscheidungen · Version {{ profile.version }}</p>
+        <details><summary>Technischer Lernstand</summary>{{ profile.confidence }} % Konfidenz · Quellen: {{ profile.source_summary }}</details>
+        <h4>Bevorzugt</h4>
+        <ul>{% for trait in profile.preferences %}<li>{{ trait.key }}: {{ trait.value }}</li>{% else %}<li>Noch keine stabile Präferenz.</li>{% endfor %}</ul>
+        <h4>Eher vermeiden</h4>
+        <ul>{% for trait in profile.avoidances %}<li>{{ trait.key }}: {{ trait.value }}</li>{% else %}<li>Noch keine stabile Vermeidung.</li>{% endfor %}</ul>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state"><strong>Noch kein belastbares Profil.</strong><br>Nutze den Branding-Assistenten oder arbeite wie gewohnt weiter. Einzelne Entscheidungen erzeugen noch keine harte Regel.</div>
+    {% endif %}
+  </section>
+
+  <details class="card danger-zone">
+    <summary>Gelernte Profile zurücksetzen</summary>
+    <p>Aktive Profile werden archiviert. Das unveränderliche Feedback-Ledger bleibt zur Nachvollziehbarkeit erhalten.</p>
+    <form method="post" action="/creative-intelligence/reset">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label>Zur Bestätigung <strong>PROFILE ZURÜCKSETZEN</strong> eingeben
+        <input name="confirmation" required autocomplete="off">
+      </label>
+      <button class="danger">Profile zurücksetzen</button>
+    </form>
+  </details>
+</div>
+{% endblock %}

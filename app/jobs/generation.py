@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.approvals.service import ApprovalError, approve
 from app.auth.service import allowed
 from app.config import Settings
+from app.creative.usage import record_internal_usage
 from app.games.bundles import generation_bundle_games
 from app.generation import build_renderer, build_text_generator
 from app.logos.service import (
@@ -48,6 +49,7 @@ from app.posts.service import (
     rerender_post,
     revise_post,
 )
+from app.tenancy.context import TenantContext
 from app.usage.service import complete_usage, release_usage, reserve_usage
 
 log = structlog.get_logger()
@@ -168,6 +170,20 @@ def _record_prompt_dispatch(
             raise RuntimeError(
                 "Prompt eines bereits protokollierten KI-Aufrufs hat sich widersprüchlich geändert"
             )
+        if existing.creative_profile_snapshot:
+            record_internal_usage(
+                db,
+                TenantContext(job.club_id, job.requested_by or "system"),
+                usage_type="creative_director",
+                idempotency_key=f"creative:dispatch:{existing.id}",
+                model=str(
+                    existing.creative_profile_snapshot.get("director_version")
+                    or "structured-v1"
+                ),
+                generation_job_id=job.id,
+                post_id=job.post_id,
+                details={"prompt_dispatch_id": existing.id},
+            )
         return existing
     item = AiPromptDispatch(
         club_id=job.club_id,
@@ -185,6 +201,7 @@ def _record_prompt_dispatch(
         prompt_version=getattr(prompt, "version", None),
         prompt_checksum=checksum,
         rendered_prompt=rendered_prompt,
+        creative_profile_snapshot=getattr(prompt, "creative_profile", None) or {},
         attempt_number=attempt_number,
         call_index=call_index,
         status="dispatched",
@@ -192,6 +209,19 @@ def _record_prompt_dispatch(
     )
     db.add(item)
     db.flush()
+    if item.creative_profile_snapshot:
+        record_internal_usage(
+            db,
+            TenantContext(job.club_id, job.requested_by or "system"),
+            usage_type="creative_director",
+            idempotency_key=f"creative:dispatch:{item.id}",
+            model=str(
+                item.creative_profile_snapshot.get("director_version") or "structured-v1"
+            ),
+            generation_job_id=job.id,
+            post_id=job.post_id,
+            details={"prompt_dispatch_id": item.id},
+        )
     return item
 
 
@@ -751,6 +781,14 @@ def enqueue_rerender(
             return existing
         raise
     _audit(db, job, "generation.queued", {"job_type": job.job_type.value})
+    from app.creative.hooks import record_regeneration_request
+
+    record_regeneration_request(
+        db,
+        post=post,
+        actor_user_id=user.id,
+        request_key=job.id,
+    )
     db.commit()
     return job
 
@@ -871,6 +909,15 @@ def enqueue_ai_revision(
             "revise_feed": revise_feed,
             "story_count": len(selected_story_variants or selected),
         },
+    )
+    from app.creative.hooks import record_regeneration_request
+
+    record_regeneration_request(
+        db,
+        post=post,
+        actor_user_id=user.id,
+        request_key=job.id,
+        free_text=instruction,
     )
     db.commit()
     return job
@@ -1938,5 +1985,17 @@ def retry_job(
             "confirmed_new_budget": bool(confirm_new_budget_with_existing_output),
         },
     )
+    feedback_post = partial_post or (
+        db.get(Post, job.post_id) if job.post_id else None
+    )
+    if feedback_post is not None:
+        from app.creative.hooks import record_regeneration_request
+
+        record_regeneration_request(
+            db,
+            post=feedback_post,
+            actor_user_id=user.id,
+            request_key=retry.id,
+        )
     db.commit()
     return retry

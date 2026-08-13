@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-shell creative-page">
+  <p class="eyebrow">VEREINS-EINRICHTUNG</p>
+  <div class="page-heading-row">
+    <div>
+      <h1>Einrichtung fortsetzen</h1>
+      <p>Du kannst jederzeit unterbrechen und auf einem anderen Gerät fortfahren. Gespeicherte Vereinsdaten werden nicht ungefragt überschrieben.</p>
+    </div>
+    <a class="button secondary" href="/creative-intelligence">Gelernte Vorlieben</a>
+  </div>
+
+  <ol class="onboarding-step-list" aria-label="Einrichtungsfortschritt">
+    {% for number,title,description in steps %}
+    <li class="{% if number in session.completed_steps %}done{% elif number == session.current_step %}current{% endif %}" {% if number == session.current_step %}aria-current="step"{% endif %}>
+      <span>{{ number }}</span><small>{{ title }}</small>
+    </li>
+    {% endfor %}
+  </ol>
+
+  {% for number,title,description in steps %}
+  {% if number == session.current_step and number < 10 %}
+  <section class="card onboarding-card">
+    <p class="eyebrow">SCHRITT {{ number }} VON 11</p>
+    <h2>{{ title }}</h2>
+    <p>{{ description }}</p>
+    <form method="post" action="/onboarding/step" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <input type="hidden" name="step" value="{{ number }}">
+      <input type="hidden" name="session_version" value="{{ session.version }}">
+
+      {% if number == 1 %}
+        <input type="hidden" name="answer_keys" value="welcome_confirmed">
+        <input type="hidden" name="answer_values" value="ja">
+        <div class="notice">Die Creative Intelligence lernt ausschließlich aus Entscheidungen dieses Vereins. Daten anderer Vereine werden weder als Beispiele noch als Ersatz verwendet.</div>
+      {% elif number == 2 %}
+        <input type="hidden" name="answer_keys" value="club_data_reviewed"><input type="hidden" name="answer_values" value="ja">
+        <p>Prüfe Vereinsname, Kurzname und Zeitzone in den vorhandenen Vereinsdaten. Bereits gepflegte Werte bleiben führend.</p>
+      {% elif number == 3 %}
+        <input type="hidden" name="answer_keys" value="teams_reviewed"><input type="hidden" name="answer_values" value="ja">
+        <p>Prüfe die vorhandenen Mannschaften und ihre Berechtigungen. Dieser Assistent legt kein paralleles Mannschaftsverzeichnis an.</p>
+        <a class="button secondary" href="/teams">Mannschaften öffnen</a>
+      {% elif number == 4 %}
+        <input type="hidden" name="answer_keys" value="branding_reviewed"><input type="hidden" name="answer_values" value="ja">
+        <p>Logo, Primär- und Sekundärfarben, Akzentfarben sowie Schriften werden aus dem bestehenden Vereinsbranding übernommen.</p>
+        <a class="button secondary" href="/branding">Vereinsbranding öffnen</a>
+      {% elif number == 5 %}
+        <input type="hidden" name="answer_keys" value="media_reviewed"><input type="hidden" name="answer_values" value="ja">
+        <p>Die vorhandene Medienbibliothek und ihre Mannschaftszuordnung bleiben die führende Quelle für Spieler-, Mannschafts- und Vereinsbilder.</p>
+        <a class="button secondary" href="/media">Medienbibliothek öffnen</a>
+      {% elif number == 6 %}
+        <input type="hidden" name="answer_keys" value="channels_reviewed"><input type="hidden" name="answer_values" value="ja">
+        <p>Prüfe Instagram, Facebook und WhatsApp in der vorhandenen Kanalverwaltung. Der Assistent verändert keine Zugangsdaten.</p>
+        <a class="button secondary" href="/channels">Social-Media-Kanäle öffnen</a>
+      {% elif number == 7 %}
+        <input type="hidden" name="answer_keys" value="automation_reviewed"><input type="hidden" name="answer_values" value="ja">
+        <p>Prüfe Erstellungszeitpunkte, Freigaben und automatische Veröffentlichungen. Kalibrierungsbeispiele können niemals veröffentlicht werden.</p>
+        <a class="button secondary" href="/rules">Automatische Beiträge öffnen</a>
+      {% elif number == 8 %}
+        <fieldset><legend>Welcher Bildstil passt zu eurem Verein?</legend>
+          <label>Wirkung
+            <input type="hidden" name="answer_keys" value="visual_impact">
+            <select name="answer_values">
+              <option value="dynamisch">Dynamisch und energiegeladen</option><option value="emotional">Emotional</option><option value="modern">Modern und klar</option><option value="klassisch">Klassisch</option><option value="minimalistisch">Minimalistisch</option><option value="stadion">Stadion- und Flutlicht-Look</option><option value="keine_praeferenz">Keine feste Präferenz</option>
+            </select>
+          </label>
+          <label>Spielerdarstellung
+            <input type="hidden" name="answer_keys" value="player_prominence">
+            <select name="answer_values"><option value="hoch">Groß im Mittelpunkt</option><option value="mittel">Mittelgroß mit mehr Hintergrund</option><option value="niedrig">Dezent integriert</option><option value="keine_praeferenz">Keine feste Präferenz</option></select>
+          </label>
+          <label>Hintergrund
+            <input type="hidden" name="answer_keys" value="background_style">
+            <select name="answer_values"><option value="stadion">Stadion und Flutlicht</option><option value="dunkel">Dunkel und kontrastreich</option><option value="hell">Hell und modern</option><option value="dezent">Dezent</option><option value="abstrakt">Grafisch und abstrakt</option><option value="keine_praeferenz">Keine Präferenz</option></select>
+          </label>
+          <label>Textmenge im Bild
+            <input type="hidden" name="answer_keys" value="text_density">
+            <select name="answer_values"><option value="minimal">Möglichst wenig</option><option value="medium">Ausgewogen</option><option value="high">Viele Informationen</option></select>
+          </label>
+        </fieldset>
+      {% elif number == 9 %}
+        <fieldset><legend>Wie sollen eure Texte klingen?</legend>
+          <label>Ton
+            <input type="hidden" name="answer_keys" value="tone">
+            <select name="answer_values"><option value="sachlich">Sachlich</option><option value="locker">Locker</option><option value="emotional">Emotional</option><option value="sehr_emotional">Sehr emotional</option></select>
+          </label>
+          <label>Länge
+            <input type="hidden" name="answer_keys" value="text_length">
+            <select name="answer_values"><option value="kurz">Kurz</option><option value="mittel">Mittel</option><option value="ausfuehrlich">Ausführlich</option></select>
+          </label>
+          <label>Emojis
+            <input type="hidden" name="answer_keys" value="emoji_usage">
+            <select name="answer_values"><option value="keine">Keine</option><option value="wenige">Wenige</option><option value="normal">Normal</option><option value="viele">Viele</option></select>
+          </label>
+          <label>Ansprache
+            <input type="hidden" name="answer_keys" value="addressing">
+            <select name="answer_values"><option value="neutral">Neutral</option><option value="fans_direkt">Fans direkt ansprechen</option></select>
+          </label>
+          <label>Handlungsaufforderung
+            <input type="hidden" name="answer_keys" value="call_to_action">
+            <select name="answer_values"><option value="aktiviert">Aktiviert</option><option value="deaktiviert">Deaktiviert</option></select>
+          </label>
+        </fieldset>
+      {% endif %}
+      <button>Speichern und weiter</button>
+    </form>
+  </section>
+  {% endif %}
+  {% endfor %}
+
+  {% if session.current_step == 10 %}
+  <section class="card onboarding-card">
+    <p class="eyebrow">SCHRITT 10 VON 11</p>
+    <h2>Stil gemeinsam abstimmen</h2>
+    <p>Wir zeigen bewusst unterschiedliche Beispielvarianten. Sie sind als Beispieldaten gekennzeichnet, technisch für Publishing gesperrt und werden nicht auf euren normalen Monatsverbrauch angerechnet.</p>
+    {% if not feature.enabled %}<div class="warning">Die Kalibrierung ist plattformweit noch nicht freigeschaltet. Du kannst sie überspringen und später nachholen.</div>{% endif %}
+    <div class="creative-profile-grid">
+      {% for sample in samples %}
+      <article class="creative-profile-card">
+        <p class="eyebrow">BEISPIELDATEN · NICHT ZUR VERÖFFENTLICHUNG</p>
+        <h3>{{ 'Bild' if sample.modality == 'image' else 'Text' }} · {{ 'Ankündigung' if sample.content_type == 'announcement' else 'Ergebnis' }} · Variante {{ sample.sample_index }}</h3>
+        {% if sample.rendered_text %}<blockquote>{{ sample.rendered_text }}</blockquote>{% else %}<div class="calibration-placeholder">{{ sample.preview_payload.traits }}</div>{% endif %}
+        <form method="post" action="/onboarding/calibration/{{ sample.id }}" class="compact-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf }}">
+          <label>Bewertung <select name="rating"><option value="favorite">Favorit</option><option value="second">Zweite Wahl</option><option value="unsuitable">Nicht geeignet</option><option value="neutral">Keine Bewertung</option></select></label>
+          <details><summary>Optionale Gründe</summary>
+            {% if sample.modality == 'image' %}
+              {% for code,label in [('player_focus','Spielerfokus'),('composition','Bildaufteilung'),('colors','Vereinsfarben'),('typography','Schriftgestaltung'),('text_length','Textmenge'),('background','Hintergrund'),('overall_impression','Gesamteindruck')] %}<label><input type="checkbox" name="reason_codes" value="{{ code }}"> {{ label }}</label>{% endfor %}
+            {% else %}
+              {% for code,label in [('tone','Tonalität'),('text_length','Textlänge'),('emoji_usage','Emojis'),('hashtags','Hashtags'),('call_to_action','Handlungsaufforderung'),('overall_impression','Gesamteindruck')] %}<label><input type="checkbox" name="reason_codes" value="{{ code }}"> {{ label }}</label>{% endfor %}
+            {% endif %}
+          </details>
+          <button>Bewertung speichern</button>
+        </form>
+        {% if sample.feedback %}<small>Gespeichert: {{ sample.feedback.rating }}</small>{% endif %}
+      </article>
+      {% else %}<div class="empty-state">Noch keine Testvarianten verfügbar. Du kannst die Kalibrierung überspringen.</div>{% endfor %}
+    </div>
+    {% if samples %}<form method="post" action="/onboarding/complete"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Kalibrierung abschließen</button></form>{% endif %}
+    <form method="post" action="/onboarding/skip-calibration"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="secondary">Kalibrierung überspringen</button></form>
+  </section>
+  {% elif session.current_step == 11 %}
+  <section class="card onboarding-card">
+    <p class="eyebrow">SCHRITT 11 VON 11</p><h2>Zusammenfassung</h2>
+    <p>Die Einrichtung ist abgeschlossen. Lernen und die Anwendung gelernter Vorlieben lassen sich unabhängig voneinander steuern.</p>
+    <a class="button" href="/creative-intelligence">Gelernte Vorlieben öffnen</a>
+    <details class="danger-zone"><summary>Stil neu kalibrieren</summary>
+      <form method="post" action="/onboarding/restart-calibration"><input type="hidden" name="csrf_token" value="{{ csrf }}"><label>Zur Bestätigung <strong>KALIBRIERUNG NEU STARTEN</strong> eingeben<input name="confirmation" required></label><button class="danger">Neue Kalibrierung beginnen</button></form>
+    </details>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}
