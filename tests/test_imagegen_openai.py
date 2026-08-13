@@ -340,6 +340,33 @@ def test_single_reference_adds_safe_reference_instruction(tmp_path):
     assert "1 getrennte Eingabebilder" in prompt
 
 
+def test_targeted_edit_sends_only_source_and_exact_change_request(tmp_path):
+    reference = tmp_path / "selected-output.png"
+    write_reference(reference, size=(1080, 1350))
+    provider = provider_with_mock_client()
+    provider.client.images.edit.return_value = image_response()
+    instruction = (
+        "Verschiebe den Spieler etwas nach rechts und vergrößere den Abstand zum oberen Rand."
+    )
+
+    result = provider.edit(
+        prompt=instruction,
+        source=reference,
+        size="1088x1360",
+        model="gpt-image-2",
+        quality="medium",
+    )
+
+    assert result == PNG_BYTES
+    options = provider.client.images.edit.call_args.kwargs
+    assert options["prompt"] == instruction
+    assert options["image"].name == "reference-1.jpg"
+    assert options["size"] == "1088x1360"
+    assert "input_fidelity" not in options
+    provider.client.images.generate.assert_not_called()
+    provider.client.responses.create.assert_not_called()
+
+
 def test_edit_rejects_unsupported_reference_format_before_api_call(tmp_path):
     reference = tmp_path / "player.gif"
     reference.write_bytes(PNG_BYTES)

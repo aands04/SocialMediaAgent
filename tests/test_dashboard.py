@@ -1524,8 +1524,9 @@ def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(browser, tmp_p
         carousel_post_id = carousel_post.id
     carousel_detail = client.get(f"/posts/{carousel_post_id}")
     assert carousel_detail.status_code == 200
-    assert "KARUSSELL 1/3" in carousel_detail.text
-    assert "KARUSSELL 3/3" in carousel_detail.text
+    assert "Feed-Bild 1" in carousel_detail.text
+    assert "Feed-Bild 3" in carousel_detail.text
+    assert "Medienausgaben und Versionen" not in carousel_detail.text
 
 
 def player_image_archive(entries: dict[str, bytes]):
@@ -2261,17 +2262,17 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
 
     assert response.status_code == 200
     assert "Gemeinsamer Spieltagsbeitrag" in response.text
-    assert response.text.count("<figcaption>KARUSSELL") == 2
-    assert response.text.count("<figcaption>STORY") == 4
+    assert response.text.count("<div><strong>Feed-Bild") == 2
+    assert response.text.count("STORY · Variante") == 4
+    assert response.text.count("Dieses Bild gezielt") == 6
+    assert response.text.count("Dieses Bild komplett neu erstellen") == 6
     assert response.text.count("Zeitpunkt ändern") == 5
     assert "Dashboard Mannschaft 1" in response.text
     assert "Dashboard Mannschaft 2" in response.text
     assert "Reihenfolge des Karussells" in response.text
     assert "Erstes Bild festlegen" in response.text
-    assert 'id="select-all-ai-outputs"' in response.text
-    assert 'id="clear-all-ai-outputs"' in response.text
-    assert response.text.count('class="ai-output-choice"') == 6
-    assert response.text.count('name="media_asset_choices"') == 2
+    assert 'id="select-all-ai-outputs"' not in response.text
+    assert 'id="clear-all-ai-outputs"' not in response.text
     assert "Gemeinsamen Beitrag löschen" in response.text
     assert "Teilbeitrag einzeln bearbeiten" not in response.text
 

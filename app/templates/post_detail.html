@@ -129,29 +129,10 @@
 {% endif %}
 {% endif %}
 </details>
-<h2 id="media">Medien für die Veröffentlichung</h2>
-<div class="media-grid">
-  {% for x in jobs %}
-  {% if x.kind == 'carousel' %}
-    {% for media in carousel_items.get(x.id, []) %}
-    <figure>
-      {% set carousel_team=(carousel_teams.get(x.id,[])|list)[media.position-1] if carousel_teams.get(x.id) and media.position <= carousel_teams[x.id]|length else none %}
-      <figcaption>KARUSSELL {{media.position}}/{{carousel_items[x.id]|length}}{% if carousel_team %} · {{carousel_team.display_name}}{% endif %} · {{x.scheduled_at|berlin}}</figcaption>
-      <img src="/posts/{{item.id}}/media/{{x.id}}/items/{{media.id}}" alt="Karussellbild {{media.position}}">
-      {% if loop.first %}<div class="media-check">{{checks[x.id]}}</div>{% endif %}
-    </figure>
-    {% endfor %}
-  {% else %}
-  {% set source_post=job_posts.get(x.id,item) %}
-  {% set source_team=job_teams.get(x.id) %}
-  <figure><figcaption>{{x.kind|upper}}{% if source_team %} · {{source_team.display_name}}{% endif %} · {{x.scheduled_at|berlin}}</figcaption><img src="/posts/{{source_post.id}}/media/{{x.id}}" alt="Vorschau {{x.kind}}{% if source_team %} {{source_team.display_name}}{% endif %}"><div class="media-check">{{checks[x.id]}}</div></figure>
-  {% endif %}
-  {% endfor %}
-</div>
 {% if media_catalog %}
-<section>
-  <h2>Medienausgaben und Versionen</h2>
-  <p>Jede Karte ist eine eigenständige Ausgabe. Eine neue KI-Version ersetzt ältere Dateien nicht. Die markierte Version wird bei der nächsten Freigabe verbindlich eingefroren.</p>
+<section id="media" class="publication-media-section">
+  <h2>Medien für die Veröffentlichung</h2>
+  <p>Jedes Bild wird genau einmal angezeigt. Du kannst eine Ausgabe gezielt ändern, vollständig neu erstellen oder eine ältere Version auswählen.</p>
   {% for media_kind in ['feed', 'story'] %}
   {% set kind_entries=media_catalog|selectattr('slot.media_kind','equalto',media_kind)|list %}
   {% if kind_entries %}
@@ -160,14 +141,15 @@
   {% for entry in kind_entries %}
     {% set slot=entry.slot %}
     {% set selected=entry.versions|selectattr('id','equalto',slot.selected_version_id)|first %}
+    {% set member_asset=current_media_assets_by_post.get(entry.post.id) %}
+    {% set alternatives=alternative_media_assets_by_post.get(entry.post.id,[]) %}
     <article class="media-version-card">
       <header>
         <div><strong>{{slot.label}}</strong>{% if entry.team %}<small>{{entry.team.display_name}}</small>{% endif %}</div>
         <span class="badge">{{slot.media_kind|upper}} · Variante {{slot.variant_number}}</span>
       </header>
-      {% if can_generate %}<p><a class="button secondary choose-ai-slot" href="#ai-review" data-slot-target="ai-slot-{{slot.id}}">Diese Ausgabe neu generieren</a></p>{% endif %}
       {% if selected %}
-      <p><span class="badge">{% if slot.selection_mode == 'auto_latest' %}Automatisch neueste Version{% else %}Manuell festgelegt{% endif %}</span></p>
+      <div class="media-version-state"><span class="badge">{% if slot.selection_mode == 'auto_latest' %}Automatisch neueste Version{% else %}Manuell festgelegt{% endif %}</span></div>
       {% if can_edit and slot.selection_mode == 'manual' %}
       <form method="post" action="/posts/{{entry.post.id}}/media-slots/{{slot.id}}/auto-latest">
         <input type="hidden" name="csrf_token" value="{{csrf}}">
@@ -177,6 +159,42 @@
       {% endif %}
       <img src="/posts/{{entry.post.id}}/versions/{{selected.id}}" alt="{{slot.label}}, ausgewählte Version {{selected.version_number}}">
       <p><strong>Ausgewählt: Version {{selected.version_number}}</strong> · {{selected.width}} × {{selected.height}} · {{selected.created_at|berlin}}</p>
+      {% if can_generate and not is_manual %}
+      <div class="single-media-actions">
+        <details>
+          <summary>Dieses Bild gezielt ändern</summary>
+          <form method="post" action="/posts/{{entry.post.id}}/media-slots/{{slot.id}}/ai-edit">
+            <input type="hidden" name="csrf_token" value="{{csrf}}">
+            <input type="hidden" name="post_version" value="{{entry.post.version}}">
+            <input type="hidden" name="mode" value="targeted_edit">
+            <input type="hidden" name="source_version_id" value="{{selected.id}}">
+            <label>Was soll sich an genau diesem Bild ändern?
+              <textarea name="instruction" rows="4" minlength="10" maxlength="2000" required placeholder="Beispiel: Verschiebe den Spieler etwas nach rechts und vergrößere den Abstand des Logos zum oberen Rand."></textarea>
+            </label>
+            <p><small>An die KI werden nur dieses Bild und deine Änderungsanweisung gesendet. Der ursprüngliche Erstellungs-Prompt sowie Spielerfoto und Logos werden nicht erneut übertragen.</small></p>
+            <button>Gezielte Änderung starten</button>
+          </form>
+        </details>
+        <details>
+          <summary>Dieses Bild komplett neu erstellen</summary>
+          <form method="post" action="/posts/{{entry.post.id}}/media-slots/{{slot.id}}/ai-edit" onsubmit="return confirm('Nur diese Ausgabe mit dem vollständigen Ausgabe-Prompt neu erstellen?');">
+            <input type="hidden" name="csrf_token" value="{{csrf}}">
+            <input type="hidden" name="post_version" value="{{entry.post.version}}">
+            <input type="hidden" name="mode" value="full_regenerate">
+            {% if member_asset or alternatives %}
+            <label>Spielerbild
+              <select name="media_asset_id">
+                {% if member_asset %}<option value="{{member_asset.id}}" selected>Bisheriges Bild: {{member_asset.filename}}</option>{% endif %}
+                {% for asset in alternatives %}<option value="{{asset.id}}">Anderes, unverbrauchtes Bild: {{asset.filename}}</option>{% endfor %}
+              </select>
+            </label>
+            {% endif %}
+            <p><small>Es wird nur diese Ausgabe mit dem zugehörigen vollständigen Prompt sowie Spielerfoto, Mannschaftslogo, optionalem Gegnerlogo und Sponsorlogos neu aufgebaut.</small></p>
+            <button class="secondary">Komplett neu erstellen</button>
+          </form>
+        </details>
+      </div>
+      {% endif %}
       {% else %}<div class="alert">Für diese Ausgabe ist keine verwendbare Version ausgewählt.</div>{% endif %}
       <details>
         <summary>{{entry.versions|length}} Version{% if entry.versions|length != 1 %}en{% endif %} vergleichen und auswählen</summary>
@@ -232,38 +250,14 @@
 <form id="ai-review" method="post" action="/posts/{{item.id}}/ai-revision">
   <input type="hidden" name="csrf_token" value="{{csrf}}"><input type="hidden" name="version" value="{{item.version}}">
   <fieldset>
-    <legend>Mit KI überarbeiten</legend>
-    <p>Beschreibe konkret, was am Begleittext und/oder an den Grafiken anders werden soll. Die bestehenden Fakten-, Logo- und Sicherheitsregeln bleiben verbindlich.</p>
-    <label>Änderungsanweisung
-      <textarea name="instruction" rows="5" minlength="10" maxlength="2000" required placeholder="Beispiel: Verwende eine emotionalere Bildstimmung mit Flutlicht. Der Spieler soll zentraler stehen. Formuliere den Begleittext enthusiastischer, ohne neue Fakten zu erfinden."></textarea>
+    <legend>Begleittext mit KI überarbeiten</legend>
+    <p>Bildänderungen startest du direkt beim jeweiligen Bild. Hier wird ausschließlich der Begleittext überarbeitet.</p>
+    <label>Änderungsanweisung für den Text
+      <textarea name="instruction" rows="4" minlength="10" maxlength="2000" required placeholder="Beispiel: Formuliere den Begleittext emotionaler und kürzer, ohne neue Fakten zu erfinden."></textarea>
     </label>
-    <p><strong>Inhalte auswählen:</strong></p>
-    <label><input type="checkbox" name="revise_text" value="true"> Begleittext durch KI überarbeiten</label>
-    <div class="review-selection-tools">
-      <button type="button" class="secondary" id="select-all-ai-outputs">Alle Grafiken auswählen</button>
-      <button type="button" class="secondary" id="clear-all-ai-outputs">Auswahl aufheben</button>
-    </div>
-    {% for entry in media_catalog %}
-      <label><input id="ai-slot-{{entry.slot.id}}" class="ai-output-choice" type="checkbox" name="media_slot_ids" value="{{entry.slot.id}}"> {{entry.slot.label}}{% if entry.team %} · {{entry.team.display_name}}{% endif %} neu erzeugen</label>
-    {% endfor %}
-    <fieldset class="player-image-choices">
-      <legend>Spielerbild je Mannschaft</legend>
-      <p>Das gewählte Bild wird nur für die ausgewählten Grafiken der jeweiligen Mannschaft verwendet.</p>
-      {% for member in bundle_posts %}
-      {% set member_team=bundle_member_teams.get(member.id) %}
-      {% set member_asset=current_media_assets_by_post.get(member.id) %}
-      {% set alternatives=alternative_media_assets_by_post.get(member.id,[]) %}
-      <label>{{member_team.display_name if member_team else 'Mannschaft'}}
-        <select name="media_asset_choices">
-          {% if member_asset %}<option value="{{member.id}}:{{member_asset.id}}" selected>Bisheriges Bild verwenden: {{member_asset.filename}}</option>{% endif %}
-          {% for asset in alternatives %}<option value="{{member.id}}:{{asset.id}}">Anderes, unverbrauchtes Bild verwenden: {{asset.filename}}</option>{% endfor %}
-        </select>
-      </label>
-      {% if not member_asset and not alternatives %}<small>Für diese Mannschaft ist kein verfügbares Spielerbild vorhanden.</small>{% endif %}
-      {% endfor %}
-    </fieldset>
-    <div class="quota-estimate" aria-live="polite">Voraussichtlicher Verbrauch: <strong id="ai-image-estimate">0</strong> KI-Bilder{% if display_text %} und optional 1 KI-Text{% endif %}. Abgerechnet werden nur technisch verwendbare Ergebnisse.</div>
-    <button>KI-Überarbeitung starten</button>
+    <input type="hidden" name="revise_text" value="true">
+    <div class="quota-estimate">Voraussichtlicher Verbrauch: 1 KI-Text. Abgerechnet wird nur ein technisch verwendbares Ergebnis.</div>
+    <button>Textüberarbeitung starten</button>
   </fieldset>
 </form>
 {% if item.design_snapshot.get('ai_revisions') %}
@@ -500,28 +494,4 @@
   {% endif %}
 </details>
 {% endif %}
-<script>
-(() => {
-  const outputChoices = [...document.querySelectorAll('.ai-output-choice')];
-  const estimate = document.getElementById('ai-image-estimate');
-  const updateEstimate = () => {
-    if (estimate) estimate.textContent = String(outputChoices.filter(item => item.checked).length);
-  };
-  outputChoices.forEach(item => item.addEventListener('change', updateEstimate));
-  document.getElementById('select-all-ai-outputs')?.addEventListener('click', () => {
-    outputChoices.forEach(item => { item.checked = true; });
-    updateEstimate();
-  });
-  document.getElementById('clear-all-ai-outputs')?.addEventListener('click', () => {
-    outputChoices.forEach(item => { item.checked = false; });
-    updateEstimate();
-  });
-  document.querySelectorAll('.choose-ai-slot').forEach(link => link.addEventListener('click', () => {
-    const input = document.getElementById(link.dataset.slotTarget);
-    if (input) input.checked = true;
-    updateEstimate();
-  }));
-  updateEstimate();
-})();
-</script>
 {% endblock %}

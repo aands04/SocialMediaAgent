@@ -2151,6 +2151,7 @@ class AiPromptDispatch(Base):
     prompt_checksum: Mapped[str] = mapped_column(String(64), index=True)
     rendered_prompt: Mapped[str] = mapped_column(Text)
     creative_profile_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    reference_images: Mapped[list[dict]] = mapped_column(JSON, default=list)
     attempt_number: Mapped[int] = mapped_column(Integer, default=1)
     call_index: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(30), default="dispatched", index=True)

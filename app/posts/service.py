@@ -639,6 +639,7 @@ def _facts(
             else text_settings.get("away_label") or "Auswärtsspiel"
         ),
         "player_image": _media_path(asset),
+        "player_media_asset_id": asset.id if asset else None,
         "team_logo": _upload_path(team_logo.get("path")),
         "opponent_logo": _upload_path(opponent_logo.get("path"))
         if not opponent_logo.get("fallback")
@@ -1541,6 +1542,9 @@ def rerender_post(
     rerender_feed: bool = True,
     feed_positions: list[int] | None = None,
     story_variant_numbers: list[int] | None = None,
+    revision_mode: str = "full_regenerate",
+    source_media_version_id: str | None = None,
+    target_media_slot_id: str | None = None,
 ) -> Post:
     game = db.get(Game, post.game_id)
     team = db.get(Team, post.team_id)
@@ -1557,6 +1561,42 @@ def rerender_post(
     selected_story_variants = {
         int(number) for number in (story_variant_numbers or []) if int(number) > 0
     }
+    if revision_mode not in {"full_regenerate", "targeted_edit"}:
+        raise RerenderConflict("Unbekannte Art der Bildbearbeitung")
+    targeted_source: GeneratedMediaVersion | None = None
+    targeted_slot = (
+        db.scalar(
+            select(GeneratedMediaSlot).where(
+                GeneratedMediaSlot.id == target_media_slot_id,
+                GeneratedMediaSlot.club_id == post.club_id,
+                GeneratedMediaSlot.post_id == post.id,
+            )
+        )
+        if target_media_slot_id
+        else None
+    )
+    if target_media_slot_id and not targeted_slot:
+        raise RerenderConflict("Die ausgewählte Medienausgabe gehört nicht zu diesem Beitrag")
+    if revision_mode == "targeted_edit":
+        targeted_source = db.scalar(
+            select(GeneratedMediaVersion).where(
+                GeneratedMediaVersion.id == source_media_version_id,
+                GeneratedMediaVersion.club_id == post.club_id,
+            )
+        )
+        if (
+            not targeted_source
+            or not targeted_slot
+            or targeted_source.slot_id != targeted_slot.id
+            or targeted_slot.selected_version_id != targeted_source.id
+        ):
+            raise RerenderConflict(
+                "Die ausgewählte Ausgangsversion gehört nicht zu dieser Medienausgabe"
+            )
+        if not 10 <= len((revision_instruction or "").strip()) <= 2000:
+            raise RerenderConflict(
+                "Die gezielte Bildänderung muss 10 bis 2000 Zeichen lang sein"
+            )
     story_jobs = {job.id: job for job in jobs if job.kind == "story"}
     if not selected.issubset(story_jobs):
         raise RerenderConflict("Mindestens eine ausgewählte Story gehört nicht zu diesem Beitrag")
@@ -1652,6 +1692,11 @@ def rerender_post(
             }
     if any(number not in story_candidates for number in selected_story_variants):
         raise RerenderConflict("Mindestens eine ausgewählte Story-Variante ist nicht vorhanden")
+    if targeted_slot and targeted_slot.media_kind == "story":
+        if selected_story_variants != {targeted_slot.variant_number}:
+            raise RerenderConflict(
+                "Die Bildbearbeitung darf genau eine Story-Ausgabe verändern"
+            )
     feed_design = old_snapshot.get("feed")
     feed_prompt = None
     feed_paths = []
@@ -1674,7 +1719,8 @@ def rerender_post(
             if getattr(renderer, "is_ai", False)
             else None
         )
-        feed_prompt = _revision_prompt(feed_prompt, revision_instruction)
+        if revision_mode == "full_regenerate":
+            feed_prompt = _revision_prompt(feed_prompt, revision_instruction)
         previous_feed_outputs = (old_snapshot.get("media") or {}).get("feed_outputs") or []
         previous_feed_variants = (old_snapshot.get("media") or {}).get("feed_variants") or []
         structured_feed_variants = bool(
@@ -1703,6 +1749,16 @@ def rerender_post(
             raise RerenderConflict(
                 "Ein gebündelter Vereins-Karussellbeitrag kann nicht über die normale Feed-Neugenerierung geändert werden"
             )
+        if targeted_slot and targeted_slot.media_kind == "feed":
+            targeted_position = (
+                targeted_slot.variant_number
+                if structured_feed_variants
+                else targeted_slot.output_position
+            )
+            if selected_feed_positions != {targeted_position}:
+                raise RerenderConflict(
+                    "Die gezielte Bearbeitung darf genau eine Feed-Ausgabe verändern"
+                )
         for output_index in range(1, feed_output_count + 1):
             if output_index not in selected_feed_positions:
                 previous = previous_feed_outputs[output_index - 1]
@@ -1722,6 +1778,17 @@ def rerender_post(
                     else f"{post.id}/feed-{output_index}-v{post.feed_version}.png"
                 )
             )
+            targeted_feed = bool(
+                targeted_source
+                and targeted_slot
+                and targeted_slot.media_kind == "feed"
+                and (
+                    targeted_slot.variant_number
+                    if structured_feed_variants
+                    else targeted_slot.output_position
+                )
+                == output_index
+            )
             feed_paths.append(
                 str(
                     renderer.render(
@@ -1735,6 +1802,15 @@ def rerender_post(
                             ),
                             "feed_output_index": output_index,
                             "feed_output_count": feed_output_count,
+                            **(
+                                {
+                                    "targeted_edit_source": targeted_source.media_path,
+                                    "targeted_edit_instruction": revision_instruction,
+                                    "source_media_version_id": targeted_source.id,
+                                }
+                                if targeted_feed
+                                else {}
+                            ),
                         },
                     )
                 )
@@ -1805,7 +1881,19 @@ def rerender_post(
                 else max(1, int(snapshot.get("media_slot", 1) or 1))
             )
             if current_variant == variant_number:
-                matching_jobs.append(publication)
+                if not targeted_slot or targeted_slot.media_kind != "story":
+                    matching_jobs.append(publication)
+                elif (
+                    current_slot
+                    and current_slot.id == targeted_slot.id
+                    or targeted_slot.story_rule_id
+                    and publication.story_rule_id == targeted_slot.story_rule_id
+                ):
+                    matching_jobs.append(publication)
+        if targeted_slot and targeted_slot.media_kind == "story" and not matching_jobs:
+            raise RerenderConflict(
+                "Der ausgewählten Story-Ausgabe ist kein offener Veröffentlichungsauftrag zugeordnet"
+            )
         source_job = next(
             (publication for publication in matching_jobs if publication.story_rule_id),
             None,
@@ -1842,7 +1930,8 @@ def rerender_post(
             if getattr(renderer, "is_ai", False)
             else None
         )
-        story_prompt = _revision_prompt(story_prompt, revision_instruction)
+        if revision_mode == "full_regenerate":
+            story_prompt = _revision_prompt(story_prompt, revision_instruction)
         story_prompt = prompt_for_variant(
             story_prompt, variant_number, max(story_candidates or {1: {}})
         )
@@ -1852,7 +1941,11 @@ def rerender_post(
                 GeneratedMediaSlot.club_id == post.club_id,
                 GeneratedMediaSlot.post_id == post.id,
                 GeneratedMediaSlot.media_kind == "story",
-                GeneratedMediaSlot.variant_number == variant_number,
+                *(
+                    (GeneratedMediaSlot.id == targeted_slot.id,)
+                    if targeted_slot and targeted_slot.media_kind == "story"
+                    else (GeneratedMediaSlot.variant_number == variant_number,)
+                ),
             )
             .with_for_update()
         )
@@ -1873,6 +1966,12 @@ def rerender_post(
         except (TypeError, ValueError):
             legacy_number = 0
         next_version = max(latest_number, legacy_number) + 1
+        targeted_story = bool(
+            targeted_source
+            and targeted_slot
+            and targeted_slot.media_kind == "story"
+            and targeted_slot.variant_number == variant_number
+        )
         path_value = str(
             renderer.render(
                 "story",
@@ -1882,6 +1981,15 @@ def rerender_post(
                     "template": design,
                     "image_prompt": story_prompt,
                     "story_output_index": variant_number,
+                    **(
+                        {
+                            "targeted_edit_source": targeted_source.media_path,
+                            "targeted_edit_instruction": revision_instruction,
+                            "source_media_version_id": targeted_source.id,
+                        }
+                        if targeted_story
+                        else {}
+                    ),
                 },
             )
         )
@@ -2021,10 +2129,15 @@ def revise_post(
     media_asset_id: str | None = None,
     feed_positions: list[int] | None = None,
     story_variant_numbers: list[int] | None = None,
+    revision_mode: str = "full_regenerate",
+    source_media_version_id: str | None = None,
+    target_media_slot_id: str | None = None,
 ) -> Post:
     """Apply a persistent AI revision while preserving published outputs."""
     instruction = instruction.strip()
-    if not 10 <= len(instruction) <= 2000:
+    if revision_mode not in {"full_regenerate", "targeted_edit"}:
+        raise ValueError("Unbekannte Art der Bildbearbeitung")
+    if (revision_mode == "targeted_edit" or instruction) and not 10 <= len(instruction) <= 2000:
         raise ValueError("Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein")
     if not revise_text and not revise_graphics:
         raise ValueError("Bitte mindestens Begleittext oder Grafiken auswählen")
@@ -2069,6 +2182,9 @@ def revise_post(
             rerender_feed=rerender_feed,
             feed_positions=feed_positions,
             story_variant_numbers=story_variant_numbers,
+            revision_mode=revision_mode,
+            source_media_version_id=source_media_version_id,
+            target_media_slot_id=target_media_slot_id,
         )
 
     if revise_text:
@@ -2120,6 +2236,8 @@ def revise_post(
             "feed": bool(rerender_feed) if revise_graphics else False,
             "story_job_ids": sorted(set(story_job_ids or [])),
             "story_variant_numbers": sorted(set(story_variant_numbers or [])),
+            "revision_mode": revision_mode,
+            "source_media_version_id": source_media_version_id,
             "text_model": generated_text.model if generated_text else None,
             "text_prompt_version": generated_text.prompt_version if generated_text else None,
             "text_tokens": generated_text.tokens if generated_text else None,

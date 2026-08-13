@@ -39,7 +39,34 @@
       </td>
       <td>{{item.model}}<br>{{item.prompt_name or 'Laufzeitprompt'}}{% if item.prompt_version %} · v{{item.prompt_version}}{% endif %}<br><code>{{item.prompt_checksum[:12]}}</code></td>
       <td>{{'Erfolgreich' if item.status=='completed' else ('Fehlgeschlagen' if item.status=='failed' else 'Versandt / offen')}}{% if item.error_summary %}<br>{{item.error_summary}}{% endif %}</td>
-      <td><details><summary>Exakten Prompt anzeigen</summary><pre class="protected-prompt">{{item.rendered_prompt}}</pre></details></td>
+      <td>
+        <details><summary>Exakten Prompt anzeigen</summary><pre class="protected-prompt">{{item.rendered_prompt}}</pre></details>
+        {% if item.prompt_kind == 'image' %}
+        <details class="prompt-reference-details">
+          <summary>An die KI gesendete Bilder ({{item.reference_images|length}})</summary>
+          {% if item.reference_images %}
+          <div class="prompt-reference-grid">
+            {% for reference in item.reference_images %}
+            <figure>
+              <img src="/platform/ai-generations/{{item.id}}/references/{{loop.index0}}" alt="An die KI gesendetes Referenzbild: {{reference.get('name') or reference.get('role') or 'Bild'}}" loading="lazy">
+              <figcaption>
+                {% if reference.get('role') == 'player' %}Spielerbild
+                {% elif reference.get('role') == 'team_logo' %}Vereinslogo
+                {% elif reference.get('role') == 'opponent_logo' %}Gegnerlogo
+                {% elif reference.get('role') == 'sponsor_logo' %}Sponsorenlogo{% if reference.get('name') %}: {{reference.get('name')}}{% endif %}
+                {% elif reference.get('role') == 'source_image' %}Ausgangsbild der gezielten Änderung
+                {% elif reference.get('role') == 'same_fixture_announcement_layout' %}Vorlage aus der Spielankündigung
+                {% else %}Referenzbild{% endif %}
+              </figcaption>
+            </figure>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="muted">Für diesen älteren Aufruf wurde noch kein sicherer Bildverweis protokolliert.</p>
+          {% endif %}
+        </details>
+        {% endif %}
+      </td>
     </tr>
     {% else %}<tr><td colspan="7">Für diesen Filter wurden noch keine KI-Aufrufe protokolliert.</td></tr>{% endfor %}
   </table>
