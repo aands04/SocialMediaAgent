@@ -343,6 +343,18 @@ class ImageProvider:
     ) -> bytes:
         raise NotImplementedError
 
+    def edit(
+        self,
+        prompt: str,
+        source: Path,
+        size: str,
+        model: str,
+        quality: str,
+    ) -> bytes:
+        """Edit one existing output using only the supplied change request."""
+
+        return self.generate(prompt, [source], size, model, quality)
+
 
 class OpenAIImageProvider(ImageProvider):
     def __init__(self, api_key: str, *, responses_model: str = "gpt-5.4-mini"):
@@ -629,6 +641,98 @@ class OpenAIImageProvider(ImageProvider):
                 provider_fallback_used=bool(getattr(exc, "provider_fallback_used", False)),
             ) from exc
 
+    def edit(
+        self,
+        prompt: str,
+        source: Path,
+        size: str,
+        model: str,
+        quality: str,
+    ) -> bytes:
+        """Use the official single-image edit endpoint without the creation prompt.
+
+        ``prompt`` is deliberately transmitted verbatim.  The full generation
+        prompt and the original player/logo references are not part of this
+        request; the already generated image is the sole visual input.
+        """
+
+        operation_id = uuid.uuid4().hex
+        diagnostics: ReferenceUploadDiagnostics | None = None
+        try:
+            payload = _normalized_reference_bytes(source, position=1)
+            diagnostics = ReferenceUploadDiagnostics(
+                count=1,
+                total_bytes=len(payload[1]),
+                mime_types=(payload[2],),
+                dimensions=(f"{payload[3][0]}x{payload[3][1]}",),
+            )
+            with ExitStack() as stack:
+                upload = _reference_uploads(stack, [payload])[0]
+                options: dict[str, object] = {
+                    "model": model,
+                    "image": upload,
+                    "prompt": prompt,
+                    "size": _provider_image_size(size, model),
+                    "quality": quality,
+                    **_provider_output_options(),
+                }
+                if not model.startswith("gpt-image-2"):
+                    options["input_fidelity"] = "high"
+                context = self._request_context(
+                    operation_id=operation_id,
+                    transport="images.edit.targeted",
+                    model=model,
+                    requested_size=size,
+                    provider_size=str(options["size"]),
+                    quality=quality,
+                    prompt_chars=len(prompt),
+                    diagnostics=diagnostics,
+                    fallback_used=False,
+                )
+                try:
+                    return self._execute_provider_request(
+                        context=context,
+                        request=lambda: self.client.images.edit(**options),
+                        extract=lambda response: base64.b64decode(
+                            response.data[0].b64_json, validate=True
+                        ),
+                    )
+                except Exception as edit_exc:
+                    if not _may_fallback_to_responses(edit_exc, 1):
+                        raise
+                    return self._responses_edit(
+                        prompt=prompt,
+                        payload=payload,
+                        size=size,
+                        model=model,
+                        quality=quality,
+                        operation_id=operation_id,
+                        diagnostics=diagnostics,
+                    )
+        except ImageGenerationError:
+            raise
+        except Exception as exc:
+            status_code, request_id = _provider_error_metadata(exc)
+            details = []
+            if status_code is not None:
+                details.append(f"HTTP {status_code}")
+            if request_id:
+                details.append(f"Request-ID {request_id}")
+            suffix = f" ({', '.join(details)})" if details else ""
+            raise ImageGenerationError(
+                f"KI-Bildbearbeitung fehlgeschlagen{suffix}",
+                provider_status_code=status_code,
+                provider_request_id=request_id,
+                provider_reference_count=1,
+                provider_reference_total_bytes=(diagnostics.total_bytes if diagnostics else None),
+                provider_reference_mime_types=(diagnostics.mime_types if diagnostics else ()),
+                provider_reference_dimensions=(diagnostics.dimensions if diagnostics else ()),
+                provider_operation_id=getattr(exc, "provider_operation_id", operation_id),
+                provider_transport=getattr(exc, "provider_transport", None),
+                provider_duration_ms=getattr(exc, "provider_duration_ms", None),
+                provider_fallback_used=bool(getattr(exc, "provider_fallback_used", False)),
+            ) from exc
+
 
 class AIImageRenderer:
     """Renderer-kompatible KI-Ausgabe mit lokal erzwungenem Zielformat."""
@@ -701,6 +805,9 @@ class AIImageRenderer:
     @staticmethod
     def provider_prompt(data: dict) -> str:
         """Return the exact prompt the lower-level provider will transmit."""
+
+        if data.get("targeted_edit_source"):
+            return str(data.get("targeted_edit_instruction") or "")
 
         prompt = data.get("image_prompt")
         rendered = str(getattr(prompt, "rendered", "") or "")
@@ -830,9 +937,26 @@ class AIImageRenderer:
         prompt = data.get("image_prompt")
         if not prompt:
             raise ImageGenerationError("Gerenderter KI-Bildprompt fehlt")
+        targeted_source = self._result_layout_reference(data.get("targeted_edit_source"))
+        targeted_instruction = str(data.get("targeted_edit_instruction") or "").strip()
+        if targeted_source and not 10 <= len(targeted_instruction) <= 2000:
+            raise ImageGenerationError(
+                "Die gezielte BildÃ¤nderung muss 10 bis 2000 Zeichen lang sein"
+            )
         result_layout = self._result_layout_reference(data.get("result_layout_reference"))
         result_transform = bool(data.get("post_type") == "result" and result_layout)
-        if result_transform:
+        targeted_edit = bool(targeted_source)
+        if targeted_edit:
+            opponent_logo = None
+            sponsor_items = []
+            references = [targeted_source]
+            integration = {
+                "mode": "ai-targeted-image-edit",
+                "source_media_version_id": data.get("source_media_version_id"),
+                "original_prompt_transmitted": False,
+                "additional_reference_count": 0,
+            }
+        elif result_transform:
             # Continue from the already reviewed pre-match artwork. Supplying
             # player and logo files again encouraged a redesign and made the
             # multipart request larger and more fragile.
@@ -861,12 +985,13 @@ class AIImageRenderer:
             if opponent_logo:
                 references.append(opponent_logo)
             references.extend(sponsor_paths)
-        integration = self._reference_metadata(
-            data,
-            opponent_logo is not None,
-            sponsor_items,
-            result_layout is not None,
-        )
+        if not targeted_edit:
+            integration = self._reference_metadata(
+                data,
+                opponent_logo is not None,
+                sponsor_items,
+                result_layout is not None,
+            )
         generation_job_id = data.get("_generation_job_id")
         requested_out, out = self._output_path(target, generation_job_id)
         reuse_generation_job_id = data.get("_reuse_generation_job_id")
@@ -896,13 +1021,22 @@ class AIImageRenderer:
             return out
         if callable(phase):
             phase("generating_ai_composition")
-        raw = self.provider.generate(
-            prompt=prompt.rendered,
-            references=references,
-            size=self.api_sizes[kind],
-            model=prompt.model,
-            quality=prompt.quality,
-        )
+        if targeted_edit:
+            raw = self.provider.edit(
+                prompt=targeted_instruction,
+                source=targeted_source,
+                size=self.api_sizes[kind],
+                model=prompt.model,
+                quality=prompt.quality,
+            )
+        else:
+            raw = self.provider.generate(
+                prompt=prompt.rendered,
+                references=references,
+                size=self.api_sizes[kind],
+                model=prompt.model,
+                quality=prompt.quality,
+            )
         temporary = out.with_name(f".{out.name}.tmp")
         try:
             with Image.open(BytesIO(raw)) as image:

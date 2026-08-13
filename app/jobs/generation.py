@@ -1,5 +1,6 @@
 import hashlib
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from socket import gethostname
 
 import structlog
@@ -26,6 +27,7 @@ from app.models import (
     Club,
     ClubStatus,
     Game,
+    GeneratedMediaVersion,
     GenerationJob,
     GenerationJobStatus,
     GenerationJobType,
@@ -150,6 +152,7 @@ def _record_prompt_dispatch(
     model: str,
     call_index: int,
     prompt=None,
+    reference_images: list[dict] | None = None,
 ) -> AiPromptDispatch:
     """Persist the exact provider input outside tenant-visible post data."""
     if not rendered_prompt.strip():
@@ -159,6 +162,7 @@ def _record_prompt_dispatch(
         f"generation:{job.id}:attempt:{attempt_number}:{prompt_kind}:{media_kind}:{call_index}"
     )
     checksum = hashlib.sha256(rendered_prompt.encode("utf-8")).hexdigest()
+    reference_images = list(reference_images or [])
     existing = db.scalar(
         select(AiPromptDispatch).where(
             AiPromptDispatch.club_id == job.club_id,
@@ -184,6 +188,13 @@ def _record_prompt_dispatch(
                 post_id=job.post_id,
                 details={"prompt_dispatch_id": existing.id},
             )
+        if existing.reference_images and existing.reference_images != reference_images:
+            raise RuntimeError(
+                "Bildreferenzen eines bereits protokollierten KI-Aufrufs haben sich "
+                "widersprüchlich geändert"
+            )
+        if reference_images and not existing.reference_images:
+            existing.reference_images = reference_images
         return existing
     item = AiPromptDispatch(
         club_id=job.club_id,
@@ -202,6 +213,7 @@ def _record_prompt_dispatch(
         prompt_checksum=checksum,
         rendered_prompt=rendered_prompt,
         creative_profile_snapshot=getattr(prompt, "creative_profile", None) or {},
+        reference_images=reference_images,
         attempt_number=attempt_number,
         call_index=call_index,
         status="dispatched",
@@ -223,6 +235,81 @@ def _record_prompt_dispatch(
             details={"prompt_dispatch_id": item.id},
         )
     return item
+
+
+def _generated_reference_descriptor(
+    db: Session,
+    *,
+    club_id: str,
+    media_path: object,
+    role: str,
+) -> dict | None:
+    """Resolve an already generated provider input to a stable tenant-bound ID."""
+
+    value = str(media_path or "").strip()
+    if not value:
+        return None
+    item = db.scalar(
+        select(GeneratedMediaVersion).where(
+            GeneratedMediaVersion.club_id == club_id,
+            GeneratedMediaVersion.media_path == value,
+        )
+    )
+    if item is None:
+        expected = str(Path(value).resolve())
+        for candidate in db.scalars(
+            select(GeneratedMediaVersion).where(GeneratedMediaVersion.club_id == club_id)
+        ):
+            if str(Path(candidate.media_path).resolve()) == expected:
+                item = candidate
+                break
+    return {"role": role, "media_version_id": item.id} if item else None
+
+
+def _prompt_reference_images(db: Session, job: GenerationJob, context: dict) -> list[dict]:
+    """Describe the ordered images actually sent to the image provider.
+
+    Only stable object IDs are persisted. Paths are deliberately excluded from
+    platform observability data and are resolved again by an authorized route.
+    """
+
+    targeted_id = str(context.get("source_media_version_id") or "").strip()
+    if context.get("targeted_edit_source") and targeted_id:
+        return [{"role": "source_image", "media_version_id": targeted_id}]
+
+    if context.get("post_type") == "result" and context.get("result_layout_reference"):
+        result = _generated_reference_descriptor(
+            db,
+            club_id=job.club_id,
+            media_path=context.get("result_layout_reference"),
+            role="same_fixture_announcement_layout",
+        )
+        return [result] if result else []
+
+    references: list[dict] = []
+    player_id = str(context.get("player_media_asset_id") or "").strip()
+    if player_id:
+        references.append({"role": "player", "media_asset_id": player_id})
+
+    logos = context.get("logos") if isinstance(context.get("logos"), dict) else {}
+    team_logo = logos.get("team") if isinstance(logos.get("team"), dict) else {}
+    opponent_logo = logos.get("opponent") if isinstance(logos.get("opponent"), dict) else {}
+    if context.get("team_logo") and team_logo.get("id"):
+        references.append({"role": "team_logo", "logo_asset_id": str(team_logo["id"])})
+    if context.get("opponent_logo") and opponent_logo.get("id"):
+        references.append(
+            {"role": "opponent_logo", "logo_asset_id": str(opponent_logo["id"])}
+        )
+    for sponsor in context.get("sponsor_references") or []:
+        if isinstance(sponsor, dict) and sponsor.get("media_asset_id"):
+            references.append(
+                {
+                    "role": "sponsor_logo",
+                    "media_asset_id": str(sponsor["media_asset_id"]),
+                    "name": str(sponsor.get("name") or "Sponsor"),
+                }
+            )
+    return references
 
 
 class _ProgressTextGenerator:
@@ -387,6 +474,7 @@ class _ProgressRenderer:
                 model=model,
                 call_index=self._calls,
                 prompt=prompt,
+                reference_images=_prompt_reference_images(self.db, self.job, context),
             )
             if rendered_prompt
             else None
@@ -807,9 +895,18 @@ def enqueue_ai_revision(
     revise_feed: bool | None = None,
     feed_positions: list[int] | None = None,
     story_variant_numbers: list[int] | None = None,
+    revision_mode: str = "full_regenerate",
+    source_media_version_id: str | None = None,
+    target_media_slot_id: str | None = None,
 ) -> GenerationJob:
     instruction = instruction.strip()
-    if not 10 <= len(instruction) <= 2000:
+    if revision_mode not in {"full_regenerate", "targeted_edit"}:
+        raise ValueError("Unbekannte Art der Bildbearbeitung")
+    if revision_mode == "targeted_edit" and not source_media_version_id:
+        raise ValueError("Für die gezielte Bearbeitung fehlt die Ausgangsversion")
+    if source_media_version_id and not target_media_slot_id:
+        raise ValueError("Für die Bildbearbeitung fehlt die ausgewählte Medienausgabe")
+    if (revision_mode == "targeted_edit" or instruction) and not 10 <= len(instruction) <= 2000:
         raise ValueError("Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein")
     if revise_feed is None:
         revise_feed = revise_graphics
@@ -833,6 +930,9 @@ def enqueue_ai_revision(
                 selected,
                 selected_story_variants,
                 media_asset_id or post.media_asset_id,
+                revision_mode,
+                source_media_version_id,
+                target_media_slot_id,
             )
         ).encode("utf-8")
     ).hexdigest()[:24]
@@ -879,6 +979,9 @@ def enqueue_ai_revision(
             "story_job_ids": selected,
             "story_variant_numbers": selected_story_variants,
             "media_asset_id": media_asset_id or post.media_asset_id,
+            "revision_mode": revision_mode,
+            "source_media_version_id": source_media_version_id,
+            "target_media_slot_id": target_media_slot_id,
             "logos": frozen_logo_set(db, game, team),
         },
     )
@@ -908,6 +1011,9 @@ def enqueue_ai_revision(
             "revise_graphics": revise_graphics,
             "revise_feed": revise_feed,
             "story_count": len(selected_story_variants or selected),
+            "revision_mode": revision_mode,
+            "source_media_version_id": source_media_version_id,
+            "target_media_slot_id": target_media_slot_id,
         },
     )
     from app.creative.hooks import record_regeneration_request
@@ -1572,6 +1678,11 @@ def process_generation_job(
                     media_asset_id=parameters.get("media_asset_id"),
                     feed_positions=list(parameters.get("feed_positions", [])),
                     story_variant_numbers=list(parameters.get("story_variant_numbers", [])),
+                    revision_mode=str(
+                        parameters.get("revision_mode") or "full_regenerate"
+                    ),
+                    source_media_version_id=parameters.get("source_media_version_id"),
+                    target_media_slot_id=parameters.get("target_media_slot_id"),
                 )
                 _audit(
                     db,

@@ -4,6 +4,7 @@ import csv
 import io
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -15,7 +16,9 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
+from app.file_delivery import detached_file_response
 from app.limits.service import effective_limits
+from app.media.storage import StorageError, media_asset_path
 from app.models import (
     AiPromptDispatch,
     AuditLog,
@@ -25,8 +28,11 @@ from app.models import (
     ClubStatus,
     FeatureFlag,
     Game,
+    GeneratedMediaVersion,
     GenerationJob,
     GenerationJobStatus,
+    LogoAsset,
+    MediaAsset,
     PlanProfile,
     PromptTemplate,
     StorageObject,
@@ -269,6 +275,86 @@ def ai_generation_prompts(
         total_items=total,
         total_pages=total_pages,
         title="KI-Generierungen und versandte Prompts",
+    )
+
+
+@router.get("/ai-generations/{dispatch_id}/references/{position}")
+def ai_generation_reference_image(
+    dispatch_id: str,
+    position: int,
+    current: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Serve one exact provider input image to PlatformAdmins only."""
+
+    require_platform_admin(current)
+    dispatch = db.get(AiPromptDispatch, dispatch_id)
+    if dispatch is None or dispatch.prompt_kind != "image":
+        raise HTTPException(404, "KI-Aufruf nicht gefunden")
+    references = dispatch.reference_images if isinstance(dispatch.reference_images, list) else []
+    if position < 0 or position >= len(references) or not isinstance(references[position], dict):
+        raise HTTPException(404, "Bildreferenz nicht gefunden")
+    reference = references[position]
+    settings = get_settings()
+
+    media_type: str | None = None
+    if reference.get("media_version_id"):
+        item = db.scalar(
+            select(GeneratedMediaVersion).where(
+                GeneratedMediaVersion.id == str(reference["media_version_id"]),
+                GeneratedMediaVersion.club_id == dispatch.club_id,
+            )
+        )
+        if item is None:
+            raise HTTPException(404, "Bildreferenz nicht mehr vorhanden")
+        path = Path(item.media_path).resolve()
+        root = settings.generated_root.resolve()
+        media_type = item.mime_type
+    elif reference.get("media_asset_id"):
+        item = db.scalar(
+            select(MediaAsset).where(
+                MediaAsset.id == str(reference["media_asset_id"]),
+                MediaAsset.club_id == dispatch.club_id,
+            )
+        )
+        if item is None:
+            raise HTTPException(404, "Bildreferenz nicht mehr vorhanden")
+        try:
+            path = media_asset_path(item, settings.media_root, settings.upload_root)
+        except StorageError as exc:
+            raise HTTPException(404, "Bildreferenz nicht mehr verfügbar") from exc
+        root = (
+            settings.upload_root.resolve()
+            if item.storage_kind == "upload"
+            else settings.media_root.resolve()
+        )
+        media_type = item.mime_type
+    elif reference.get("logo_asset_id"):
+        item = db.scalar(
+            select(LogoAsset).where(
+                LogoAsset.id == str(reference["logo_asset_id"]),
+                LogoAsset.club_id == dispatch.club_id,
+            )
+        )
+        if item is None:
+            raise HTTPException(404, "Bildreferenz nicht mehr vorhanden")
+        relative = Path(item.original_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise HTTPException(404, "Ungültige Bildreferenz")
+        root = settings.upload_root.resolve()
+        path = (root / relative).resolve()
+        media_type = item.mime_type
+    else:
+        raise HTTPException(404, "Unbekannte Bildreferenz")
+
+    if path.is_symlink() or not path.is_file() or (path != root and root not in path.parents):
+        raise HTTPException(404, "Bildreferenz nicht mehr verfügbar")
+    return detached_file_response(
+        db,
+        path,
+        media_type=media_type,
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, no-store", "Pragma": "no-cache"},
     )
 
 

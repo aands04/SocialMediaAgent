@@ -276,8 +276,26 @@ class FakeImageProvider(ImageProvider):
     def generate(self, prompt, references, size, model, quality):
         self.calls.append(
             {
+                "operation": "generate",
                 "prompt": prompt,
                 "references": references,
+                "size": size,
+                "model": model,
+                "quality": quality,
+            }
+        )
+        width, height = map(int, size.split("x"))
+        image = Image.effect_noise((width, height), 90).convert("RGB")
+        data = BytesIO()
+        image.save(data, self.output_format)
+        return data.getvalue()
+
+    def edit(self, prompt, source, size, model, quality):
+        self.calls.append(
+            {
+                "operation": "edit",
+                "prompt": prompt,
+                "source": source,
                 "size": size,
                 "model": model,
                 "quality": quality,
@@ -396,6 +414,73 @@ def test_ai_renderer_uses_reference_images_and_enforces_exact_output(tmp_path):
         "opponent_logo",
     ]
     assert "ai_base_path" not in metadata
+
+
+def test_ai_renderer_targeted_edit_excludes_original_prompt_and_all_other_references(tmp_path):
+    media = tmp_path / "media"
+    uploads = tmp_path / "uploads"
+    output_root = tmp_path / "out"
+    media.mkdir()
+    uploads.mkdir()
+    source = output_root / "post" / "selected-v1.png"
+    source.parent.mkdir(parents=True)
+    Image.new("RGB", (1080, 1350), "navy").save(source)
+    player = media / "player.jpg"
+    team_logo = uploads / "team-logo.png"
+    opponent_logo = uploads / "opponent-logo.png"
+    Image.new("RGB", (600, 900), "blue").save(player)
+    Image.new("RGBA", (200, 200), (255, 255, 255, 255)).save(team_logo)
+    Image.new("RGBA", (180, 210), (20, 180, 60, 255)).save(opponent_logo)
+    provider = FakeImageProvider()
+    renderer = AIImageRenderer(output_root, media, uploads, provider)
+    prompt = builtin_prompt(
+        "image",
+        "announcement",
+        "feed",
+        facts(team_logo=str(team_logo), opponent_logo=str(opponent_logo)),
+    )
+    instruction = "Verschiebe nur den Spieler etwas nach rechts und ändere sonst nichts."
+
+    output = renderer.render(
+        "feed",
+        "post/feed-targeted-v2.png",
+        {
+            "player_image": str(player),
+            "team_logo": str(team_logo),
+            "opponent_logo": str(opponent_logo),
+            "logos": {
+                "team": {"id": "team-1", "version": 2, "checksum": "a" * 64},
+                "opponent": {
+                    "id": "opponent-1",
+                    "version": 3,
+                    "checksum": "b" * 64,
+                },
+            },
+            "image_prompt": prompt,
+            "targeted_edit_source": str(source),
+            "targeted_edit_instruction": instruction,
+            "source_media_version_id": "version-1",
+        },
+    )
+
+    assert output.is_file()
+    assert provider.calls == [
+        {
+            "operation": "edit",
+            "prompt": instruction,
+            "source": source.resolve(),
+            "size": "1088x1360",
+            "model": "gpt-image-2",
+            "quality": "medium",
+        }
+    ]
+    metadata = renderer.metadata_for(output)
+    assert metadata["logo_integration"] == {
+        "mode": "ai-targeted-image-edit",
+        "source_media_version_id": "version-1",
+        "original_prompt_transmitted": False,
+        "additional_reference_count": 0,
+    }
 
 
 def test_ai_renderer_passes_verified_sponsor_as_compositional_reference(tmp_path):

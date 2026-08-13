@@ -462,6 +462,63 @@ def test_progress_renderer_records_exact_image_provider_prompt(db, tmp_path):
     assert dispatch.status == "completed"
 
 
+def test_progress_renderer_records_ordered_reference_object_ids(db, tmp_path):
+    _, team, game, user = graph(db)
+    job = generation.enqueue_create(db, game, team, user, "announcement")[0]
+
+    class Prompt:
+        rendered = "EXAKTER BILDPROMPT"
+        name = "image-reference-test"
+        version = 1
+        model = "test-image-model"
+        template_id = None
+
+    class ImageProvider:
+        is_ai = True
+
+        def provider_prompt(self, context):
+            return context["image_prompt"].rendered
+
+        def render(self, kind, relative_path, context):
+            return tmp_path / relative_path
+
+    generation._ProgressRenderer(ImageProvider(), db, job).render(
+        "feed",
+        "post/feed-v1.png",
+        {
+            "image_prompt": Prompt(),
+            "player_media_asset_id": "player-asset-id",
+            "player_image": "/not/persisted/player.jpg",
+            "team_logo": "/not/persisted/team.png",
+            "opponent_logo": "/not/persisted/opponent.png",
+            "logos": {
+                "team": {"id": "team-logo-id"},
+                "opponent": {"id": "opponent-logo-id"},
+            },
+            "sponsor_references": [
+                {
+                    "media_asset_id": "sponsor-asset-id",
+                    "name": "Beispielsponsor",
+                    "path": "/not/persisted/sponsor.png",
+                }
+            ],
+        },
+    )
+    dispatch = db.query(AiPromptDispatch).one()
+
+    assert dispatch.reference_images == [
+        {"role": "player", "media_asset_id": "player-asset-id"},
+        {"role": "team_logo", "logo_asset_id": "team-logo-id"},
+        {"role": "opponent_logo", "logo_asset_id": "opponent-logo-id"},
+        {
+            "role": "sponsor_logo",
+            "media_asset_id": "sponsor-asset-id",
+            "name": "Beispielsponsor",
+        },
+    ]
+    assert "/not/persisted" not in repr(dispatch.reference_images)
+
+
 def test_ambiguous_openai_timeout_schedules_bounded_delayed_retry(db, monkeypatch, tmp_path):
     _, team, game, user = graph(db)
     job, _ = generation.enqueue_create(db, game, team, user, "announcement")

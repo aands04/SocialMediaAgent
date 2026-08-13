@@ -5967,6 +5967,135 @@ def revise_post_with_ai(
     )
 
 
+@router.post("/posts/{post_id}/media-slots/{slot_id}/ai-edit")
+def edit_single_post_media_with_ai(
+    post_id: str,
+    slot_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    post_version: int = Form(),
+    mode: str = Form(),
+    instruction: str = Form(default=""),
+    source_version_id: str = Form(default=""),
+    media_asset_id: str = Form(default=""),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Queue one explicit media edit without widening it to bundle members."""
+
+    from app.jobs.generation import enqueue_ai_revision
+
+    check_csrf(request, csrf_token_value)
+    post = db.scalar(
+        select(Post).where(Post.id == post_id).with_for_update()
+    )
+    if not post:
+        raise HTTPException(404)
+    require(current, db, "generate", post.team_id)
+    if (post.design_snapshot or {}).get("source") == "manual_upload":
+        raise HTTPException(
+            422,
+            "Manuell hochgeladene Beiträge können nicht durch KI geändert werden",
+        )
+    if post.version != post_version:
+        raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    if mode not in {"targeted_edit", "full_regenerate"}:
+        raise HTTPException(422, "Unbekannte Art der Bildbearbeitung")
+
+    slot = db.scalar(
+        select(GeneratedMediaSlot).where(
+            GeneratedMediaSlot.id == slot_id,
+            GeneratedMediaSlot.club_id == post.club_id,
+            GeneratedMediaSlot.post_id == post.id,
+        )
+    )
+    if not slot:
+        raise HTTPException(404, "Medienausgabe wurde nicht gefunden")
+    selected_version = db.scalar(
+        select(GeneratedMediaVersion).where(
+            GeneratedMediaVersion.id == slot.selected_version_id,
+            GeneratedMediaVersion.club_id == post.club_id,
+            GeneratedMediaVersion.slot_id == slot.id,
+        )
+    )
+    if not selected_version:
+        raise HTTPException(409, "Für diese Ausgabe ist keine verwendbare Version ausgewählt")
+    if mode == "targeted_edit":
+        if source_version_id != selected_version.id:
+            raise HTTPException(
+                409,
+                "Die Ausgangsversion wurde zwischenzeitlich geändert. Bitte laden Sie die Seite neu.",
+            )
+        if not 10 <= len(instruction.strip()) <= 2000:
+            raise HTTPException(
+                422,
+                "Die Änderungsanweisung muss 10 bis 2000 Zeichen lang sein",
+            )
+        selected_media_asset_id = post.media_asset_id
+    else:
+        instruction = ""
+        selected_media_asset_id = media_asset_id or post.media_asset_id
+        if selected_media_asset_id != post.media_asset_id:
+            selected_asset = db.scalar(
+                select(MediaAsset).where(
+                    MediaAsset.id == selected_media_asset_id,
+                    MediaAsset.club_id == post.club_id,
+                    MediaAsset.team_id == post.team_id,
+                    MediaAsset.deleted_at.is_(None),
+                )
+            )
+            if not selected_asset:
+                raise HTTPException(422, "Das Spielerbild gehört nicht zu dieser Mannschaft")
+            if (
+                not selected_asset.active
+                or not selected_asset.available
+                or selected_asset.reserved_game_id is not None
+                or selected_asset.uses != 0
+            ):
+                raise HTTPException(409, "Das ausgewählte Spielerbild ist nicht mehr frei")
+
+    has_feed_variants = bool(
+        ((post.design_snapshot or {}).get("media") or {}).get("feed_variants")
+    )
+    feed_positions = None
+    story_variants = None
+    revise_feed = slot.media_kind == "feed"
+    if revise_feed:
+        feed_positions = [
+            slot.variant_number if has_feed_variants else slot.output_position
+        ]
+    else:
+        story_variants = [slot.variant_number]
+
+    try:
+        job = enqueue_ai_revision(
+            db,
+            post,
+            current,
+            post.version,
+            instruction,
+            revise_text=False,
+            revise_graphics=True,
+            revise_feed=revise_feed,
+            story_job_ids=[],
+            media_asset_id=selected_media_asset_id,
+            feed_positions=feed_positions,
+            story_variant_numbers=story_variants,
+            revision_mode=mode,
+            source_media_version_id=(
+                selected_version.id if mode == "targeted_edit" else None
+            ),
+            target_media_slot_id=slot.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    action = "Gezielte Bildänderung" if mode == "targeted_edit" else "Neugenerierung"
+    return redirect(
+        f"/generation-jobs/{job.id}",
+        f"{action} für {slot.label} wurde eingereiht",
+    )
+
+
 @router.post("/posts/{post_id}/recompose-logos")
 def recompose_post_media_logos(
     post_id: str,

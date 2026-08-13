@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
@@ -6,14 +7,19 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from app import admin_routes
+from app.config import Settings
 from app.models import (
     AccountType,
     AiPromptDispatch,
+    Club,
     Game,
     GenerationJob,
     GenerationJobStatus,
     GenerationJobType,
     InstagramPage,
+    LogoAsset,
+    MediaAsset,
+    PlanProfile,
     PromptStatus,
     PromptTemplate,
     Role,
@@ -149,6 +155,9 @@ def test_platform_prompt_history_filters_exact_prompts_and_blocks_club_user(db):
                 model="image-model",
                 prompt_checksum="b" * 64,
                 rendered_prompt=image_secret,
+                reference_images=[
+                    {"role": "player", "media_asset_id": "protected-player-reference"}
+                ],
                 attempt_number=1,
                 call_index=1,
                 status="completed",
@@ -175,6 +184,22 @@ def test_platform_prompt_history_filters_exact_prompts_and_blocks_club_user(db):
     assert image_secret not in html
     assert team.display_name in html
 
+    with platform_scope(actor.id):
+        image_response = platform_routes.ai_generation_prompts(
+            request("/platform/ai-generations"),
+            club_id=job.club_id,
+            prompt_kind="image",
+            status="completed",
+            limit=100,
+            current=actor,
+            db=db,
+        )
+    image_html = image_response.body.decode("utf-8")
+    image_dispatch = db.query(AiPromptDispatch).filter_by(prompt_kind="image").one()
+    assert "An die KI gesendete Bilder (1)" in image_html
+    assert "Spielerbild" in image_html
+    assert f"/platform/ai-generations/{image_dispatch.id}/references/0" in image_html
+
     with pytest.raises(HTTPException) as denied:
         platform_routes.ai_generation_prompts(
             request("/platform/ai-generations"),
@@ -182,6 +207,130 @@ def test_platform_prompt_history_filters_exact_prompts_and_blocks_club_user(db):
             db=db,
         )
     assert denied.value.status_code == 403
+
+
+def test_prompt_reference_image_is_platform_only_and_tenant_bound(db, tmp_path, monkeypatch):
+    team, game, club_user, job = graph(db)
+    actor = platform_admin(db)
+    upload_root = tmp_path / "uploads"
+    media_root = tmp_path / "external"
+    generated_root = tmp_path / "generated"
+    image_path = upload_root / "players" / "reference.png"
+    image_path.parent.mkdir(parents=True)
+    media_root.mkdir()
+    generated_root.mkdir()
+    image_path.write_bytes(b"protected-image-bytes")
+    asset = MediaAsset(
+        club_id=job.club_id,
+        team_id=team.id,
+        storage_kind="upload",
+        relative_path="players/reference.png",
+        filename="reference.png",
+        mime_type="image/png",
+        size=image_path.stat().st_size,
+        width=1080,
+        height=1350,
+        checksum="c" * 64,
+        mtime=datetime.now(timezone.utc),
+        uploaded_by=club_user.id,
+        active=True,
+        available=True,
+    )
+    dispatch = AiPromptDispatch(
+        club_id=job.club_id,
+        generation_job_id=job.id,
+        team_id=team.id,
+        game_id=game.id,
+        prompt_kind="image",
+        post_type="announcement",
+        media_kind="feed",
+        provider="openai",
+        model="image-model",
+        prompt_checksum="d" * 64,
+        rendered_prompt="Geschützter Bildprompt",
+        reference_images=[],
+        attempt_number=1,
+        call_index=1,
+        status="completed",
+        idempotency_key="protected-reference-route",
+    )
+    db.add_all([asset, dispatch])
+    db.flush()
+    dispatch.reference_images = [{"role": "player", "media_asset_id": asset.id}]
+    db.commit()
+    monkeypatch.setattr(
+        platform_routes,
+        "get_settings",
+        lambda: Settings(
+            upload_root=upload_root,
+            media_root=media_root,
+            generated_root=generated_root,
+        ),
+    )
+
+    with pytest.raises(HTTPException) as denied:
+        platform_routes.ai_generation_reference_image(
+            dispatch.id,
+            0,
+            current=club_user,
+            db=db,
+        )
+    assert denied.value.status_code == 403
+
+    with system_scope("Fremde Bildreferenz für Isolationstest anlegen"):
+        profile = db.query(PlanProfile).first()
+        other_club = Club(
+            name="Anderer Verein",
+            short_name="AV",
+            slug="anderer-verein-prompt-test",
+            status="ACTIVE",
+            timezone="Europe/Berlin",
+            plan_profile_id=profile.id,
+        )
+        db.add(other_club)
+        db.flush()
+        foreign_logo = LogoAsset(
+            club_id=other_club.id,
+            logo_type="opponent",
+            display_name="Fremdes Logo",
+            normalized_name="fremdes-logo",
+            original_path="foreign/logo.png",
+            original_filename="logo.png",
+            mime_type="image/png",
+            size=100,
+            width=100,
+            height=100,
+            checksum="e" * 64,
+            active=True,
+            uploaded_by=actor.id,
+        )
+        db.add(foreign_logo)
+        db.flush()
+        dispatch.reference_images = [
+            {"role": "opponent_logo", "logo_asset_id": foreign_logo.id}
+        ]
+        db.commit()
+    with platform_scope(actor.id), pytest.raises(HTTPException) as cross_tenant:
+        platform_routes.ai_generation_reference_image(
+            dispatch.id,
+            0,
+            current=actor,
+            db=db,
+        )
+    assert cross_tenant.value.status_code == 404
+
+    dispatch.reference_images = [{"role": "player", "media_asset_id": asset.id}]
+    db.commit()
+    with platform_scope(actor.id):
+        response = platform_routes.ai_generation_reference_image(
+            dispatch.id,
+            0,
+            current=actor,
+            db=db,
+        )
+    assert response.status_code == 200
+    assert Path(response.path).resolve() == image_path.resolve()
+    assert response.headers["cache-control"] == "private, no-store"
 
 
 def test_existing_prompt_can_be_opened_and_saved_as_new_version(db):

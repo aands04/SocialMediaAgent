@@ -220,7 +220,9 @@ def test_due_generation_cycle_does_not_wait_for_next_provider_poll(db):
 
 
 def test_automatic_planner_queues_one_complete_matchday_bundle(db):
-    now = datetime.now(timezone.utc)
+    # Keep both fixtures on the same Europe/Berlin matchday independent of
+    # the wall-clock time at which the suite happens to run.
+    now = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
     first, first_game = _base(db, now)
     first.rules = {
         **first.rules,
