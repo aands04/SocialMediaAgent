@@ -1,5 +1,6 @@
 import json
 import time
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,16 @@ from app.tenancy.state import system_scope, tenant_scope
 
 log = structlog.get_logger()
 settings = get_settings()
+
+
+def _result_payload(result):
+    """Return a JSON-safe mapping for regular and slots-based result objects."""
+
+    if result is None:
+        return None
+    if is_dataclass(result) and not isinstance(result, type):
+        return asdict(result)
+    return result.__dict__
 
 
 def _automatic_scheduler_enabled(settings: Settings) -> bool:
@@ -155,7 +166,7 @@ def run():
                     if creative_profile_result.profiles_built:
                         log.info(
                             "creative_profiles_rebuilt",
-                            **creative_profile_result.__dict__,
+                            **_result_payload(creative_profile_result),
                         )
                 except Exception as exc:
                     # Creative Intelligence ist eine optionale Verfeinerung.
@@ -297,9 +308,7 @@ def run():
                 else None
             ),
             "creative_profile_cycle": (
-                creative_profile_result.__dict__
-                if creative_profile_result is not None
-                else None
+                _result_payload(creative_profile_result)
             ),
         }
         temporary = settings.log_root / "worker-heartbeat.tmp"

@@ -1,7 +1,28 @@
 import pytest
 
 from app.config import Settings
-from app.worker import _automatic_scheduler_enabled, _validate_worker_environment
+from app.creative.scheduler import CreativeProfileCycleResult
+from app.worker import (
+    _automatic_scheduler_enabled,
+    _result_payload,
+    _validate_worker_environment,
+)
+
+
+def test_slots_dataclass_worker_result_is_serializable():
+    result = CreativeProfileCycleResult(
+        clubs_checked=2,
+        clubs_skipped=1,
+        profiles_built=3,
+        failures=0,
+    )
+
+    assert _result_payload(result) == {
+        "clubs_checked": 2,
+        "clubs_skipped": 1,
+        "profiles_built": 3,
+        "failures": 0,
+    }
 
 
 def _settings(**overrides) -> Settings:
