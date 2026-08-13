@@ -352,6 +352,9 @@ def test_post_detail_uses_one_media_catalog_with_per_image_actions():
 
     assert source.count("Medien für die Veröffentlichung") == 1
     assert "Medienausgaben und Versionen" not in source
+    assert "Dieses Karussell enthält genau" in source
+    assert "publication.selected_version" in source
+    assert "aktuell eingeplant" in source
     assert "/ai-edit" in source
     assert "Dieses Bild gezielt ändern" in source
     assert "Dieses Bild komplett neu erstellen" in source

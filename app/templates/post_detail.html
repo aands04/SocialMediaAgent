@@ -132,21 +132,24 @@
 {% if media_catalog %}
 <section id="media" class="publication-media-section">
   <h2>Medien für die Veröffentlichung</h2>
-  <p>Jedes Bild wird genau einmal angezeigt. Du kannst eine Ausgabe gezielt ändern, vollständig neu erstellen oder eine ältere Version auswählen.</p>
+  <p>Hier siehst du ausschließlich die Bilder, die aktuell zur Veröffentlichung eingeplant sind. Alternative Entwürfe findest du direkt beim jeweiligen Bild.</p>
   {% for media_kind in ['feed', 'story'] %}
   {% set kind_entries=media_catalog|selectattr('slot.media_kind','equalto',media_kind)|list %}
   {% if kind_entries %}
   <h3>{% if media_kind == 'feed' %}Feed und Karussellpositionen{% else %}Storys{% endif %}</h3>
+  {% if media_kind == 'feed' and aggregate_bundle %}<p class="publication-count-note"><strong>Dieses Karussell enthält genau {{kind_entries|length}} Bilder.</strong> Nur die grün markierten Karten werden veröffentlicht; weitere Entwürfe sind jeweils unter der passenden Position auswählbar.</p>{% endif %}
   <div class="media-version-grid">
   {% for entry in kind_entries %}
     {% set slot=entry.slot %}
-    {% set selected=entry.versions|selectattr('id','equalto',slot.selected_version_id)|first %}
+    {% set publication=entry.publication %}
+    {% set selected=publication.selected_version %}
+    {% set publication_post=job_posts.get(publication.job.id,item) %}
     {% set member_asset=current_media_assets_by_post.get(entry.post.id) %}
     {% set alternatives=alternative_media_assets_by_post.get(entry.post.id,[]) %}
-    <article class="media-version-card">
+    <article class="media-version-card publication-media-card" data-publication-kind="{{publication.kind}}"{% if publication.position %} data-publication-position="{{publication.position}}"{% endif %}>
       <header>
-        <div><strong>{{slot.label}}</strong>{% if entry.team %}<small>{{entry.team.display_name}}</small>{% endif %}</div>
-        <span class="badge">{{slot.media_kind|upper}} · Variante {{slot.variant_number}}</span>
+        <div><strong>{{publication.label}}</strong>{% if entry.team %}<small>{{entry.team.display_name}}</small>{% endif %}</div>
+        <span class="selection-label">&#10003; {{publication.state}}</span>
       </header>
       {% if selected %}
       <div class="media-version-state"><span class="badge">{% if slot.selection_mode == 'auto_latest' %}Automatisch neueste Version{% else %}Manuell festgelegt{% endif %}</span></div>
@@ -159,6 +162,28 @@
       {% endif %}
       <img src="/posts/{{entry.post.id}}/versions/{{selected.id}}" alt="{{slot.label}}, ausgewählte Version {{selected.version_number}}">
       <p><strong>Ausgewählt: Version {{selected.version_number}}</strong> · {{selected.width}} × {{selected.height}} · {{selected.created_at|berlin}}</p>
+      {% if can_edit and publication.choices|length > 1 and publication.job.status.value != 'published' %}
+      <details class="publication-variant-picker">
+        <summary>Andere vorhandene Variante für diese Position wählen</summary>
+        <form method="post" action="/posts/{{publication_post.id}}/publications/{{publication.job.id}}/variant">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <input type="hidden" name="post_version" value="{{publication_post.version}}">
+          <input type="hidden" name="job_version" value="{{publication.job.version}}">
+          {% if publication.media_item %}<input type="hidden" name="publication_media_item_id" value="{{publication.media_item.id}}">{% endif %}
+          <label>Vorhandener Entwurf
+            <select name="slot_id" required>
+              {% for choice in publication.choices %}
+              <option value="{{choice.slot.id}}" {% if choice.slot.id==publication.current_slot_id %}selected{% endif %}>
+                {{choice.slot.label}}{% if choice.slot.id==publication.current_slot_id %} – aktuell eingeplant{% endif %}
+              </option>
+              {% endfor %}
+            </select>
+          </label>
+          <button class="secondary">Für diese Position übernehmen</button>
+          <small>Diese Entwürfe sind nicht zusätzliche Karussellbilder. Du ersetzt damit nur die oben genannte Position; es wird kein neuer KI-Aufruf gestartet.</small>
+        </form>
+      </details>
+      {% endif %}
       {% if can_generate and not is_manual %}
       <div class="single-media-actions">
         <details>

@@ -2257,13 +2257,46 @@ def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_p
             .one()
             .version
         )
+        # Reproduce a legacy contribution with an additional feed candidate
+        # stored as a separate output position. It must remain selectable but
+        # must not look like a third carousel slide.
+        member = db.get(Post, member_id)
+        alternative_path = tmp_path / "combined-feed-alternative.png"
+        Image.new("RGB", (1080, 1350), "green").save(alternative_path)
+        snapshot = dict(member.design_snapshot or {})
+        snapshot["media"] = {
+            "feed_variants": [
+                {
+                    "path": member.feed_path,
+                    "output_position": 1,
+                    "variant_number": 1,
+                    "label": "Feed-Variante 1",
+                },
+                {
+                    "path": str(alternative_path),
+                    "output_position": 2,
+                    "variant_number": 1,
+                    "label": "Feed-Bild 2",
+                },
+            ]
+        }
+        member.design_snapshot = snapshot
+        db.commit()
 
     response = client.get(f"/posts/{primary_id}")
 
     assert response.status_code == 200
     assert "Gemeinsamer Spieltagsbeitrag" in response.text
-    assert response.text.count("<div><strong>Feed-Bild") == 2
-    assert response.text.count("STORY · Variante") == 4
+    assert response.text.count('data-publication-kind="carousel"') == 2
+    assert "Karussellbild 1 von 2" in response.text
+    assert "Karussellbild 2 von 2" in response.text
+    assert response.text.count("Wird in diesem Karussell veröffentlicht") == 2
+    assert "Dieses Karussell enthält genau 2 Bilder." in response.text
+    assert "Andere vorhandene Variante für diese Position wählen" in response.text
+    assert "Feed-Bild 2" in response.text
+    assert "<strong>Feed-Bild 2</strong>" not in response.text
+    assert response.text.count('data-publication-kind="story"') == 4
+    assert response.text.count("Wird als Story veröffentlicht") == 4
     assert response.text.count("Dieses Bild gezielt") == 6
     assert response.text.count("Dieses Bild komplett neu erstellen") == 6
     assert response.text.count("Zeitpunkt ändern") == 5
