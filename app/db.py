@@ -92,13 +92,14 @@ def _tenant_write_guard(session, _flush_context, _instances):
     from app.models import (
         AccountType,
         AuditLog,
+        CreativeFeedbackEvent,
         GeneratedMediaVersion,
         PostTextVersion,
         User,
     )
     from app.tenancy.state import active_scope
 
-    immutable_versions = (GeneratedMediaVersion, PostTextVersion)
+    immutable_versions = (GeneratedMediaVersion, PostTextVersion, CreativeFeedbackEvent)
     for item in session.dirty:
         if isinstance(item, immutable_versions) and session.is_modified(
             item, include_collections=False
@@ -112,6 +113,9 @@ def _tenant_write_guard(session, _flush_context, _instances):
                 "Historische Medien- und Textversionen sind unveränderlich"
                 + (f" ({', '.join(changed)})" if changed else "")
             )
+
+    if any(isinstance(item, CreativeFeedbackEvent) for item in session.deleted):
+        raise PermissionError("Creative-Feedback wird nur durch Korrekturen ergaenzt")
 
     scope = active_scope()
     changed = session.new.union(session.dirty).union(session.deleted)

@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.channels.delivery import ChannelDeliveryError, run_cross_channel_delivery_cycle
 from app.config import Settings, get_settings
+from app.creative.scheduler import run_creative_profile_cycle
 from app.db import SessionLocal
 from app.games.automatic import run_automatic_fussball_cycle, run_due_generation_cycle
 from app.jobs.generation import claim_next, process_generation_job
@@ -135,6 +136,7 @@ def run():
         live_delivery_result = None
         fussball_result = None
         generation_planning_result = None
+        creative_profile_result = None
         with SessionLocal() as db:
             if loops == 1 or loops % 240 == 0:
                 try:
@@ -147,6 +149,22 @@ def run():
                 except Exception as exc:
                     db.rollback()
                     log.error("direct_upload_cleanup_failed", error=str(exc))
+            if loops == 1 or loops % 240 == 0:
+                try:
+                    creative_profile_result = run_creative_profile_cycle(db)
+                    if creative_profile_result.profiles_built:
+                        log.info(
+                            "creative_profiles_rebuilt",
+                            **creative_profile_result.__dict__,
+                        )
+                except Exception as exc:
+                    # Creative Intelligence ist eine optionale Verfeinerung.
+                    # Sie darf den normalen Worker niemals anhalten.
+                    db.rollback()
+                    log.warning(
+                        "creative_profile_cycle_blocked",
+                        error_type=type(exc).__name__,
+                    )
             if fussball_enabled:
                 fussball_result = run_automatic_fussball_cycle(db, settings)
                 # Provider polling may intentionally happen only once per day.
@@ -276,6 +294,11 @@ def run():
             "generation_planning_cycle": (
                 generation_planning_result.__dict__
                 if generation_planning_result is not None
+                else None
+            ),
+            "creative_profile_cycle": (
+                creative_profile_result.__dict__
+                if creative_profile_result is not None
                 else None
             ),
         }

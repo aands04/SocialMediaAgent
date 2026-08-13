@@ -159,3 +159,13 @@ main nav{position:static;top:auto;bottom:auto;width:auto;overflow:visible;border
 body:has(.app-nav)>.site-footer{margin-left:240px}
 @media(max-width:800px){.legal-page__header{padding:22px 20px}.legal-page section{padding:20px}.legal-page__nav{display:grid;grid-template-columns:1fr 1fr}body:has(.app-nav)>.site-footer{margin-left:0}}
 @media(max-width:480px){.legal-page__nav{grid-template-columns:1fr}.site-footer{align-items:center;flex-direction:column}}
+.creative-page { max-width: 1180px; margin: 0 auto; }
+.creative-profile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+.creative-profile-card { border: 1px solid #d8e0ef; border-radius: .75rem; padding: 1rem; background: #fff; }
+.creative-profile-card h3 { margin-top: 0; }
+.onboarding-progress { display: grid; grid-template-columns: repeat(11, minmax(28px, 1fr)); gap: .35rem; margin: 1rem 0; }
+.onboarding-progress span { display: grid; place-items: center; min-height: 2rem; border-radius: 999px; background: #e8edf5; color: #172342; font-weight: 700; }
+.onboarding-progress span.done { background: #d9f5df; color: #0f6b2c; }
+.onboarding-progress span.current { outline: 3px solid #2757d7; background: #2757d7; color: #fff; }
+.danger-zone { border-color: #e6b7b7; }
+@media (max-width: 760px) { .onboarding-progress { grid-template-columns: repeat(6, 1fr); } }

@@ -308,6 +308,7 @@ class ResolvedPrompt:
     override_checksum: str | None = None
     branding: dict | None = None
     branding_compiler_version: str | None = None
+    creative_profile: dict | None = None
 
     def snapshot(self) -> dict:
         # Prompt bodies are platform intellectual property. A post only needs an
@@ -332,6 +333,10 @@ class ResolvedPrompt:
             "override_checksum": self.override_checksum,
             "branding": self.branding or {},
             "branding_compiler_version": self.branding_compiler_version,
+            # Only identifiers, confidence and checksums are persisted in
+            # tenant-owned snapshots. The protected supplement itself stays in
+            # AiPromptDispatch and remains PlatformAdmin-only.
+            "creative_profile": self.creative_profile or {},
         }
 
 
@@ -629,6 +634,35 @@ def builtin_prompt(
     )
 
 
+def _apply_creative_directive(
+    db: Session,
+    prompt: ResolvedPrompt,
+    facts: dict,
+) -> ResolvedPrompt:
+    club_id = str(facts.get("club_id") or "").strip()
+    if not club_id:
+        return prompt
+    try:
+        from app.creative.director import build_creative_directive
+
+        directive = build_creative_directive(
+            db,
+            club_id=club_id,
+            actor_user_id=str(facts.get("actor_user_id") or "system"),
+            modality=prompt.prompt_kind,
+            content_type=prompt.post_type,
+        )
+    except Exception:
+        return prompt
+    if not directive.supplement:
+        return prompt
+    return replace(
+        prompt,
+        rendered=prompt.rendered + "\n\n" + directive.supplement,
+        creative_profile=directive.snapshot,
+    )
+
+
 def resolve_prompt(
     db: Session,
     name: str,
@@ -660,7 +694,7 @@ def resolve_prompt(
         if not club_id:
             return resolved
         branding = branding_snapshot(db, club_id)
-        return replace(
+        resolved = replace(
             resolved,
             rendered=resolved.rendered
             + "\n\n"
@@ -674,6 +708,7 @@ def resolve_prompt(
             branding=branding,
             branding_compiler_version=BRANDING_COMPILER_VERSION,
         )
+        return _apply_creative_directive(db, resolved, facts)
     context = prompt_context(facts, media_kind, item.style_direction)
     rendered = render_body(item.prompt_body, context)
     club_id = str(facts.get("club_id") or "").strip()
@@ -749,7 +784,7 @@ def resolve_prompt(
             rendered = image_safety_prefix(facts) + "\n" + rendered
     else:
         rendered = TEXT_SAFETY_PREFIX + "\n" + rendered + "\n\n" + TEXT_FINAL_OUTPUT_INSTRUCTION
-    return ResolvedPrompt(
+    resolved = ResolvedPrompt(
         name=item.name,
         version=item.version,
         prompt_kind=item.prompt_kind,
@@ -768,6 +803,7 @@ def resolve_prompt(
         branding=branding,
         branding_compiler_version=(BRANDING_COMPILER_VERSION if branding else None),
     )
+    return _apply_creative_directive(db, resolved, facts)
 
 
 VARIANT_DIRECTIONS = (

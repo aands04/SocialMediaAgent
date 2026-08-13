@@ -5333,6 +5333,18 @@ def choose_post_media_version(
     require(current, db, "edit_post", post.team_id)
     if post.version != post_version:
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    slot = db.scalar(
+        select(GeneratedMediaSlot).where(
+            GeneratedMediaSlot.id == slot_id,
+            GeneratedMediaSlot.club_id == post.club_id,
+            GeneratedMediaSlot.post_id == post.id,
+        )
+    )
+    previous = (
+        db.get(GeneratedMediaVersion, slot.selected_version_id)
+        if slot and slot.selected_version_id
+        else None
+    )
     try:
         selected = select_media_version(db, post, slot_id, version_id)
     except MediaVersionError as exc:
@@ -5346,6 +5358,17 @@ def choose_post_media_version(
         post.team_id,
         {"post_id": post.id, "slot_id": slot_id, "version": selected.version_number},
     )
+    if slot is not None:
+        from app.creative.hooks import record_media_selection
+
+        record_media_selection(
+            db,
+            post=post,
+            actor_user_id=current.id,
+            slot=slot,
+            selected=selected,
+            previous=previous,
+        )
     db.commit()
     return redirect(f"/posts/{post.id}", "Medienversion ausgewählt; erneute Freigabe erforderlich")
 
@@ -5367,6 +5390,18 @@ def choose_post_media_auto_latest(
     require(current, db, "edit_post", post.team_id)
     if post.version != post_version:
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    slot = db.scalar(
+        select(GeneratedMediaSlot).where(
+            GeneratedMediaSlot.id == slot_id,
+            GeneratedMediaSlot.club_id == post.club_id,
+            GeneratedMediaSlot.post_id == post.id,
+        )
+    )
+    previous = (
+        db.get(GeneratedMediaVersion, slot.selected_version_id)
+        if slot and slot.selected_version_id
+        else None
+    )
     try:
         selected = select_latest_media_automatically(db, post, slot_id)
     except MediaVersionError as exc:
@@ -5380,6 +5415,17 @@ def choose_post_media_auto_latest(
         post.team_id,
         {"post_id": post.id, "selected_version": selected.version_number},
     )
+    if slot is not None and (previous is None or previous.id != selected.id):
+        from app.creative.hooks import record_media_selection
+
+        record_media_selection(
+            db,
+            post=post,
+            actor_user_id=current.id,
+            slot=slot,
+            selected=selected,
+            previous=previous,
+        )
     db.commit()
     return redirect(
         f"/posts/{post.id}",
@@ -5429,6 +5475,22 @@ def choose_publication_media_variant(
     if not slot:
         raise HTTPException(422, "Ungültige Medienvariante")
     require(current, db, "edit_post", slot.team_id)
+    previous_version_id = None
+    if publication_media_item_id:
+        previous_version_id = db.scalar(
+            select(PublicationMediaItem.media_version_id).where(
+                PublicationMediaItem.id == publication_media_item_id,
+                PublicationMediaItem.club_id == post.club_id,
+                PublicationMediaItem.publication_job_id == job.id,
+            )
+        )
+    elif job.media_version_id:
+        previous_version_id = job.media_version_id
+    previous = (
+        db.get(GeneratedMediaVersion, previous_version_id)
+        if previous_version_id
+        else None
+    )
     try:
         selected = select_publication_media_variant(
             db,
@@ -5456,6 +5518,18 @@ def choose_publication_media_variant(
             "publication_media_item_id": publication_media_item_id or None,
         },
     )
+    feedback_post = db.get(Post, slot.post_id)
+    if feedback_post is not None and (previous is None or previous.id != selected.id):
+        from app.creative.hooks import record_media_selection
+
+        record_media_selection(
+            db,
+            post=feedback_post,
+            actor_user_id=current.id,
+            slot=slot,
+            selected=selected,
+            previous=previous,
+        )
     db.commit()
     return redirect(
         f"/posts/{post.id}",
@@ -5480,6 +5554,11 @@ def choose_post_text_version(
     require(current, db, "edit_post", post.team_id)
     if post.version != post_version:
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    previous = (
+        db.get(PostTextVersion, post.selected_text_version_id)
+        if post.selected_text_version_id
+        else None
+    )
     try:
         selected = select_text_version(db, post, version_id)
     except MediaVersionError as exc:
@@ -5493,6 +5572,16 @@ def choose_post_text_version(
         post.team_id,
         {"post_id": post.id, "version": selected.version_number},
     )
+    if previous is None or previous.id != selected.id:
+        from app.creative.hooks import record_text_selection
+
+        record_text_selection(
+            db,
+            post=post,
+            actor_user_id=current.id,
+            selected=selected,
+            previous=previous,
+        )
     db.commit()
     return redirect(f"/posts/{post.id}", "Textversion ausgewählt; erneute Freigabe erforderlich")
 
@@ -5513,6 +5602,11 @@ def choose_post_text_auto_latest(
     require(current, db, "edit_post", post.team_id)
     if post.version != post_version:
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
+    previous = (
+        db.get(PostTextVersion, post.selected_text_version_id)
+        if post.selected_text_version_id
+        else None
+    )
     try:
         selected = select_latest_text_automatically(db, post)
     except MediaVersionError as exc:
@@ -5526,6 +5620,16 @@ def choose_post_text_auto_latest(
         post.team_id,
         {"selected_version": selected.version_number},
     )
+    if previous is None or previous.id != selected.id:
+        from app.creative.hooks import record_text_selection
+
+        record_text_selection(
+            db,
+            post=post,
+            actor_user_id=current.id,
+            selected=selected,
+            previous=previous,
+        )
     db.commit()
     return redirect(
         f"/posts/{post.id}",
@@ -6104,6 +6208,15 @@ def reject_post(
         {"reason": reason or None},
     )
     mark_post_rejected(db, item.id)
+    from app.creative.hooks import record_post_decision
+
+    record_post_decision(
+        db,
+        post=item,
+        actor_user_id=current.id,
+        action="rejected",
+        free_text=reason or None,
+    )
     db.commit()
     return redirect(f"/posts/{item.id}", "Beitrag abgelehnt")
 

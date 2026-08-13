@@ -2150,6 +2150,7 @@ class AiPromptDispatch(Base):
     prompt_version: Mapped[int | None] = mapped_column(Integer)
     prompt_checksum: Mapped[str] = mapped_column(String(64), index=True)
     rendered_prompt: Mapped[str] = mapped_column(Text)
+    creative_profile_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     attempt_number: Mapped[int] = mapped_column(Integer, default=1)
     call_index: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(30), default="dispatched", index=True)
@@ -2159,6 +2160,340 @@ class AiPromptDispatch(Base):
         DateTime(timezone=True), default=now, index=True
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CreativeFeedbackEvent(Base):
+    """Append-only, tenant-scoped creative feedback ledger."""
+
+    __tablename__ = "creative_feedback_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id", "idempotency_key", name="uq_creative_feedback_idempotency"
+        ),
+        CheckConstraint(
+            "modality IN ('image', 'text')", name="ck_creative_feedback_modality"
+        ),
+        CheckConstraint(
+            "action IN ('selected', 'published', 'approved', 'rejected', "
+            "'regenerated', 'reverted', 'manually_edited', 'replaced', 'skipped')",
+            name="ck_creative_feedback_action",
+        ),
+        CheckConstraint(
+            "source IN ('onboarding_explicit', 'onboarding_calibration', 'normal_usage', "
+            "'explicit_feedback', 'platform_admin_override')",
+            name="ck_creative_feedback_source",
+        ),
+        CheckConstraint(
+            "sentiment IS NULL OR sentiment IN ('positive', 'negative', 'neutral')",
+            name="ck_creative_feedback_sentiment",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
+    )
+    team_id: Mapped[str | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="SET NULL"), index=True
+    )
+    post_id: Mapped[str | None] = mapped_column(
+        ForeignKey("posts.id", ondelete="SET NULL"), index=True
+    )
+    generated_media_slot_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generated_media_slots.id", ondelete="SET NULL"), index=True
+    )
+    media_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generated_media_versions.id", ondelete="SET NULL"), index=True
+    )
+    text_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("post_text_versions.id", ondelete="SET NULL"), index=True
+    )
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="SET NULL"), index=True
+    )
+    user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    modality: Mapped[str] = mapped_column(String(10), index=True)
+    content_type: Mapped[str] = mapped_column(String(30), index=True)
+    action: Mapped[str] = mapped_column(String(30), index=True)
+    source: Mapped[str] = mapped_column(String(40), index=True)
+    sentiment: Mapped[str | None] = mapped_column(String(10), index=True)
+    reason_codes: Mapped[list] = mapped_column(JSON, default=list)
+    free_text: Mapped[str | None] = mapped_column(Text)
+    traits_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    event_metadata: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+    correction_of_id: Mapped[str | None] = mapped_column(
+        ForeignKey("creative_feedback_events.id", ondelete="RESTRICT"), index=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CreativePreferenceProfile(Base, Timestamped):
+    """A learned profile version; older versions remain traceable."""
+
+    __tablename__ = "creative_preference_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "modality",
+            "content_type",
+            "profile_version",
+            name="uq_creative_preference_profile_version",
+        ),
+        CheckConstraint(
+            "modality IN ('image', 'text')", name="ck_creative_profile_modality"
+        ),
+        CheckConstraint(
+            "status IN ('active', 'superseded', 'archived')",
+            name="ck_creative_profile_status",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1", name="ck_creative_profile_confidence"
+        ),
+        CheckConstraint("sample_count >= 0", name="ck_creative_profile_sample_count"),
+        CheckConstraint("profile_version > 0", name="ck_creative_profile_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
+    )
+    modality: Mapped[str] = mapped_column(String(10), index=True)
+    content_type: Mapped[str] = mapped_column(String(30), index=True)
+    profile_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    preferences: Mapped[dict] = mapped_column(JSON, default=dict)
+    avoidances: Mapped[dict] = mapped_column(JSON, default=dict)
+    confidence: Mapped[float] = mapped_column(Numeric(5, 4), default=0)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    source_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    learner_version: Mapped[str] = mapped_column(String(40), default="deterministic-v1")
+    generated_by: Mapped[str] = mapped_column(
+        String(80), default="deterministic_preference_learner"
+    )
+    build_reason: Mapped[str] = mapped_column(String(40), default="threshold")
+    last_feedback_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CreativeExampleReference(Base, Timestamped):
+    __tablename__ = "creative_example_references"
+    __table_args__ = (
+        CheckConstraint(
+            "modality IN ('image', 'text')", name="ck_creative_example_modality"
+        ),
+        CheckConstraint(
+            "sentiment IN ('positive', 'negative')", name="ck_creative_example_sentiment"
+        ),
+        CheckConstraint(
+            "(modality = 'image' AND media_version_id IS NOT NULL AND text_version_id IS NULL) "
+            "OR (modality = 'text' AND text_version_id IS NOT NULL AND media_version_id IS NULL)",
+            name="ck_creative_example_reference",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
+    )
+    profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("creative_preference_profiles.id", ondelete="SET NULL"), index=True
+    )
+    modality: Mapped[str] = mapped_column(String(10), index=True)
+    content_type: Mapped[str] = mapped_column(String(30), index=True)
+    sentiment: Mapped[str] = mapped_column(String(10), index=True)
+    media_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generated_media_versions.id", ondelete="CASCADE"), index=True
+    )
+    text_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("post_text_versions.id", ondelete="CASCADE"), index=True
+    )
+    rank: Mapped[int] = mapped_column(Integer, default=0)
+    traits: Mapped[dict] = mapped_column(JSON, default=dict)
+    score: Mapped[float] = mapped_column(Numeric(8, 4), default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+
+class CreativeProfileOverride(Base, Timestamped):
+    __tablename__ = "creative_profile_overrides"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "modality",
+            "content_type",
+            "override_version",
+            name="uq_creative_profile_override_version",
+        ),
+        CheckConstraint(
+            "modality IN ('image', 'text')", name="ck_creative_override_modality"
+        ),
+        CheckConstraint("override_version > 0", name="ck_creative_override_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
+    )
+    modality: Mapped[str] = mapped_column(String(10), index=True)
+    content_type: Mapped[str] = mapped_column(String(30), index=True)
+    override_version: Mapped[int] = mapped_column(Integer)
+    preferences: Mapped[dict] = mapped_column(JSON, default=dict)
+    avoidances: Mapped[dict] = mapped_column(JSON, default=dict)
+    trait: Mapped[str | None] = mapped_column(String(80), index=True)
+    override_type: Mapped[str] = mapped_column(String(30), default="structured_profile")
+    override_value: Mapped[dict] = mapped_column(JSON, default=dict)
+    reason: Mapped[str | None] = mapped_column(String(500))
+    notes: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+
+
+class CreativeRecipe(Base, Timestamped):
+    """Versioned platform-wide creative recipe without tenant data."""
+
+    __tablename__ = "creative_recipes"
+    __table_args__ = (
+        UniqueConstraint("key", "recipe_version", name="uq_creative_recipe_version"),
+        CheckConstraint(
+            "modality IN ('image', 'text')", name="ck_creative_recipe_modality"
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'active', 'archived')", name="ck_creative_recipe_status"
+        ),
+        CheckConstraint("recipe_version > 0", name="ck_creative_recipe_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    key: Mapped[str] = mapped_column(String(100), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str | None] = mapped_column(Text)
+    modality: Mapped[str] = mapped_column(String(10), index=True)
+    content_type: Mapped[str] = mapped_column(String(30), index=True)
+    recipe_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    traits: Mapped[dict] = mapped_column(JSON, default=dict)
+    constraints: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VisualTraitAnalysisCache(Base, Timestamped):
+    __tablename__ = "visual_trait_analysis_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id", "checksum", "analyzer_version", name="uq_visual_trait_analysis_cache"
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'failed')",
+            name="ck_visual_trait_analysis_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
+    )
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    media_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="SET NULL"), index=True
+    )
+    media_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generated_media_versions.id", ondelete="SET NULL"), index=True
+    )
+    analyzer_version: Mapped[str] = mapped_column(String(40))
+    provider: Mapped[str] = mapped_column(String(80), default="openai")
+    model: Mapped[str] = mapped_column(String(120))
+    traits: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    error_summary: Mapped[str | None] = mapped_column(String(500))
+    usage_ledger_entry_id: Mapped[str | None] = mapped_column(
+        ForeignKey("usage_ledger_entries.id", ondelete="SET NULL")
+    )
+
+
+class ClubOnboardingSession(Base, Timestamped):
+    __tablename__ = "club_onboarding_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('not_started', 'in_progress', 'calibration_pending', "
+            "'completed', 'skipped')",
+            name="ck_club_onboarding_status",
+        ),
+        CheckConstraint(
+            "current_step >= 1 AND current_step <= 11", name="ck_club_onboarding_step"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="not_started", index=True)
+    current_step: Mapped[int] = mapped_column(Integer, default=1)
+    onboarding_version: Mapped[str] = mapped_column(String(20), default="1")
+    completed_steps: Mapped[list] = mapped_column(JSON, default=list)
+    answers: Mapped[dict] = mapped_column(JSON, default=dict)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    skipped_calibration_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    last_actor_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+
+class OnboardingCalibrationSample(Base, Timestamped):
+    __tablename__ = "onboarding_calibration_samples"
+    __table_args__ = (
+        UniqueConstraint(
+            "club_id",
+            "session_id",
+            "modality",
+            "content_type",
+            "sample_index",
+            name="uq_onboarding_calibration_sample",
+        ),
+        CheckConstraint(
+            "modality IN ('image', 'text')", name="ck_onboarding_sample_modality"
+        ),
+        CheckConstraint("sample_index > 0", name="ck_onboarding_sample_index"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(
+        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
+    )
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("club_onboarding_sessions.id", ondelete="CASCADE"), index=True
+    )
+    modality: Mapped[str] = mapped_column(String(10), index=True)
+    content_type: Mapped[str] = mapped_column(String(30), index=True)
+    recipe_key: Mapped[str] = mapped_column(String(100))
+    sample_index: Mapped[int] = mapped_column(Integer)
+    generation_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_jobs.id", ondelete="SET NULL"), index=True
+    )
+    media_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generated_media_versions.id", ondelete="SET NULL")
+    )
+    text_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("post_text_versions.id", ondelete="SET NULL")
+    )
+    rendered_text: Mapped[str | None] = mapped_column(Text)
+    preview_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    ranking: Mapped[int | None] = mapped_column(Integer)
+    feedback: Mapped[dict] = mapped_column(JSON, default=dict)
+    usage_ledger_entry_id: Mapped[str | None] = mapped_column(
+        ForeignKey("usage_ledger_entries.id", ondelete="SET NULL")
+    )
+    publishing_blocked: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class ProviderSnapshot(Base):
@@ -2305,7 +2640,7 @@ class UsageLedgerEntry(Base):
         ForeignKey("generation_jobs.id", ondelete="SET NULL"), index=True
     )
     post_id: Mapped[str | None] = mapped_column(ForeignKey("posts.id", ondelete="SET NULL"))
-    generation_type: Mapped[str] = mapped_column(String(20), index=True)
+    generation_type: Mapped[str] = mapped_column(String(40), index=True)
     provider: Mapped[str] = mapped_column(String(80))
     model: Mapped[str] = mapped_column(String(120))
     prompt_template_id: Mapped[str | None] = mapped_column(ForeignKey("prompt_templates.id"))

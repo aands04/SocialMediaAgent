@@ -23,6 +23,7 @@
   <a href="/platform/plans">Tarif- und Limitprofile</a>
   <a href="/prompts">Zentrale Promptvorlagen</a>
   <a href="/platform/ai-generations">KI-Generierungen</a>
+  <a href="/platform/creative-intelligence">Creative Intelligence</a>
   <a href="/platform/audit">Plattform-Audit</a>
   <a href="/platform/usage.csv">Verbrauch als CSV</a>
   <a href="/account/password">Passwort ändern</a>
@@ -40,6 +41,7 @@
   {% if user.role.value != 'viewer' %}<a href="/posts/manual/new">Beitrag manuell erstellen</a>{% endif %}
   {% if user.role.value == 'admin' %}<a href="/users">Benutzer & Rechte</a>{% endif %}
   {% if user.role.value == 'admin' %}<a href="/branding">Vereinsbranding</a>{% endif %}
+  {% if user.role.value == 'admin' %}<a href="/creative-intelligence">Gelernte Vorlieben</a>{% endif %}
   <a href="/account/password">Passwort ändern</a>
   <a href="/account/email">E-Mail-Adresse ändern</a>
   <form method="post" action="/logout"><button>Abmelden</button></form>

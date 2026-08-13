@@ -55,6 +55,49 @@ def _prompt_metadata(post: Post, media_kind: str) -> dict:
     }
 
 
+def _creative_traits(post: Post, modality: str) -> dict:
+    """Copy only structured, non-executable traits into immutable versions."""
+
+    snapshot = post.design_snapshot or {}
+    branding = snapshot.get("branding") or {}
+    image = branding.get("image") or snapshot.get("image_settings") or {}
+    text = branding.get("text") or snapshot.get("text_settings") or {}
+    source = image if modality == "image" else text
+    allowed = (
+        {
+            "graphic_style",
+            "image_effects",
+            "background_style",
+            "text_alignment",
+            "logo_placement",
+            "safe_margins",
+            "player_position",
+            "image_text_amount",
+            "player_background_ratio",
+            "dynamics",
+            "individualization",
+        }
+        if modality == "image"
+        else {"tone", "text_length", "emoji_usage", "cta_type"}
+    )
+    result = {
+        key: value
+        for key, value in source.items()
+        if key in allowed and isinstance(value, (str, int, float, bool, list))
+    }
+    prompt_profile = (snapshot.get("prompts") or {}).get("creative_profile") or {}
+    recipe = prompt_profile.get("recipe")
+    if isinstance(recipe, dict):
+        result.update(
+            {
+                str(key): value
+                for key, value in recipe.items()
+                if isinstance(value, (str, int, float, bool, list))
+            }
+        )
+    return result
+
+
 def _path_metadata(path_value: str, *, allow_missing: bool = False) -> dict:
     path = Path(path_value)
     try:
@@ -174,6 +217,7 @@ def register_media_version(
             "prompt_name": prompt.get("name"),
             "post_version": post.version,
             "media_kind": slot.media_kind,
+            "creative_traits": _creative_traits(post, "image"),
         },
         created_by=created_by,
         legacy_import=legacy_import,
@@ -215,7 +259,11 @@ def ensure_text_version(
         created_by=created_by,
         source=source,
         validation_status="valid",
-        metadata_json={"prompt_name": prompt.get("name"), "post_version": post.version},
+        metadata_json={
+            "prompt_name": prompt.get("name"),
+            "post_version": post.version,
+            "creative_traits": _creative_traits(post, "text"),
+        },
     )
     db.add(item)
     db.flush()
