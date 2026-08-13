@@ -4917,6 +4917,49 @@ def post_detail(
                 deduplicated[key] = entry
         media_catalog = list(deduplicated.values())
     catalog_by_slot_id = {entry["slot"].id: entry for entry in media_catalog}
+    catalog_entries_by_path: dict[str, list[dict]] = {}
+    for entry in media_catalog:
+        for version in entry["versions"]:
+            catalog_entries_by_path.setdefault(version.media_path, []).append(entry)
+
+    def publication_catalog_entry(
+        version: GeneratedMediaVersion | None,
+        *,
+        media_path: str | None = None,
+        preferred_post_id: str | None = None,
+    ) -> tuple[dict | None, GeneratedMediaVersion | None]:
+        """Resolve a frozen publication version to its tenant-visible source slot.
+
+        Older bundled contributions can contain an aggregate carousel slot on
+        the primary post as well as the original slot on the member post.  The
+        bytes are identical, but editing must happen on the member post.  The
+        path lookup deliberately prefers that member while retaining the exact
+        publication image as the displayed version.
+        """
+
+        path = version.media_path if version else media_path
+        candidates = catalog_entries_by_path.get(path or "", [])
+        if preferred_post_id:
+            preferred = next(
+                (entry for entry in candidates if entry["post"].id == preferred_post_id),
+                None,
+            )
+            if preferred:
+                display_version = next(
+                    (item for item in preferred["versions"] if item.media_path == path),
+                    None,
+                )
+                return preferred, display_version or version
+        direct = catalog_by_slot_id.get(version.slot_id) if version else None
+        if direct:
+            return direct, version
+        if candidates:
+            display_version = next(
+                (item for item in candidates[0]["versions"] if item.media_path == path),
+                None,
+            )
+            return candidates[0], display_version or version
+        return None, version
     catalog_groups: dict[tuple[str, str, int], list[dict]] = {}
     for entry in media_catalog:
         slot = entry["slot"]
@@ -4925,27 +4968,46 @@ def post_detail(
         )
     for entries in catalog_groups.values():
         entries.sort(key=lambda entry: entry["slot"].variant_number)
+    feed_choices_by_post: dict[str, list[dict]] = {}
+    for entry in media_catalog:
+        slot = entry["slot"]
+        if slot.media_kind == "feed":
+            feed_choices_by_post.setdefault(slot.post_id, []).append(entry)
+    for entries in feed_choices_by_post.values():
+        entries.sort(
+            key=lambda entry: (
+                entry["slot"].output_position,
+                entry["slot"].variant_number,
+                entry["slot"].label,
+            )
+        )
     publication_variant_choices: dict[str, list[dict]] = {}
     for job in jobs:
         rows = []
         if job.kind == "carousel":
             for media in carousel_items.get(job.id, []):
                 current_version = db.get(GeneratedMediaVersion, media.media_version_id)
-                current_entry = (
-                    catalog_by_slot_id.get(current_version.slot_id) if current_version else None
+                member = (
+                    bundle_posts[media.position - 1]
+                    if aggregate_bundle and media.position <= len(bundle_posts)
+                    else None
+                )
+                current_entry, display_version = publication_catalog_entry(
+                    current_version,
+                    media_path=media.media_path,
+                    preferred_post_id=member.id if member else None,
                 )
                 if current_entry:
                     current_slot = current_entry["slot"]
-                    choices = catalog_groups.get(
-                        (current_slot.post_id, "feed", current_slot.output_position), []
+                    choices = (
+                        feed_choices_by_post.get(member.id, [])
+                        if member
+                        else catalog_groups.get(
+                            (current_slot.post_id, "feed", current_slot.output_position), []
+                        )
                     )
                 else:
-                    member = (
-                        bundle_posts[media.position - 1]
-                        if media.position <= len(bundle_posts)
-                        else None
-                    )
-                    choices = catalog_groups.get((member.id, "feed", 1), []) if member else []
+                    choices = feed_choices_by_post.get(member.id, []) if member else []
                     current_slot = None
                 rows.append(
                     {
@@ -4953,18 +5015,30 @@ def post_detail(
                         "label": f"Karussellposition {media.position}",
                         "current_slot_id": current_slot.id if current_slot else None,
                         "choices": choices,
+                        "current_entry": current_entry,
+                        "current_version": display_version,
                     }
                 )
         else:
             current_version = db.get(GeneratedMediaVersion, job.media_version_id)
-            current_entry = (
-                catalog_by_slot_id.get(current_version.slot_id) if current_version else None
+            current_entry, display_version = publication_catalog_entry(
+                current_version,
+                media_path=job.media_path,
+                preferred_post_id=job.post_id,
             )
             if current_entry:
                 current_slot = current_entry["slot"]
-                choices = catalog_groups.get(
-                    (current_slot.post_id, current_slot.media_kind, current_slot.output_position),
-                    [],
+                choices = (
+                    feed_choices_by_post.get(current_slot.post_id, [])
+                    if current_slot.media_kind == "feed"
+                    else catalog_groups.get(
+                        (
+                            current_slot.post_id,
+                            current_slot.media_kind,
+                            current_slot.output_position,
+                        ),
+                        [],
+                    )
                 )
                 rows.append(
                     {
@@ -4972,9 +5046,58 @@ def post_detail(
                         "label": "Story-Ausgabe" if job.kind == "story" else "Feed-Ausgabe",
                         "current_slot_id": current_slot.id,
                         "choices": choices,
+                        "current_entry": current_entry,
+                        "current_version": display_version,
                     }
                 )
         publication_variant_choices[job.id] = rows
+    # The main media area is a publication preview, not a dump of every
+    # generated candidate.  Build it from the exact media versions referenced
+    # by open or historical publication jobs.  Alternatives stay available on
+    # their assigned position, but no longer look like additional carousel
+    # slides.
+    publication_media_catalog: list[dict] = []
+    displayed_publication_outputs: set[tuple[str, str]] = set()
+    for job in jobs:
+        rows = publication_variant_choices.get(job.id, [])
+        carousel_total = len(carousel_items.get(job.id, [])) if job.kind == "carousel" else None
+        for row in rows:
+            current_slot_id = row.get("current_slot_id")
+            current_entry = row.get("current_entry")
+            media_item = row.get("media_item")
+            output_key = (job.id, media_item.id if media_item is not None else job.kind)
+            if not current_entry or output_key in displayed_publication_outputs:
+                continue
+            displayed_publication_outputs.add(output_key)
+            if job.kind == "carousel" and media_item is not None:
+                position = media_item.position
+                publication_label = f"Karussellbild {position} von {carousel_total}"
+                publication_state = "Wird in diesem Karussell veröffentlicht"
+            elif job.kind == "story":
+                position = current_entry["slot"].output_position
+                publication_label = current_entry["slot"].label
+                publication_state = "Wird als Story veröffentlicht"
+            else:
+                position = 1
+                publication_label = "Feed-Bild"
+                publication_state = "Wird als Feed-Beitrag veröffentlicht"
+            publication_media_catalog.append(
+                {
+                    **current_entry,
+                    "publication": {
+                        "job": job,
+                        "media_item": media_item,
+                        "kind": job.kind,
+                        "position": position,
+                        "total": carousel_total,
+                        "label": publication_label,
+                        "state": publication_state,
+                        "choices": row.get("choices", []),
+                        "current_slot_id": current_slot_id,
+                        "selected_version": row.get("current_version"),
+                    },
+                }
+            )
     status_labels = {
         "draft": "Entwurf",
         "detected": "Erkannt",
@@ -5156,7 +5279,7 @@ def post_detail(
         incomplete_members=incomplete_members,
         resumable_generation_job=resumable_generation_job,
         can_delete=can_delete_all,
-        media_catalog=media_catalog,
+        media_catalog=publication_media_catalog,
         text_versions=text_versions,
         text_version_display=text_version_display,
         status_labels=status_labels,
@@ -5499,6 +5622,7 @@ def choose_publication_media_variant(
             slot_id=slot.id,
             publication_media_item_id=publication_media_item_id or None,
             allowed_post_ids=allowed_post_ids,
+            allow_feed_candidates_for_same_post=bool(bundle.get("member_post_ids")),
         )
     except MediaVersionError as exc:
         raise HTTPException(422, str(exc)) from exc

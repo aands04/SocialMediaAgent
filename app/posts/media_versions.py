@@ -664,6 +664,7 @@ def select_publication_media_variant(
     slot_id: str,
     publication_media_item_id: str | None = None,
     allowed_post_ids: set[str] | None = None,
+    allow_feed_candidates_for_same_post: bool = False,
 ) -> GeneratedMediaVersion:
     """Assign an existing candidate variant to one open publication slot.
 
@@ -742,7 +743,10 @@ def select_publication_media_variant(
         current_slot = db.get(GeneratedMediaSlot, current_slot_id) if current_slot_id else None
         if current_slot and (
             slot.post_id != current_slot.post_id
-            or slot.output_position != current_slot.output_position
+            or (
+                slot.output_position != current_slot.output_position
+                and not allow_feed_candidates_for_same_post
+            )
         ):
             raise MediaVersionError("Variante gehört nicht zu dieser Karussellposition")
         media.media_version_id = version.id
