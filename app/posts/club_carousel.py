@@ -132,7 +132,11 @@ def matchday_bundle_jobs(
         job
         for job in jobs
         if job.kind == "story"
-        or (job.post_id == primary.id and job.kind in {"feed", "carousel"})
+        or (
+            job.post_id == primary.id
+            and job.kind in {"feed", "carousel"}
+            and not is_redundant_matchday_bundle_feed(primary, job)
+        )
     ]
     member_order = {member.id: position for position, member in enumerate(members)}
     visible.sort(
@@ -351,15 +355,85 @@ def _mode_groups(mode: str, post_type: str) -> bool:
     )
 
 
-def _feed_job(db: Session, post_id: str) -> PublicationJob | None:
-    return db.scalar(
-        select(PublicationJob)
-        .where(
-            PublicationJob.post_id == post_id,
-            PublicationJob.kind.in_(["feed", "carousel"]),
+def _feed_jobs(db: Session, post_id: str) -> list[PublicationJob]:
+    return list(
+        db.scalars(
+            select(PublicationJob)
+            .where(
+                PublicationJob.post_id == post_id,
+                PublicationJob.channel_type == "instagram",
+                PublicationJob.kind.in_(["feed", "carousel"]),
+            )
+            .order_by(PublicationJob.scheduled_at, PublicationJob.id)
+            .with_for_update()
         )
-        .with_for_update()
     )
+
+
+def is_redundant_matchday_bundle_feed(post: Post, job: PublicationJob) -> bool:
+    """Return whether an unpublished Instagram feed was replaced by a bundle carousel."""
+
+    bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
+    primary_id = str(bundle.get("primary_post_id") or "").strip()
+    member_ids = {
+        str(item).strip()
+        for item in (bundle.get("member_post_ids") or [])
+        if str(item).strip()
+    }
+    if (
+        not primary_id
+        or primary_id not in member_ids
+        or post.id not in member_ids
+        or job.post_id != post.id
+        or job.channel_type != "instagram"
+        or job.kind not in {"feed", "carousel"}
+        or job.status in {JobStatus.PUBLISHED, JobStatus.PUBLISHING}
+        or job.published_at
+        or job.platform_id
+    ):
+        return False
+    return not (
+        post.id == primary_id
+        and job.kind == "carousel"
+        and ":club-carousel:" in job.idempotency_key
+    )
+
+
+def reconcile_matchday_bundle_feed_jobs(db: Session, post: Post) -> int:
+    """Cancel stale individual feed jobs that a completed carousel supersedes."""
+
+    members = matchday_bundle_posts(db, post)
+    if len(members) < 2:
+        return 0
+    member_ids = [member.id for member in members]
+    posts_by_id = {member.id: member for member in members}
+    feed_jobs = list(
+        db.scalars(
+            select(PublicationJob)
+            .where(
+                PublicationJob.club_id == post.club_id,
+                PublicationJob.post_id.in_(member_ids),
+                PublicationJob.channel_type == "instagram",
+                PublicationJob.kind.in_(["feed", "carousel"]),
+            )
+            .with_for_update()
+        )
+    )
+    changed = 0
+    for job in feed_jobs:
+        member = posts_by_id[job.post_id]
+        if not is_redundant_matchday_bundle_feed(member, job):
+            continue
+        if job.attempts or job.locked_at:
+            raise ClubCarouselConflict(
+                "Ein ersetzter Einzel-Feed besitzt bereits einen Plattformversuch"
+            )
+        job.status = JobStatus.CANCELLED
+        job.approval_status = "bundled"
+        job.approved_post_version = None
+        job.error = f"Im Vereins-Karussell {post.id} gebündelt"
+        changed += 1
+    return changed
 
 
 def _combined_text(club: str, post_type: str, games: list[Game], teams: dict[str, Team]) -> str:
@@ -394,7 +468,7 @@ def _candidate_games(
 
 
 def _mark_waiting(db: Session, post: Post, waiting_for: list[str]) -> None:
-    feed = _feed_job(db, post.id)
+    feed = next(iter(_feed_jobs(db, post.id)), None)
     if not feed or feed.status in {JobStatus.PUBLISHED, JobStatus.PUBLISHING}:
         return
     feed.status = JobStatus.WAITING
@@ -461,24 +535,36 @@ def coordinate_club_matchday_feed(
         return ClubCarouselState(active=True, waiting_for=tuple(missing_posts))
 
     ordered_posts = [by_game[item.id] for item in games]
-    feed_jobs = [_feed_job(db, item.id) for item in ordered_posts]
-    if any(item is None for item in feed_jobs):
+    feed_jobs_by_post = {item.id: _feed_jobs(db, item.id) for item in ordered_posts}
+    if any(not feed_jobs_by_post[item.id] for item in ordered_posts):
         raise ClubCarouselConflict("Mindestens ein Feed-Auftrag des Vereins fehlt")
+    all_feed_jobs = [
+        feed for item in ordered_posts for feed in feed_jobs_by_post[item.id]
+    ]
     if any(
         item.status in {JobStatus.PUBLISHED, JobStatus.PUBLISHING}
-        for item in feed_jobs
-        if item is not None
+        for item in all_feed_jobs
     ):
         raise ClubCarouselConflict(
             "Ein Feed des gemeinsamen Spieltags wurde bereits veröffentlicht"
         )
 
     primary = ordered_posts[0]
-    primary_feed = feed_jobs[0]
-    assert primary_feed is not None
+    primary_candidates = feed_jobs_by_post[primary.id]
+    primary_feed = (
+        max(primary_candidates, key=lambda item: (item.scheduled_at, item.id))
+        if post.post_type == "result"
+        else min(primary_candidates, key=lambda item: (item.scheduled_at, item.id))
+    )
     bundle_key = f"{_utc(games[0].kickoff).astimezone(BERLIN):%Y-%m-%d}:{post.post_type}"
     old_bundle = (primary.design_snapshot or {}).get("club_matchday_carousel") or {}
-    if old_bundle.get("key") == bundle_key and primary_feed.kind == "carousel":
+    existing_carousels = [
+        item
+        for item in primary_candidates
+        if item.kind == "carousel" and ":club-carousel:" in item.idempotency_key
+    ]
+    if old_bundle.get("key") == bundle_key and existing_carousels:
+        reconcile_matchday_bundle_feed_jobs(db, primary)
         return ClubCarouselState(
             active=True,
             complete=True,
@@ -522,11 +608,11 @@ def coordinate_club_matchday_feed(
     primary_feed.media_path = ordered_posts[0].feed_path
     primary_feed.text_snapshot = primary.text
     primary_feed.scheduled_at = (
-        max(item.scheduled_at for item in feed_jobs if item is not None)
+        max(item.scheduled_at for item in all_feed_jobs)
         if post.post_type == "result"
-        else min(item.scheduled_at for item in feed_jobs if item is not None)
+        else min(item.scheduled_at for item in all_feed_jobs)
     )
-    primary_feed.absolute_time = any(item.absolute_time for item in feed_jobs if item is not None)
+    primary_feed.absolute_time = any(item.absolute_time for item in all_feed_jobs)
     primary_feed.status = JobStatus.UNAPPROVED
     primary_feed.approval_status = "reapproval_required"
     primary_feed.approved_post_version = None
@@ -559,7 +645,7 @@ def coordinate_club_matchday_feed(
         )
 
     member_ids = [item.id for item in ordered_posts]
-    for member, feed in zip(ordered_posts, feed_jobs, strict=True):
+    for member in ordered_posts:
         snapshot = dict(member.design_snapshot or {})
         snapshot["club_matchday_carousel"] = {
             "key": bundle_key,
@@ -578,9 +664,9 @@ def coordinate_club_matchday_feed(
             ),
         }
         member.design_snapshot = snapshot
-        if member.id == primary.id:
+    for feed in all_feed_jobs:
+        if feed.id == primary_feed.id:
             continue
-        assert feed is not None
         feed.status = JobStatus.CANCELLED
         feed.approval_status = "bundled"
         feed.approved_post_version = None
