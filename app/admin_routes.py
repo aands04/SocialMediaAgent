@@ -5095,6 +5095,14 @@ def post_detail(
                         "choices": row.get("choices", []),
                         "current_slot_id": current_slot_id,
                         "selected_version": row.get("current_version"),
+                        "draft_selected_version": next(
+                            (
+                                candidate
+                                for candidate in current_entry["versions"]
+                                if candidate.id == current_entry["slot"].selected_version_id
+                            ),
+                            None,
+                        ),
                     },
                 }
             )

@@ -143,6 +143,7 @@
     {% set slot=entry.slot %}
     {% set publication=entry.publication %}
     {% set selected=publication.selected_version %}
+    {% set draft_selected=publication.draft_selected_version %}
     {% set publication_post=job_posts.get(publication.job.id,item) %}
     {% set member_asset=current_media_assets_by_post.get(entry.post.id) %}
     {% set alternatives=alternative_media_assets_by_post.get(entry.post.id,[]) %}
@@ -152,7 +153,15 @@
         <span class="selection-label">&#10003; {{publication.state}}</span>
       </header>
       {% if selected %}
-      <div class="media-version-state"><span class="badge">{% if slot.selection_mode == 'auto_latest' %}Automatisch neueste Version{% else %}Manuell festgelegt{% endif %}</span></div>
+      <div class="media-version-state">
+        <span class="selection-label">Zur Veröffentlichung: Version {{selected.version_number}}</span>
+        {% if draft_selected and draft_selected.id != selected.id %}
+        <span class="draft-selection-label">Im Entwurf ausgewählt: Version {{draft_selected.version_number}}</span>
+        {% endif %}
+      </div>
+      {% if draft_selected and draft_selected.id != selected.id %}
+      <p class="publication-version-mismatch"><strong>Noch nicht übernommen:</strong> Im Entwurf ist Version {{draft_selected.version_number}} ausgewählt, im Veröffentlichungsauftrag aber noch Version {{selected.version_number}}. Übernimm Version {{draft_selected.version_number}} unten für diese Veröffentlichung.</p>
+      {% endif %}
       {% if can_edit and slot.selection_mode == 'manual' %}
       <form method="post" action="/posts/{{entry.post.id}}/media-slots/{{slot.id}}/auto-latest">
         <input type="hidden" name="csrf_token" value="{{csrf}}">
@@ -225,18 +234,21 @@
         <summary>{{entry.versions|length}} Version{% if entry.versions|length != 1 %}en{% endif %} vergleichen und auswählen</summary>
         <div class="version-strip">
         {% for media_version in entry.versions %}
-          <article class="version-tile {% if media_version.id==slot.selected_version_id %}selected{% endif %}">
+          <article class="version-tile {% if media_version.id==selected.id %}selected{% elif media_version.id==slot.selected_version_id %}draft-selected{% endif %}">
             <img src="/posts/{{entry.post.id}}/versions/{{media_version.id}}" alt="Version {{media_version.version_number}} von {{slot.label}}">
             <strong>Version {{media_version.version_number}}</strong>
             <small>{{media_version.created_at|berlin}} · {{media_version.validation_status}}</small>
-            {% if can_edit and media_version.id!=slot.selected_version_id %}
+            {% if media_version.id==selected.id %}
+            <span class="selection-label">Wird veröffentlicht</span>
+            {% elif can_edit %}
+            {% if media_version.id==slot.selected_version_id %}<span class="draft-selection-label">Im Entwurf ausgewählt</span>{% endif %}
             <form method="post" action="/posts/{{entry.post.id}}/media-slots/{{slot.id}}/select">
               <input type="hidden" name="csrf_token" value="{{csrf}}">
               <input type="hidden" name="post_version" value="{{entry.post.version}}">
               <input type="hidden" name="version_id" value="{{media_version.id}}">
-              <button class="secondary">Diese Version verwenden</button>
+              <button class="secondary">{% if media_version.id==slot.selected_version_id %}Für Veröffentlichung übernehmen{% else %}Diese Version verwenden{% endif %}</button>
             </form>
-            {% else %}<span class="selection-label">Aktiv</span>{% endif %}
+            {% endif %}
           </article>
         {% endfor %}
         </div>

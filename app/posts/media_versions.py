@@ -536,6 +536,151 @@ def freeze_publication_versions(db: Session, post: Post, jobs: list[PublicationJ
             job.text_snapshot = selected_text.text
 
 
+def _invalidate_post_approval(post: Post) -> None:
+    post.version += 1
+    post.approved_version = None
+    post.approved_by = None
+    post.approved_at = None
+    if post.status in {PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL}:
+        post.status = PostStatus.REAPPROVAL
+
+
+def _mark_publication_for_reapproval(job: PublicationJob, message: str) -> None:
+    job.status = JobStatus.UNAPPROVED
+    job.approval_status = "reapproval_required"
+    job.approved_post_version = None
+    job.error = message
+
+
+def _copy_version_to_media_item(
+    media: PublicationMediaItem,
+    version: GeneratedMediaVersion,
+) -> None:
+    media.media_version_id = version.id
+    media.media_path = version.media_path
+    media.checksum = version.checksum
+    media.mime_type = version.mime_type
+    media.file_size = version.file_size
+    media.width = version.width
+    media.height = version.height
+
+
+def _synchronize_bundle_publication_version(
+    db: Session,
+    post: Post,
+    slot: GeneratedMediaSlot,
+    version: GeneratedMediaVersion,
+) -> tuple[Post | None, bool]:
+    """Propagate a member feed selection to its frozen carousel position.
+
+    A bundled carousel publication belongs to its primary post while each feed
+    output and its versions remain attached to the respective member post.
+    Therefore the ordinary per-post freeze cannot discover a version selected
+    on a non-primary member.  The bundle metadata provides the verified,
+    tenant-local position mapping used here.  Published history remains
+    immutable and no AI provider is called.
+    """
+
+    if slot.media_kind != "feed":
+        return None, False
+    bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
+    primary_id = str(bundle.get("primary_post_id") or "").strip()
+    member_ids = [
+        str(item).strip()
+        for item in (bundle.get("member_post_ids") or [])
+        if str(item).strip()
+    ]
+    member_ids = list(dict.fromkeys(member_ids))
+    if not primary_id or primary_id not in member_ids or post.id not in member_ids:
+        return None, False
+    members = {
+        member.id: member
+        for member in db.scalars(
+            select(Post).where(
+                Post.club_id == post.club_id,
+                Post.id.in_(member_ids),
+            )
+        )
+    }
+    if len(members) != len(member_ids):
+        raise MediaVersionError("Der gemeinsame Karussellbeitrag ist unvollständig")
+    for member_id in member_ids:
+        member_bundle = (members[member_id].design_snapshot or {}).get(
+            "club_matchday_carousel"
+        ) or {}
+        if (
+            str(member_bundle.get("primary_post_id") or "") != primary_id
+            or list(member_bundle.get("member_post_ids") or []) != member_ids
+        ):
+            raise MediaVersionError(
+                "Die Zuordnung des gemeinsamen Karussells ist widersprüchlich"
+            )
+    primary = db.scalar(
+        select(Post).where(
+            Post.id == primary_id,
+            Post.club_id == post.club_id,
+        ).with_for_update()
+    )
+    if not primary:
+        raise MediaVersionError("Der Hauptbeitrag des gemeinsamen Karussells fehlt")
+    position = member_ids.index(post.id) + 1
+    changed = False
+    jobs = list(
+        db.scalars(
+            select(PublicationJob)
+            .where(
+                PublicationJob.club_id == post.club_id,
+                PublicationJob.post_id == primary.id,
+                PublicationJob.kind == "carousel",
+                PublicationJob.status.in_(EDITABLE_PUBLICATION_STATUSES),
+            )
+            .with_for_update()
+        )
+    )
+    for job in jobs:
+        if job.published_at or job.platform_id or job.attempts or job.locked_at:
+            raise MediaVersionError(
+                "Die Karussell-Veröffentlichung wird bereits durch die Plattform verarbeitet"
+            )
+        if db.scalar(
+            select(MetaPublishingAttempt.id).where(
+                MetaPublishingAttempt.club_id == post.club_id,
+                MetaPublishingAttempt.publication_job_id == job.id,
+                MetaPublishingAttempt.active_key.is_not(None),
+            )
+        ):
+            raise MediaVersionError(
+                "Für die Karussell-Veröffentlichung läuft bereits ein Plattformvorgang"
+            )
+        media = db.scalar(
+            select(PublicationMediaItem).where(
+                PublicationMediaItem.club_id == post.club_id,
+                PublicationMediaItem.publication_job_id == job.id,
+                PublicationMediaItem.position == position,
+            ).with_for_update()
+        )
+        if not media:
+            raise MediaVersionError(
+                "Die zugehörige Position im gemeinsamen Karussell wurde nicht gefunden"
+            )
+        if (
+            media.media_version_id == version.id
+            and media.media_path == version.media_path
+        ):
+            continue
+        _copy_version_to_media_item(media, version)
+        if media.position == 1:
+            job.media_version_id = version.id
+            job.media_path = version.media_path
+        _mark_publication_for_reapproval(
+            job,
+            "Medienversion im gemeinsamen Karussell geändert; erneute Freigabe erforderlich",
+        )
+        job.version += 1
+        changed = True
+    return primary, changed
+
+
 def select_media_version(
     db: Session,
     post: Post,
@@ -565,33 +710,42 @@ def select_media_version(
         raise MediaVersionError("Diese Medienversion ist nicht verwendbar")
     if not Path(version.media_path).is_file():
         raise MediaVersionError("Die Datei dieser Medienversion ist nicht mehr verfügbar")
-    if slot.selected_version_id == version.id and slot.selection_mode == "manual":
+    selection_changed = not (
+        slot.selected_version_id == version.id and slot.selection_mode == "manual"
+    )
+    primary, bundle_changed = _synchronize_bundle_publication_version(
+        db,
+        post,
+        slot,
+        version,
+    )
+    if not selection_changed and not bundle_changed:
         return version
-    slot.selection_mode = "manual"
-    slot.selected_version_id = version.id
-    post.version += 1
-    post.approved_version = None
-    post.approved_by = None
-    post.approved_at = None
-    if post.status in {PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL}:
-        post.status = PostStatus.REAPPROVAL
+    if selection_changed:
+        slot.selection_mode = "manual"
+        slot.selected_version_id = version.id
+    posts_to_invalidate = {post.id: post} if selection_changed else {}
+    if bundle_changed and primary is not None:
+        posts_to_invalidate[primary.id] = primary
+    for affected_post in posts_to_invalidate.values():
+        _invalidate_post_approval(affected_post)
     for job in db.scalars(
         select(PublicationJob).where(
             PublicationJob.club_id == post.club_id,
             PublicationJob.post_id == post.id,
+            PublicationJob.status.in_(EDITABLE_PUBLICATION_STATUSES),
         )
     ):
-        if job.status != JobStatus.PUBLISHED:
-            job.status = JobStatus.UNAPPROVED
-            job.approval_status = "reapproval_required"
-            job.approved_post_version = None
-            job.error = "Ausgewählte Medienversion wurde geändert; erneute Freigabe erforderlich"
+        _mark_publication_for_reapproval(
+            job,
+            "Ausgewählte Medienversion wurde geändert; erneute Freigabe erforderlich",
+        )
     open_jobs = list(
         db.scalars(
             select(PublicationJob).where(
                 PublicationJob.club_id == post.club_id,
                 PublicationJob.post_id == post.id,
-                PublicationJob.status != JobStatus.PUBLISHED,
+                PublicationJob.status.in_(EDITABLE_PUBLICATION_STATUSES),
             )
         )
     )
@@ -628,30 +782,39 @@ def select_latest_media_automatically(
         raise MediaVersionError("Die neueste Medienversion ist nicht verwendbar")
     if not Path(latest.media_path).is_file():
         raise MediaVersionError("Die Datei der neuesten Medienversion ist nicht verfuegbar")
-    if slot.selection_mode == "auto_latest" and slot.selected_version_id == latest.id:
+    selection_changed = not (
+        slot.selection_mode == "auto_latest" and slot.selected_version_id == latest.id
+    )
+    primary, bundle_changed = _synchronize_bundle_publication_version(
+        db,
+        post,
+        slot,
+        latest,
+    )
+    if not selection_changed and not bundle_changed:
         return latest
-    slot.selection_mode = "auto_latest"
-    slot.selected_version_id = latest.id
-    post.version += 1
-    post.approved_version = None
-    post.approved_by = None
-    post.approved_at = None
-    if post.status in {PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL}:
-        post.status = PostStatus.REAPPROVAL
+    if selection_changed:
+        slot.selection_mode = "auto_latest"
+        slot.selected_version_id = latest.id
+    posts_to_invalidate = {post.id: post} if selection_changed else {}
+    if bundle_changed and primary is not None:
+        posts_to_invalidate[primary.id] = primary
+    for affected_post in posts_to_invalidate.values():
+        _invalidate_post_approval(affected_post)
     open_jobs = list(
         db.scalars(
             select(PublicationJob).where(
                 PublicationJob.club_id == post.club_id,
                 PublicationJob.post_id == post.id,
-                PublicationJob.status != JobStatus.PUBLISHED,
+                PublicationJob.status.in_(EDITABLE_PUBLICATION_STATUSES),
             )
         )
     )
     for job in open_jobs:
-        job.status = JobStatus.UNAPPROVED
-        job.approval_status = "reapproval_required"
-        job.approved_post_version = None
-        job.error = "Automatische Medienauswahl aktiviert; erneute Freigabe erforderlich"
+        _mark_publication_for_reapproval(
+            job,
+            "Automatische Medienauswahl aktiviert; erneute Freigabe erforderlich",
+        )
     freeze_publication_versions(db, post, open_jobs)
     return latest
 
