@@ -315,6 +315,15 @@ class MetaGraphClient:
             data={"access_token": access_token},
         )
 
+    def whatsapp_subscribed_apps(self, *, waba_id: str, access_token: str) -> list[dict]:
+        data = self._request_json(
+            "GET",
+            f"{waba_id}/subscribed_apps",
+            "WhatsApp-Webhook-Abonnement prüfen",
+            params={"access_token": access_token},
+        )
+        return [item for item in data.get("data", []) if isinstance(item, dict)]
+
     def send_whatsapp_template(
         self,
         *,

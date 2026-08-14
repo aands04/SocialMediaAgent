@@ -26,6 +26,7 @@ from app.channels.oauth import (
     assert_channel_enabled,
     complete_facebook_selection,
     complete_whatsapp_onboarding,
+    ensure_whatsapp_webhook_subscription,
     prepare_facebook_selection,
     start_channel_oauth,
 )
@@ -257,6 +258,26 @@ class WhatsAppSendApiStub:
         return {"messages": [{"id": "wamid.test-1"}]}
 
 
+class WhatsAppSubscriptionApiStub:
+    def __init__(self, *, subscribed: bool):
+        self.subscribed = subscribed
+        self.subscribe_calls = 0
+
+    def whatsapp_subscribed_apps(self, *, waba_id, access_token):
+        assert waba_id == "111111"
+        assert access_token == "whatsapp-access-token"
+        if not self.subscribed:
+            return []
+        return [{"whatsapp_business_api_data": {"id": "channels-app"}}]
+
+    def subscribe_whatsapp_app(self, *, waba_id, access_token):
+        assert waba_id == "111111"
+        assert access_token == "whatsapp-access-token"
+        self.subscribe_calls += 1
+        self.subscribed = True
+        return {"success": True}
+
+
 def channel_post_fixture(db, settings: Settings):
     page = InstagramPage(
         internal_name="instagram-test",
@@ -427,6 +448,38 @@ def test_whatsapp_onboarding_does_not_require_business_management(db):
         "whatsapp_business_management",
         "whatsapp_business_messaging",
     }
+
+
+@pytest.mark.parametrize("initially_subscribed", [True, False])
+def test_whatsapp_webhook_subscription_is_checked_and_repaired(
+    db,
+    initially_subscribed,
+):
+    settings = channel_settings()
+    connection = SocialChannelConnection(
+        channel_type="whatsapp",
+        internal_name="Testverein News",
+        display_name="Testverein News",
+        external_account_id="111111",
+        parent_business_id="111111",
+        phone_number_id="222222",
+        settings={"phone_registered": True},
+    )
+    db.add(connection)
+    db.flush()
+    api = WhatsAppSubscriptionApiStub(subscribed=initially_subscribed)
+
+    repaired = ensure_whatsapp_webhook_subscription(
+        settings,
+        connection=connection,
+        access_token="whatsapp-access-token",
+        api=api,
+    )
+
+    assert repaired is (not initially_subscribed)
+    assert api.subscribe_calls == (0 if initially_subscribed else 1)
+    assert connection.settings["webhook_subscription_confirmed"] is True
+    assert connection.settings["webhook_subscription_checked_at"]
 
 
 def test_whatsapp_onboarding_still_rejects_missing_whatsapp_permission(db):

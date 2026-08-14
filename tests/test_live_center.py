@@ -103,6 +103,9 @@ def live_fixture(db, *, suffix: str = "one"):
         ("34. Minute 1:0 Martin Mohr", "score_update", 34, 1, 0),
         ("1:1 52", "score_update", 52, 1, 1),
         ("2. Halbzeit", "second_half", None, None, None),
+        ("Anpfiff", "kickoff", None, None, None),
+        ("Anstoß", "kickoff", None, None, None),
+        ("Anstoss", "kickoff", None, None, None),
     ],
 )
 def test_deterministic_live_parser(message, event_type, minute, home, away):

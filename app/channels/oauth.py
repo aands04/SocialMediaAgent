@@ -46,6 +46,58 @@ def whatsapp_phone_is_registered(connection: SocialChannelConnection) -> bool:
     return bool((connection.settings or {}).get("phone_registered"))
 
 
+def _whatsapp_app_is_subscribed(items: list[dict], app_id: str) -> bool:
+    for item in items:
+        if str(item.get("id") or "") == app_id:
+            return True
+        api_data = item.get("whatsapp_business_api_data")
+        if isinstance(api_data, dict) and str(api_data.get("id") or "") == app_id:
+            return True
+    return False
+
+
+def ensure_whatsapp_webhook_subscription(
+    settings: Settings,
+    *,
+    connection: SocialChannelConnection,
+    access_token: str,
+    api: MetaGraphClient,
+) -> bool:
+    """Verify and, if necessary, repair the app subscription for a WABA.
+
+    App-level webhook tests can succeed even while real messages are not
+    delivered. Meta additionally requires the concrete WhatsApp Business
+    Account to be subscribed to the current app.
+    """
+
+    waba_id = connection.parent_business_id or connection.external_account_id
+    app_id = (settings.meta_facebook_app_id or "").strip()
+    if not waba_id:
+        raise ChannelApiError("Die WhatsApp Business Account ID fehlt")
+    if not app_id:
+        raise ChannelApiError("Die Meta-App-ID für WhatsApp fehlt")
+
+    subscribed = api.whatsapp_subscribed_apps(waba_id=waba_id, access_token=access_token)
+    repaired = not _whatsapp_app_is_subscribed(subscribed, app_id)
+    if repaired:
+        api.subscribe_whatsapp_app(waba_id=waba_id, access_token=access_token)
+        subscribed = api.whatsapp_subscribed_apps(
+            waba_id=waba_id,
+            access_token=access_token,
+        )
+        if not _whatsapp_app_is_subscribed(subscribed, app_id):
+            raise ChannelApiError(
+                "Das WhatsApp-Webhook-Abonnement konnte nicht bestätigt werden"
+            )
+
+    connection.settings = {
+        **(connection.settings or {}),
+        "webhook_subscription_confirmed": True,
+        "webhook_subscription_checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return repaired
+
+
 def _validated_whatsapp_registration_pin(value: str) -> str:
     pin = value.strip()
     if not re.fullmatch(r"[0-9]{6}", pin):
