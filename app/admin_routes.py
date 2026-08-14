@@ -7034,6 +7034,7 @@ def games(
                 select(Post).where(
                     Post.club_id == current.club_id,
                     Post.game_id.in_(game_ids),
+                    Post.active_key == "active",
                 )
             )
         )
