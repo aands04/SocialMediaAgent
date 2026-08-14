@@ -148,7 +148,7 @@ def parse_match_event(text: str) -> ParsedMatchEvent | None:
         return ParsedMatchEvent("second_half", minute, extra).validated()
     if re.search(r"\b(halbzeit|pause|hz)\b", folded):
         return ParsedMatchEvent("halftime", minute, extra, home, away).validated()
-    if re.search(r"\b(anpfiff|los geht'?s|spiel beginnt)\b", folded):
+    if re.search(r"\b(anpfiff|anstoss|los geht'?s|spiel beginnt)\b", folded):
         return ParsedMatchEvent("kickoff", minute, extra).validated()
     if re.search(r"\b(abbruch|abgebrochen)\b", folded):
         return ParsedMatchEvent("abandoned", minute, extra, reason=clean).validated()

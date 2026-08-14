@@ -92,11 +92,15 @@
             <button>Kanaleinstellungen speichern</button>
           </form>
           <div class="button-row">
-            <form method="post" action="/channels/{{ connection.id }}/check"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Verbindung prüfen</button></form>
+            <form method="post" action="/channels/{{ connection.id }}/check"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>{{ 'Verbindung und Webhook prüfen' if channel_type == 'whatsapp' else 'Verbindung prüfen' }}</button></form>
             {% if channel_type == 'instagram' and connection.legacy_instagram_page_id %}<form method="post" action="/instagram/{{ connection.legacy_instagram_page_id }}/meta/refresh"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Verbindung erneuern</button></form>
-            {% elif channel_type in ['facebook', 'whatsapp'] %}<a class="button secondary" href="/channels/{{ channel_type }}/setup">Verbindung erneuern</a>{% endif %}
+            {% elif channel_type == 'facebook' %}<a class="button secondary" href="/channels/{{ channel_type }}/setup">Verbindung erneuern</a>{% endif %}
           </div>
+          {% if channel_type == 'whatsapp' %}
+          <p class="field-help">Die Prüfung kontrolliert Telefonnummer und Webhook-Abonnement. Ein fehlendes Abonnement wird repariert, ohne die Telefonnummer erneut einzurichten.</p>
+          {% else %}
           <p class="field-help">Meta verlangt gelegentlich eine erneute Bestätigung. Gespeicherte Beiträge und Einstellungen bleiben erhalten.</p>
+          {% endif %}
           <details>
             <summary>Verbindung trennen</summary>
             <p>Neue Vorgänge über diesen Kanal werden gestoppt. Historische Veröffentlichungen und Auditdaten bleiben erhalten.</p>
@@ -115,7 +119,7 @@
             <dt>Interne Verbindung</dt><dd>{{ connection.id }}</dd>
             <dt>Meta-Konto</dt><dd>{{ connection.external_account_id or '—' }}</dd>
             {% if channel_type == 'facebook' %}<dt>Page ID</dt><dd>{{ connection.external_account_id or '—' }}</dd>{% endif %}
-            {% if channel_type == 'whatsapp' %}<dt>WhatsApp Business Account</dt><dd>{{ connection.parent_business_id or '—' }}</dd><dt>Phone Number ID</dt><dd>{{ connection.phone_number_id or '—' }}</dd><dt>Telefonregistrierung</dt><dd>{{ 'Bestätigt' if not card.registration_required else 'Noch ausstehend' }}</dd>{% endif %}
+            {% if channel_type == 'whatsapp' %}<dt>WhatsApp Business Account</dt><dd>{{ connection.parent_business_id or '—' }}</dd><dt>Phone Number ID</dt><dd>{{ connection.phone_number_id or '—' }}</dd><dt>Telefonregistrierung</dt><dd>{{ 'Bestätigt' if not card.registration_required else 'Noch ausstehend' }}</dd><dt>Webhook-Abonnement</dt><dd>{{ 'Bestätigt' if card.webhook_subscription_confirmed else 'Noch nicht geprüft' }}</dd>{% endif %}
             <dt>Graph-Version</dt><dd>{{ connection.api_version or 'zentral konfiguriert' }}</dd>
             <dt>Berechtigungen</dt><dd>{{ connection.scopes | join(', ') if connection.scopes else '—' }}</dd>
             <dt>Verbindungsablauf</dt><dd>{{ connection.token_expires_at | berlin if connection.token_expires_at else 'nicht von Meta gemeldet' }}</dd>

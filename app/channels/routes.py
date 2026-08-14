@@ -16,6 +16,7 @@ from app.channels.oauth import (
     activate_existing_whatsapp_phone,
     complete_facebook_selection,
     complete_whatsapp_onboarding,
+    ensure_whatsapp_webhook_subscription,
     prepare_facebook_selection,
     start_channel_oauth,
     whatsapp_phone_is_registered,
@@ -27,7 +28,7 @@ from app.limits.service import LimitExceeded, assert_resource_capacity
 from app.meta.api import MetaApiClient, MetaApiError
 from app.meta.oauth import disconnect as disconnect_instagram
 from app.meta.oauth import start_oauth as start_instagram_oauth
-from app.meta.security import TokenCipher
+from app.meta.security import MetaSecretError, TokenCipher
 from app.models import (
     AuditLog,
     Club,
@@ -408,6 +409,7 @@ def check_channel_connection(
         item.last_check_at = datetime.now(timezone.utc)
         db.commit()
         raise HTTPException(409, item.last_error)
+    webhook_repaired = False
     try:
         token = TokenCipher(settings.meta_token_encryption_key).decrypt(item.encrypted_token)
         api = MetaGraphClient(settings)
@@ -415,11 +417,17 @@ def check_channel_connection(
             api.page_profile(page_id=item.external_account_id or "", access_token=token)
         elif item.channel_type == "whatsapp":
             api.whatsapp_phone(phone_number_id=item.phone_number_id or "", access_token=token)
+            webhook_repaired = ensure_whatsapp_webhook_subscription(
+                settings,
+                connection=item,
+                access_token=token,
+                api=api,
+            )
         item.status = "connected"
         item.last_check_at = datetime.now(timezone.utc)
         item.last_success_at = item.last_check_at
         item.last_error = None
-    except (ChannelApiError, ValueError) as exc:
+    except (ChannelApiError, MetaSecretError, ValueError) as exc:
         item.status = "disrupted"
         item.last_error = str(exc)[:500]
         item.last_check_at = datetime.now(timezone.utc)
@@ -431,11 +439,17 @@ def check_channel_connection(
             action=f"channel.{item.channel_type}.checked",
             entity_type="social_channel_connection",
             entity_id=item.id,
-            details={"result": "connected"},
+            details={
+                "result": "connected",
+                "webhook_subscription_repaired": webhook_repaired,
+            },
         )
     )
     db.commit()
-    return _redirect("/channels", f"{CHANNEL_LABELS[item.channel_type]} ist bereit")
+    notice = f"{CHANNEL_LABELS[item.channel_type]} ist bereit"
+    if item.channel_type == "whatsapp" and webhook_repaired:
+        notice = "WhatsApp ist bereit; die Webhook-Verbindung wurde repariert"
+    return _redirect("/channels", notice)
 
 
 @router.post("/channels/{connection_id}/settings")

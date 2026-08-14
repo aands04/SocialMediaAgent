@@ -129,6 +129,9 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
                 "capability_labels": active_capabilities,
                 "progress": progress,
                 "registration_required": registration_required,
+                "webhook_subscription_confirmed": bool(
+                    (item.settings or {}).get("webhook_subscription_confirmed")
+                ),
             }
         )
     return result
