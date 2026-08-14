@@ -15,7 +15,6 @@ FACEBOOK_REQUIRED_SCOPES = {
     "pages_show_list",
 }
 WHATSAPP_REQUIRED_SCOPES = {
-    "business_management",
     "whatsapp_business_management",
     "whatsapp_business_messaging",
 }

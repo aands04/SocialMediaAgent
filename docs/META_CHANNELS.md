@@ -65,8 +65,10 @@ den offiziellen Embedded-Signup-/Cloud-API-Prozess mit:
 
 - Meta Business und WhatsApp Business Account (WABA),
 - registrierter Telefonnummer und Phone Number ID,
-- `business_management`, `whatsapp_business_management` und
-  `whatsapp_business_messaging`, soweit für den konkreten App-Review erforderlich,
+- `whatsapp_business_management` und `whatsapp_business_messaging` für den laufenden
+  Cloud-API-Betrieb,
+- optional `business_management`, falls Meta dieses Recht für den verwendeten
+  Embedded-Signup-, Tech-Provider- oder App-Review-Ablauf verlangt,
 - abonnierten Webhooks,
 - genehmigten Nachrichtenvorlagen für proaktive Vereinsnachrichten.
 
@@ -74,6 +76,12 @@ Die aktuelle erste Ausbaustufe versendet ausschließlich genehmigte Vorlagennach
 Freiform-, Bild- und Linknachrichten werden in der UI erst angeboten, wenn der zulässige
 Kontext (beispielsweise das Servicefenster) und die entsprechenden Komponenten vollständig
 modelliert und getestet sind.
+
+Die Anwendung blockiert den Abschluss der Verbindung nicht allein wegen eines fehlenden
+`business_management`-Rechts. Sie verlangt weiterhin beide WhatsApp-Rechte und prüft den
+tatsächlichen Zugriff auf die ausgewählte Telefonnummer sowie das Abonnieren des WABA direkt
+bei Meta. Ein fehlender oder unzulässiger Asset-Zugriff wird dadurch weiterhin sicher
+abgewiesen.
 
 ### Einwilligung und Abmeldung
 

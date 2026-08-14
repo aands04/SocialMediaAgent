@@ -358,6 +358,53 @@ def test_whatsapp_onboarding_starts_disabled_and_synchronizes_approved_template(
     assert template.message_type == "general"
 
 
+def test_whatsapp_onboarding_does_not_require_business_management(db):
+    settings = channel_settings()
+    user = admin_user(db)
+    api = WhatsAppApiStub()
+
+    assert "business_management" not in api.granted_permissions("whatsapp-access-token")
+    connection = complete_whatsapp_onboarding(
+        db,
+        settings,
+        user=user,
+        code="embedded-code",
+        waba_id="111111",
+        phone_number_id="222222",
+        api=api,
+    )
+
+    assert connection.status == "connected"
+    assert set(connection.scopes) == {
+        "whatsapp_business_management",
+        "whatsapp_business_messaging",
+    }
+
+
+def test_whatsapp_onboarding_still_rejects_missing_whatsapp_permission(db):
+    class MissingMessagingPermissionApi(WhatsAppApiStub):
+        def granted_permissions(self, access_token):
+            assert access_token == "whatsapp-access-token"
+            return {"whatsapp_business_management"}
+
+        def whatsapp_phone(self, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("Die Asset-Prüfung darf ohne Messaging-Recht nicht starten")
+
+    settings = channel_settings()
+    user = admin_user(db)
+
+    with pytest.raises(ChannelApiError, match="erforderliche Berechtigung"):
+        complete_whatsapp_onboarding(
+            db,
+            settings,
+            user=user,
+            code="embedded-code",
+            waba_id="111111",
+            phone_number_id="222222",
+            api=MissingMessagingPermissionApi(),
+        )
+
+
 def test_whatsapp_capabilities_do_not_offer_story_or_status_and_template_is_strict(db):
     assert capability_keys("whatsapp") == {"template_message"}
     assert "story" not in capability_keys("whatsapp")
