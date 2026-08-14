@@ -89,7 +89,12 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
             capabilities[key] for key in item.capabilities or [] if key in capabilities
         ]
         progress = None
+        registration_required = False
+        display_status = item.status
         if item.channel_type == "whatsapp":
+            registration_required = not bool((item.settings or {}).get("phone_registered"))
+            if registration_required and item.status == "connected":
+                display_status = "setup_required"
             approved_template = db.scalar(
                 select(WhatsAppMessageTemplate.id).where(
                     WhatsAppMessageTemplate.channel_connection_id == item.id,
@@ -105,7 +110,11 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
             )
             completed = sum(
                 [
-                    bool(item.external_account_id and item.phone_number_id),
+                    bool(
+                        item.external_account_id
+                        and item.phone_number_id
+                        and not registration_required
+                    ),
                     bool(item.display_phone_number),
                     bool(approved_template),
                     bool(opted_in_recipient),
@@ -115,9 +124,11 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
         result.setdefault(item.channel_type, []).append(
             {
                 "connection": item,
-                "status_label": status_label(item.status),
+                "display_status": display_status,
+                "status_label": status_label(display_status),
                 "capability_labels": active_capabilities,
                 "progress": progress,
+                "registration_required": registration_required,
             }
         )
     return result

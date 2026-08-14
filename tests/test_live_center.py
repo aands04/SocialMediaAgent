@@ -688,6 +688,7 @@ def _queued_live_whatsapp_delivery(db):
         external_account_id="waba-publish",
         phone_number_id="phone-publish",
         status="connected",
+        settings={"phone_registered": True},
         capabilities=["direct_message", "template_message"],
         active=True,
         publishing_enabled=True,

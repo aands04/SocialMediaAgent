@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import select
@@ -20,6 +22,7 @@ from app.channels.capabilities import capability_keys, status_label
 from app.channels.delivery import _deliver_one, _whatsapp_components
 from app.channels.jobs import ensure_approved_channel_jobs
 from app.channels.oauth import (
+    activate_existing_whatsapp_phone,
     assert_channel_enabled,
     complete_facebook_selection,
     complete_whatsapp_onboarding,
@@ -98,6 +101,36 @@ def test_channel_client_uses_dedicated_meta_app_id():
     assert "instagram-app" not in url
 
 
+def test_whatsapp_phone_registration_uses_official_endpoint_without_exposing_pin():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"success": True})
+
+    client = MetaGraphClient(
+        channel_settings(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.register_whatsapp_phone(
+        phone_number_id="222222",
+        access_token="whatsapp-access-token",
+        pin="123456",
+    )
+
+    assert result == {"success": True}
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.method == "POST"
+    assert request.url.path.endswith("/222222/register")
+    assert json.loads(request.content) == {
+        "messaging_product": "whatsapp",
+        "pin": "123456",
+    }
+    assert request.headers["Authorization"] == "Bearer whatsapp-access-token"
+
+
 def test_facebook_and_whatsapp_are_available_by_default():
     settings = Settings(
         _env_file=None,
@@ -169,6 +202,9 @@ class FacebookApiStub:
 
 
 class WhatsAppApiStub:
+    def __init__(self):
+        self.registered_pin = None
+
     def exchange_code(self, *, code, redirect_uri=None):
         assert code == "embedded-code"
         return MetaToken("whatsapp-access-token", 7200)
@@ -184,6 +220,12 @@ class WhatsAppApiStub:
             "display_phone_number": "+49 561 123456",
             "verified_name": "Testverein News",
         }
+
+    def register_whatsapp_phone(self, *, phone_number_id, access_token, pin):
+        assert phone_number_id == "222222"
+        assert access_token == "whatsapp-access-token"
+        self.registered_pin = pin
+        return {"success": True}
 
     def subscribe_whatsapp_app(self, *, waba_id, access_token):
         assert waba_id == "111111"
@@ -332,6 +374,7 @@ def test_facebook_oauth_hides_tokens_and_stores_page_token_encrypted(db):
 def test_whatsapp_onboarding_starts_disabled_and_synchronizes_approved_template(db):
     settings = channel_settings()
     user = admin_user(db)
+    api = WhatsAppApiStub()
     connection = complete_whatsapp_onboarding(
         db,
         settings,
@@ -339,12 +382,16 @@ def test_whatsapp_onboarding_starts_disabled_and_synchronizes_approved_template(
         code="embedded-code",
         waba_id="111111",
         phone_number_id="222222",
-        api=WhatsAppApiStub(),
+        registration_pin="123456",
+        api=api,
     )
     assert connection.status == "connected"
     assert connection.publishing_enabled is False
     assert connection.automatic_delivery_enabled is False
     assert connection.display_phone_number == "+49 561 123456"
+    assert connection.settings["phone_registered"] is True
+    assert api.registered_pin == "123456"
+    assert "123456" not in str(connection.settings)
     assert (
         TokenCipher(settings.meta_token_encryption_key).decrypt(connection.encrypted_token)
         == "whatsapp-access-token"
@@ -371,6 +418,7 @@ def test_whatsapp_onboarding_does_not_require_business_management(db):
         code="embedded-code",
         waba_id="111111",
         phone_number_id="222222",
+        registration_pin="123456",
         api=api,
     )
 
@@ -401,8 +449,71 @@ def test_whatsapp_onboarding_still_rejects_missing_whatsapp_permission(db):
             code="embedded-code",
             waba_id="111111",
             phone_number_id="222222",
+            registration_pin="123456",
             api=MissingMessagingPermissionApi(),
         )
+
+
+def test_whatsapp_onboarding_rejects_invalid_registration_pin_without_registering(db):
+    settings = channel_settings()
+    user = admin_user(db)
+    api = WhatsAppApiStub()
+
+    with pytest.raises(ChannelApiError, match="genau 6 Ziffern"):
+        complete_whatsapp_onboarding(
+            db,
+            settings,
+            user=user,
+            code="embedded-code",
+            waba_id="111111",
+            phone_number_id="222222",
+            registration_pin="12ab",
+            api=api,
+        )
+
+    assert api.registered_pin is None
+
+
+def test_existing_whatsapp_connection_can_be_registered_without_storing_pin(db):
+    settings = channel_settings()
+    user = admin_user(db)
+    connection = SocialChannelConnection(
+        channel_type="whatsapp",
+        internal_name="legacy-whatsapp",
+        display_name="Legacy WhatsApp",
+        external_account_id="111111",
+        parent_business_id="111111",
+        phone_number_id="222222",
+        status="connected",
+        active=True,
+        encrypted_token=TokenCipher(settings.meta_token_encryption_key).encrypt(
+            "whatsapp-access-token"
+        ),
+    )
+    db.add(connection)
+    db.flush()
+    api = WhatsAppApiStub()
+
+    activate_existing_whatsapp_phone(
+        db,
+        settings,
+        user=user,
+        connection=connection,
+        registration_pin="654321",
+        api=api,
+    )
+
+    assert api.registered_pin == "654321"
+    assert connection.settings["phone_registered"] is True
+    assert "654321" not in str(connection.settings)
+    audit = db.scalar(
+        select(AuditLog).where(
+            AuditLog.entity_id == connection.id,
+            AuditLog.action == "channel.whatsapp.phone_registered",
+        )
+    )
+    assert audit is not None
+    assert "654321" not in str(audit.details)
 
 
 def test_whatsapp_capabilities_do_not_offer_story_or_status_and_template_is_strict(db):
@@ -463,6 +574,7 @@ def test_cross_channel_jobs_require_explicit_selection_and_are_not_retroactive(d
         parent_business_id="waba-1",
         phone_number_id="phone-1",
         status="connected",
+        settings={"phone_registered": True},
         active=True,
         publishing_enabled=True,
         automatic_delivery_enabled=True,
@@ -523,6 +635,7 @@ def test_whatsapp_delivery_is_idempotent_and_never_sends_twice(db):
         parent_business_id="waba-send",
         phone_number_id="phone-send",
         status="connected",
+        settings={"phone_registered": True},
         active=True,
         publishing_enabled=True,
         automatic_delivery_enabled=True,

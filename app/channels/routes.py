@@ -13,10 +13,12 @@ from sqlalchemy.orm import Session
 from app.channels.api import ChannelApiError, MetaGraphClient
 from app.channels.capabilities import CHANNEL_LABELS
 from app.channels.oauth import (
+    activate_existing_whatsapp_phone,
     complete_facebook_selection,
     complete_whatsapp_onboarding,
     prepare_facebook_selection,
     start_channel_oauth,
+    whatsapp_phone_is_registered,
 )
 from app.channels.service import assignment_map, channel_cards
 from app.config import get_settings
@@ -331,6 +333,7 @@ def whatsapp_complete(
     code: str = Form(),
     waba_id: str = Form(),
     phone_number_id: str = Form(),
+    registration_pin: str = Form(),
     current: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -344,11 +347,41 @@ def whatsapp_complete(
             code=code,
             waba_id=waba_id,
             phone_number_id=phone_number_id,
+            registration_pin=registration_pin,
             api=MetaGraphClient(settings),
         )
     except ChannelApiError as exc:
         raise HTTPException(409, str(exc)) from exc
     return _redirect("/channels", "WhatsApp wurde verbunden")
+
+
+@router.post("/channels/{connection_id}/whatsapp/register")
+def register_existing_whatsapp_phone(
+    connection_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    registration_pin: str = Form(),
+    current: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Finish the one-time Cloud API registration for an older connection."""
+
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    item = _connection(db, connection_id, "whatsapp")
+    try:
+        activate_existing_whatsapp_phone(
+            db,
+            settings,
+            user=current,
+            connection=item,
+            registration_pin=registration_pin,
+            api=MetaGraphClient(settings),
+        )
+    except ChannelApiError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    return _redirect("/channels", "WhatsApp-Telefonnummer wurde aktiviert")
 
 
 @router.post("/channels/{connection_id}/check")
@@ -367,6 +400,14 @@ def check_channel_connection(
         if not legacy_page:
             raise HTTPException(409, "Instagram-Verbindung ist unvollständig")
         return RedirectResponse(f"/instagram/{legacy_page}/meta/check", 307)
+    if item.channel_type == "whatsapp" and not whatsapp_phone_is_registered(item):
+        item.status = "setup_required"
+        item.last_error = (
+            "Die WhatsApp-Telefonnummer muss einmalig für die Cloud API aktiviert werden"
+        )
+        item.last_check_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(409, item.last_error)
     try:
         token = TokenCipher(settings.meta_token_encryption_key).decrypt(item.encrypted_token)
         api = MetaGraphClient(settings)
@@ -414,6 +455,15 @@ def save_channel_settings(
     check_csrf(request, csrf_token_value)
     require_admin(current)
     item = _connection(db, connection_id)
+    if (
+        item.channel_type == "whatsapp"
+        and not whatsapp_phone_is_registered(item)
+        and (publishing_enabled or automatic_delivery_enabled)
+    ):
+        raise HTTPException(
+            409,
+            "Die WhatsApp-Telefonnummer muss zuerst für die Cloud API aktiviert werden",
+        )
     if item.status != "connected" and (publishing_enabled or automatic_delivery_enabled):
         raise HTTPException(409, "Die Verbindung muss zuerst erfolgreich geprüft werden")
     if automatic_delivery_enabled and not publishing_enabled:

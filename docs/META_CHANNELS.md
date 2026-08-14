@@ -72,6 +72,19 @@ den offiziellen Embedded-Signup-/Cloud-API-Prozess mit:
 - abonnierten Webhooks,
 - genehmigten Nachrichtenvorlagen für proaktive Vereinsnachrichten.
 
+Nach dem Embedded Signup registriert die Anwendung die ausgewählte Telefonnummer ausdrücklich
+über den offiziellen Cloud-API-Endpunkt `POST /{PHONE_NUMBER_ID}/register`. Dafür wählt der
+Vereinsadministrator eine neue sechsstellige PIN. Meta verwendet sie für die
+Zwei-Schritt-Verifizierung der Telefonnummer. Die PIN wird ausschließlich für diesen einen
+HTTPS-Aufruf an Meta übergeben und weder in der Datenbank noch in Logs oder Auditdetails
+gespeichert. Sie muss außerhalb der Vereinszentrale sicher verwahrt werden.
+
+Verbindungen, die mit einer älteren Anwendungsversion bereits als verbunden gespeichert wurden,
+aber diesen Registrierungsschritt noch nicht ausgeführt haben, werden als
+„Einrichtung erforderlich“ angezeigt. Sie können im Kanalbereich einmalig mit einer neuen PIN
+aktiviert werden. Bis Meta die Registrierung bestätigt hat, blockiert die Anwendung ausgehende
+WhatsApp-Nachrichten sowie die Aktivierung der Versandautomatik.
+
 Die aktuelle erste Ausbaustufe versendet ausschließlich genehmigte Vorlagennachrichten.
 Freiform-, Bild- und Linknachrichten werden in der UI erst angeboten, wenn der zulässige
 Kontext (beispielsweise das Servicefenster) und die entsprechenden Komponenten vollständig

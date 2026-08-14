@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
@@ -267,6 +268,30 @@ class MetaGraphClient:
                 "fields": "id,display_phone_number,verified_name,quality_rating",
                 "access_token": access_token,
             },
+        )
+
+    def register_whatsapp_phone(
+        self,
+        *,
+        phone_number_id: str,
+        access_token: str,
+        pin: str,
+    ) -> dict:
+        """Register a Cloud API phone number and enable two-step verification.
+
+        The PIN is deliberately accepted only for this one provider request. It
+        is never returned, persisted or added to diagnostics by this client.
+        """
+
+        if not re.fullmatch(r"[0-9]{6}", pin):
+            raise ChannelApiError("Die WhatsApp-Aktivierungs-PIN muss genau 6 Ziffern haben")
+        return self._request_json(
+            "POST",
+            f"{phone_number_id}/register",
+            "WhatsApp-Telefonnummer aktivieren",
+            uncertain_on_transport_error=True,
+            json={"messaging_product": "whatsapp", "pin": pin},
+            headers={"Authorization": f"Bearer {access_token}"},
         )
 
     def whatsapp_templates(self, *, waba_id: str, access_token: str) -> list[dict]:

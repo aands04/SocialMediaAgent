@@ -48,7 +48,7 @@
       <article class="connection-summary">
         <h3>{{ connection.display_name }}</h3>
         {% if connection.username %}<p>@{{ connection.username }}</p>{% elif connection.display_phone_number %}<p>{{ connection.display_phone_number }}</p>{% endif %}
-        <p><span class="channel-status channel-status-{{ connection.status }}">{{ '✓ ' if connection.status == 'connected' else '' }}{{ card.status_label }}</span></p>
+        <p><span class="channel-status channel-status-{{ card.display_status }}">{{ '✓ ' if card.display_status == 'connected' else '' }}{{ card.status_label }}</span></p>
         <dl class="channel-summary-list">
           <dt>Automatische {{ 'Nachrichten' if channel_type == 'whatsapp' else 'Veröffentlichung' }}</dt><dd>{{ 'Aktiv' if connection.automatic_delivery_enabled else 'Pausiert' }}</dd>
           <dt>Aktive Funktionen</dt><dd>{{ card.capability_labels | join(' · ') if card.capability_labels else 'Noch keine' }}</dd>
@@ -56,6 +56,22 @@
         </dl>
         {% if card.progress and card.progress.completed < card.progress.total %}
         <p class="setup-progress">Einrichtung {{ card.progress.completed }} von {{ card.progress.total }} Schritten</p>
+        {% endif %}
+        {% if channel_type == 'whatsapp' and card.registration_required %}
+        <div class="warning">
+          <strong>Telefonnummer noch nicht für Nachrichten aktiviert</strong>
+          <p>Die Meta-Anmeldung ist vorhanden, aber die einmalige Registrierung der Telefonnummer für die WhatsApp Cloud API fehlt noch.</p>
+          {% if is_admin %}
+          <form method="post" action="/channels/{{ connection.id }}/whatsapp/register">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <label>Neue 6-stellige Aktivierungs-PIN
+              <input type="password" name="registration_pin" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="new-password" required>
+            </label>
+            <p class="field-help">Die PIN wird nur einmal an Meta übertragen und nicht in der Vereinszentrale gespeichert oder protokolliert. Bewahre sie sicher auf.</p>
+            <button>Telefonnummer aktivieren</button>
+          </form>
+          {% endif %}
+        </div>
         {% endif %}
         {% if connection.last_error %}<p class="channel-action-needed">Handlungsbedarf: Verbindung prüfen oder erneuern.</p>{% endif %}
         {% if is_admin %}
@@ -99,7 +115,7 @@
             <dt>Interne Verbindung</dt><dd>{{ connection.id }}</dd>
             <dt>Meta-Konto</dt><dd>{{ connection.external_account_id or '—' }}</dd>
             {% if channel_type == 'facebook' %}<dt>Page ID</dt><dd>{{ connection.external_account_id or '—' }}</dd>{% endif %}
-            {% if channel_type == 'whatsapp' %}<dt>WhatsApp Business Account</dt><dd>{{ connection.parent_business_id or '—' }}</dd><dt>Phone Number ID</dt><dd>{{ connection.phone_number_id or '—' }}</dd>{% endif %}
+            {% if channel_type == 'whatsapp' %}<dt>WhatsApp Business Account</dt><dd>{{ connection.parent_business_id or '—' }}</dd><dt>Phone Number ID</dt><dd>{{ connection.phone_number_id or '—' }}</dd><dt>Telefonregistrierung</dt><dd>{{ 'Bestätigt' if not card.registration_required else 'Noch ausstehend' }}</dd>{% endif %}
             <dt>Graph-Version</dt><dd>{{ connection.api_version or 'zentral konfiguriert' }}</dd>
             <dt>Berechtigungen</dt><dd>{{ connection.scopes | join(', ') if connection.scopes else '—' }}</dd>
             <dt>Verbindungsablauf</dt><dd>{{ connection.token_expires_at | berlin if connection.token_expires_at else 'nicht von Meta gemeldet' }}</dd>

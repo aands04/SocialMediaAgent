@@ -257,12 +257,16 @@ def _assert_gates(
             ]
         )
     if connection.channel_type == "facebook":
-        checks.append(
-            (settings.facebook_channel_enabled, "Facebook ist plattformweit pausiert")
-        )
+        checks.append((settings.facebook_channel_enabled, "Facebook ist plattformweit pausiert"))
     if connection.channel_type == "whatsapp":
-        checks.append(
-            (settings.whatsapp_channel_enabled, "WhatsApp ist plattformweit pausiert")
+        checks.extend(
+            [
+                (settings.whatsapp_channel_enabled, "WhatsApp ist plattformweit pausiert"),
+                (
+                    bool((connection.settings or {}).get("phone_registered")),
+                    "WhatsApp-Telefonnummer ist nicht für die Cloud API aktiviert",
+                ),
+            ]
         )
     for ok, message in checks:
         if not ok:
