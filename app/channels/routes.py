@@ -401,6 +401,15 @@ def check_channel_connection(
         if not legacy_page:
             raise HTTPException(409, "Instagram-Verbindung ist unvollständig")
         return RedirectResponse(f"/instagram/{legacy_page}/meta/check", 307)
+    if item.channel_type == "whatsapp" and not item.encrypted_token:
+        item.status = "disrupted"
+        item.last_error = "Für diese Verbindung ist kein Token gespeichert"
+        item.last_check_at = datetime.now(timezone.utc)
+        db.commit()
+        return _redirect(
+            "/channels/whatsapp/setup",
+            "WhatsApp muss neu verbunden werden",
+        )
     if item.channel_type == "whatsapp" and not whatsapp_phone_is_registered(item):
         item.status = "setup_required"
         item.last_error = (

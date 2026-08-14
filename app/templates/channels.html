@@ -57,7 +57,13 @@
         {% if card.progress and card.progress.completed < card.progress.total %}
         <p class="setup-progress">Einrichtung {{ card.progress.completed }} von {{ card.progress.total }} Schritten</p>
         {% endif %}
-        {% if channel_type == 'whatsapp' and card.registration_required %}
+        {% if channel_type == 'whatsapp' and card.reconnect_required %}
+        <div class="warning">
+          <strong>WhatsApp muss neu verbunden werden</strong>
+          <p>Die bisherige Verbindung enthält keinen verwendbaren Zugriff mehr. Empfänger, Vorlagen, Einstellungen und die Historie bleiben erhalten.</p>
+          {% if is_admin %}<a class="button" href="/channels/whatsapp/setup">WhatsApp neu verbinden</a>{% endif %}
+        </div>
+        {% elif channel_type == 'whatsapp' and card.registration_required %}
         <div class="warning">
           <strong>Telefonnummer noch nicht für Nachrichten aktiviert</strong>
           <p>Die Meta-Anmeldung ist vorhanden, aber die einmalige Registrierung der Telefonnummer für die WhatsApp Cloud API fehlt noch.</p>
@@ -94,10 +100,24 @@
           <div class="button-row">
             <form method="post" action="/channels/{{ connection.id }}/check"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>{{ 'Verbindung und Webhook prüfen' if channel_type == 'whatsapp' else 'Verbindung prüfen' }}</button></form>
             {% if channel_type == 'instagram' and connection.legacy_instagram_page_id %}<form method="post" action="/instagram/{{ connection.legacy_instagram_page_id }}/meta/refresh"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Verbindung erneuern</button></form>
-            {% elif channel_type == 'facebook' %}<a class="button secondary" href="/channels/{{ channel_type }}/setup">Verbindung erneuern</a>{% endif %}
+            {% elif channel_type in ['facebook', 'whatsapp'] %}<a class="button secondary" href="/channels/{{ channel_type }}/setup">{{ 'WhatsApp neu verbinden' if channel_type == 'whatsapp' else 'Verbindung erneuern' }}</a>{% endif %}
           </div>
           {% if channel_type == 'whatsapp' %}
-          <p class="field-help">Die Prüfung kontrolliert Telefonnummer und Webhook-Abonnement. Ein fehlendes Abonnement wird repariert, ohne die Telefonnummer erneut einzurichten.</p>
+          <p class="field-help">Die Prüfung kontrolliert Telefonnummer und Webhook-Abonnement. Fehlt der Zugriff, verbinde WhatsApp erneut; gespeicherte Empfänger, Vorlagen und Einstellungen bleiben bestehen.</p>
+          {% if card.reregistration_available %}
+          <details>
+            <summary>Telefonnummer erneut aktivieren</summary>
+            <p class="field-help">Verwende diese Aktion nach einer Freigabe oder Änderung des WhatsApp-Anzeigenamens. Die vorhandene Telefonnummer wird mit einer neuen sechsstelligen PIN erneut bei Meta registriert.</p>
+            <form method="post" action="/channels/{{ connection.id }}/whatsapp/register">
+              <input type="hidden" name="csrf_token" value="{{ csrf }}">
+              <label>Neue 6-stellige Aktivierungs-PIN
+                <input type="password" name="registration_pin" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="new-password" required>
+              </label>
+              <p class="field-help">Die PIN wird nur einmal an Meta übertragen und weder gespeichert noch protokolliert.</p>
+              <button>Telefonnummer erneut aktivieren</button>
+            </form>
+          </details>
+          {% endif %}
           {% else %}
           <p class="field-help">Meta verlangt gelegentlich eine erneute Bestätigung. Gespeicherte Beiträge und Einstellungen bleiben erhalten.</p>
           {% endif %}
@@ -119,7 +139,7 @@
             <dt>Interne Verbindung</dt><dd>{{ connection.id }}</dd>
             <dt>Meta-Konto</dt><dd>{{ connection.external_account_id or '—' }}</dd>
             {% if channel_type == 'facebook' %}<dt>Page ID</dt><dd>{{ connection.external_account_id or '—' }}</dd>{% endif %}
-            {% if channel_type == 'whatsapp' %}<dt>WhatsApp Business Account</dt><dd>{{ connection.parent_business_id or '—' }}</dd><dt>Phone Number ID</dt><dd>{{ connection.phone_number_id or '—' }}</dd><dt>Telefonregistrierung</dt><dd>{{ 'Bestätigt' if not card.registration_required else 'Noch ausstehend' }}</dd><dt>Webhook-Abonnement</dt><dd>{{ 'Bestätigt' if card.webhook_subscription_confirmed else 'Noch nicht geprüft' }}</dd>{% endif %}
+            {% if channel_type == 'whatsapp' %}<dt>WhatsApp Business Account</dt><dd>{{ connection.parent_business_id or '—' }}</dd><dt>Phone Number ID</dt><dd>{{ connection.phone_number_id or '—' }}</dd><dt>Sicherer Zugriff</dt><dd>{{ 'Vorhanden' if card.has_token else 'Erneute Verbindung erforderlich' }}</dd><dt>Telefonregistrierung</dt><dd>{{ 'Bestätigt' if not card.registration_required else 'Noch ausstehend' }}</dd><dt>Webhook-Abonnement</dt><dd>{{ 'Bestätigt' if card.webhook_subscription_confirmed else 'Noch nicht geprüft' }}</dd>{% endif %}
             <dt>Graph-Version</dt><dd>{{ connection.api_version or 'zentral konfiguriert' }}</dd>
             <dt>Berechtigungen</dt><dd>{{ connection.scopes | join(', ') if connection.scopes else '—' }}</dd>
             <dt>Verbindungsablauf</dt><dd>{{ connection.token_expires_at | berlin if connection.token_expires_at else 'nicht von Meta gemeldet' }}</dd>
