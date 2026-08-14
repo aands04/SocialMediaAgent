@@ -27,6 +27,7 @@ from app.models import (
     SocialChannelConnection,
     Team,
 )
+from app.posts.club_carousel import is_redundant_matchday_bundle_feed
 
 TERMINAL_JOB_STATUSES = {JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED}
 ATTENTION_JOB_STATUSES = {
@@ -365,6 +366,8 @@ def publication_views(
         if channel is None:
             continue
         post = posts.get(job.post_id)
+        if post and is_redundant_matchday_bundle_feed(post, job):
+            continue
         game = games.get(job.game_id) if job.game_id else None
         team = teams.get(job.team_id)
         status, detail, tone, attention, overdue = _status_view(job, channel, now)

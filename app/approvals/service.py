@@ -17,7 +17,10 @@ from app.models import (
     Team,
     User,
 )
-from app.posts.club_carousel import matchday_bundle_jobs
+from app.posts.club_carousel import (
+    matchday_bundle_jobs,
+    reconcile_matchday_bundle_feed_jobs,
+)
 from app.posts.service import PARTIAL_GENERATION_WARNING
 from app.textgen.service import caption_contains_internal_rules
 
@@ -249,22 +252,22 @@ def approve_matchday_bundle(
     selected_channel_connections: list[str] | None = None,
 ) -> Post:
     """Approve the aggregate carousel and all selected per-game stories atomically."""
-    primary, members, visible_jobs, _job_posts = matchday_bundle_jobs(db, post)
-    if len(members) == 1 or post.id != primary.id:
-        return approve(
-            db,
-            post,
-            user,
-            selected_jobs,
-            selected_channel_connections,
-        )
-
-    visible_ids = {job.id for job in visible_jobs}
-    selected_ids = set(selected_jobs) if selected_jobs is not None else visible_ids
-    if not selected_ids or not selected_ids.issubset(visible_ids):
-        raise ApprovalError("Ungültige Auswahl für den gemeinsamen Spieltagsbeitrag")
-
     try:
+        primary, members, visible_jobs, _job_posts = matchday_bundle_jobs(db, post)
+        if len(members) == 1 or post.id != primary.id:
+            return approve(
+                db,
+                post,
+                user,
+                selected_jobs,
+                selected_channel_connections,
+            )
+        reconcile_matchday_bundle_feed_jobs(db, primary)
+        primary, members, visible_jobs, _job_posts = matchday_bundle_jobs(db, primary)
+        visible_ids = {job.id for job in visible_jobs}
+        selected_ids = set(selected_jobs) if selected_jobs is not None else visible_ids
+        if not selected_ids or not selected_ids.issubset(visible_ids):
+            raise ApprovalError("Ungültige Auswahl für den gemeinsamen Spieltagsbeitrag")
         for member in members:
             member_job_ids = [
                 job.id

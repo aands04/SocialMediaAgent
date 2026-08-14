@@ -40,6 +40,7 @@ from app.posts.service import (
     feed_time,
 )
 from app.prompts.service import ResolvedPrompt
+from app.publishing.presentation import operational_channels, publication_views
 from app.publishing.service import DryRunPublisher, PublishError
 from app.publishing.worker import process_job
 from app.textgen.service import FixtureTextGenerator, GeneratedText
@@ -363,6 +364,45 @@ def test_same_club_same_day_builds_one_feed_carousel_and_separate_stories(db, tm
     assert all(job.status != JobStatus.CANCELLED for job in stories)
 
 
+def test_matchday_carousel_cancels_every_individual_feed_slot(db, tmp_path):
+    page = _page(db)
+    first = _team(db, page, number=1, mode="announcements")
+    second = _team(db, page, number=2, mode="announcements")
+    first_game = _game(db, first, hour=13, number=1)
+    second_game = _game(db, second, hour=15, number=2)
+    first_post = _feed_post(db, tmp_path, first, first_game, number=1)
+    second_post = _feed_post(db, tmp_path, second, second_game, number=2)
+    for number, member in enumerate((first_post, second_post), start=1):
+        db.add(
+            PublicationJob(
+                post_id=member.id,
+                game_id=member.game_id,
+                team_id=member.team_id,
+                instagram_page_id=member.instagram_page_id,
+                kind="feed",
+                media_path=member.feed_path,
+                text_snapshot=member.text,
+                scheduled_at=datetime(2026, 8, 8, 19 + number, tzinfo=timezone.utc),
+                idempotency_key=f"{member.id}:feed:extra:v1",
+            )
+        )
+    db.commit()
+
+    state = coordinate_club_matchday_feed(db, second_post, requested_by=None)
+    db.commit()
+
+    feed_jobs = db.query(PublicationJob).filter(
+        PublicationJob.post_id.in_(state.member_post_ids),
+        PublicationJob.channel_type == "instagram",
+        PublicationJob.kind.in_(["feed", "carousel"]),
+    ).all()
+    active = [job for job in feed_jobs if job.status != JobStatus.CANCELLED]
+    assert len(active) == 1
+    assert active[0].post_id == state.primary_post_id
+    assert active[0].kind == "carousel"
+    assert all(job.approval_status == "bundled" for job in feed_jobs if job.id != active[0].id)
+
+
 def test_matchday_dashboard_collects_and_approves_all_member_stories(db, tmp_path):
     page = _page(db)
     first = _team(db, page, number=1, mode="announcements")
@@ -427,6 +467,33 @@ def test_matchday_dashboard_collects_and_approves_all_member_stories(db, tmp_pat
     approved_jobs = [db.get(PublicationJob, job.id) for job in jobs]
     assert all(job.approval_status == "approved" for job in approved_jobs)
     assert all(job.status == JobStatus.SCHEDULED for job in approved_jobs)
+
+    stale_member_feed = PublicationJob(
+        post_id=second_post.id,
+        game_id=second_post.game_id,
+        team_id=second_post.team_id,
+        instagram_page_id=second_post.instagram_page_id,
+        kind="feed",
+        media_path=second_post.feed_path,
+        text_snapshot=second_post.text,
+        scheduled_at=datetime(2026, 8, 8, 19, 0, tzinfo=timezone.utc),
+        idempotency_key=f"{second_post.id}:feed:stale:v1",
+    )
+    db.add(stale_member_feed)
+    db.commit()
+
+    views = publication_views(
+        db,
+        [stale_member_feed],
+        club_id=primary.club_id,
+        channels=operational_channels(db, primary.club_id),
+    )
+    assert views == []
+
+    approve_matchday_bundle(db, primary, approver, [job.id for job in jobs])
+    db.refresh(stale_member_feed)
+    assert stale_member_feed.status == JobStatus.CANCELLED
+    assert stale_member_feed.approval_status == "bundled"
 
 
 def test_games_can_be_consciously_connected_and_separated(db):
