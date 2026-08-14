@@ -15,7 +15,7 @@ from app.channels.api import (
 )
 from app.channels.capabilities import CHANNEL_CAPABILITIES
 from app.config import Settings
-from app.meta.security import TokenCipher, random_oauth_state, secret_hash
+from app.meta.security import MetaSecretError, TokenCipher, random_oauth_state, secret_hash
 from app.models import (
     AuditLog,
     SocialChannelConnection,
@@ -38,6 +38,27 @@ def assert_channel_enabled(settings: Settings, channel_type: str) -> None:
         raise ChannelApiError("Facebook ist plattformweit vorübergehend pausiert")
     if channel_type == "whatsapp" and not settings.whatsapp_channel_enabled:
         raise ChannelApiError("WhatsApp ist plattformweit vorübergehend pausiert")
+
+
+def whatsapp_phone_is_registered(connection: SocialChannelConnection) -> bool:
+    """Return the locally recorded result of Meta's registration endpoint."""
+
+    return bool((connection.settings or {}).get("phone_registered"))
+
+
+def _validated_whatsapp_registration_pin(value: str) -> str:
+    pin = value.strip()
+    if not re.fullmatch(r"[0-9]{6}", pin):
+        raise ChannelApiError("Die WhatsApp-Aktivierungs-PIN muss genau 6 Ziffern haben")
+    return pin
+
+
+def _mark_whatsapp_phone_registered(connection: SocialChannelConnection) -> None:
+    connection.settings = {
+        **(connection.settings or {}),
+        "phone_registered": True,
+        "phone_registered_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def start_channel_oauth(
@@ -210,6 +231,7 @@ def complete_whatsapp_onboarding(
     code: str,
     waba_id: str,
     phone_number_id: str,
+    registration_pin: str,
     api: MetaGraphClient,
 ) -> SocialChannelConnection:
     assert_channel_enabled(settings, "whatsapp")
@@ -221,9 +243,15 @@ def complete_whatsapp_onboarding(
     granted_scopes = api.granted_permissions(token.access_token)
     if WHATSAPP_REQUIRED_SCOPES - granted_scopes:
         raise ChannelApiError("Für WhatsApp fehlt noch mindestens eine erforderliche Berechtigung")
+    pin = _validated_whatsapp_registration_pin(registration_pin)
     phone = api.whatsapp_phone(
         phone_number_id=phone_number_id,
         access_token=token.access_token,
+    )
+    api.register_whatsapp_phone(
+        phone_number_id=phone_number_id,
+        access_token=token.access_token,
+        pin=pin,
     )
     api.subscribe_whatsapp_app(waba_id=waba_id, access_token=token.access_token)
     item = db.scalar(
@@ -244,6 +272,7 @@ def complete_whatsapp_onboarding(
     item.phone_number_id = phone_number_id
     item.display_phone_number = str(phone.get("display_phone_number") or "")
     item.status = "connected"
+    _mark_whatsapp_phone_registered(item)
     item.capabilities = [cap.key for cap in CHANNEL_CAPABILITIES["whatsapp"]]
     item.scopes = sorted(granted_scopes)
     item.encrypted_token = TokenCipher(settings.meta_token_encryption_key).encrypt(
@@ -297,3 +326,64 @@ def complete_whatsapp_onboarding(
     )
     db.commit()
     return item
+
+
+def activate_existing_whatsapp_phone(
+    db: Session,
+    settings: Settings,
+    *,
+    user: User,
+    connection: SocialChannelConnection,
+    registration_pin: str,
+    api: MetaGraphClient,
+) -> SocialChannelConnection:
+    """Finish Cloud API registration for a connection created by older code."""
+
+    assert_channel_enabled(settings, "whatsapp")
+    if connection.channel_type != "whatsapp":
+        raise ChannelApiError("Diese Verbindung ist kein WhatsApp-Kanal")
+    if not connection.phone_number_id or not connection.parent_business_id:
+        raise ChannelApiError("WhatsApp-Konto oder Telefonnummer ist unvollständig")
+    if not connection.encrypted_token:
+        raise ChannelApiError("Die WhatsApp-Verbindung muss zuerst erneuert werden")
+
+    pin = _validated_whatsapp_registration_pin(registration_pin)
+    try:
+        token = TokenCipher(settings.meta_token_encryption_key).decrypt(connection.encrypted_token)
+    except (MetaSecretError, ValueError) as exc:
+        raise ChannelApiError("Die WhatsApp-Verbindung muss zuerst erneuert werden") from exc
+
+    api.register_whatsapp_phone(
+        phone_number_id=connection.phone_number_id,
+        access_token=token,
+        pin=pin,
+    )
+    phone = api.whatsapp_phone(
+        phone_number_id=connection.phone_number_id,
+        access_token=token,
+    )
+    api.subscribe_whatsapp_app(
+        waba_id=connection.parent_business_id,
+        access_token=token,
+    )
+
+    connection.display_phone_number = str(
+        phone.get("display_phone_number") or connection.display_phone_number or ""
+    )
+    _mark_whatsapp_phone_registered(connection)
+    connection.status = "connected"
+    connection.active = True
+    connection.last_check_at = datetime.now(timezone.utc)
+    connection.last_success_at = connection.last_check_at
+    connection.last_error = None
+    db.add(
+        AuditLog(
+            user_id=user.id,
+            action="channel.whatsapp.phone_registered",
+            entity_type="social_channel_connection",
+            entity_id=connection.id,
+            details={"result": "registered"},
+        )
+    )
+    db.commit()
+    return connection

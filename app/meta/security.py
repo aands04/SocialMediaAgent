@@ -60,7 +60,14 @@ def _secret_key(key: object) -> bool:
         "token" in normalized
         or "secret" in normalized
         or "authorization" in normalized
-        or normalized in {"code", "oauth_code"}
+        or normalized
+        in {
+            "code",
+            "oauth_code",
+            "pin",
+            "registration_pin",
+            "two_step_verification_pin",
+        }
     )
 
 

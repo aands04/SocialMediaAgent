@@ -225,6 +225,10 @@ def _assert_delivery_gates(
             "WhatsApp-Verbindung ist nicht versandbereit",
         ),
         (
+            bool((connection.settings or {}).get("phone_registered")),
+            "WhatsApp-Telefonnummer ist nicht für die Cloud API aktiviert",
+        ),
+        (
             audience.active and audience.channel_connection_id == connection.id,
             "WhatsApp-Ziel gehört nicht zur Verbindung",
         ),
