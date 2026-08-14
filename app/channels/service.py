@@ -90,9 +90,12 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
         ]
         progress = None
         registration_required = False
+        has_token = bool(item.encrypted_token)
+        reconnect_required = False
         display_status = item.status
         if item.channel_type == "whatsapp":
             registration_required = not bool((item.settings or {}).get("phone_registered"))
+            reconnect_required = not has_token or item.status == "disconnected"
             if registration_required and item.status == "connected":
                 display_status = "setup_required"
             approved_template = db.scalar(
@@ -129,6 +132,11 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
                 "capability_labels": active_capabilities,
                 "progress": progress,
                 "registration_required": registration_required,
+                "has_token": has_token,
+                "reconnect_required": reconnect_required,
+                "reregistration_available": bool(
+                    has_token and item.phone_number_id and item.parent_business_id
+                ),
                 "webhook_subscription_confirmed": bool(
                     (item.settings or {}).get("webhook_subscription_confirmed")
                 ),

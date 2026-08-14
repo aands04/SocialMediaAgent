@@ -30,6 +30,7 @@ from app.channels.oauth import (
     prepare_facebook_selection,
     start_channel_oauth,
 )
+from app.channels.service import channel_cards
 from app.channels.webhooks import (
     _process_whatsapp_payload,
     _resolve_whatsapp_connection,
@@ -424,6 +425,110 @@ def test_whatsapp_onboarding_starts_disabled_and_synchronizes_approved_template(
     )
     assert template.status == "approved"
     assert template.message_type == "general"
+
+
+def test_whatsapp_onboarding_reuses_disconnected_connection_and_preserves_related_data(db):
+    settings = channel_settings()
+    user = admin_user(db)
+    existing = SocialChannelConnection(
+        channel_type="whatsapp",
+        internal_name="Testverein News",
+        display_name="Testverein News",
+        external_account_id="111111",
+        parent_business_id="111111",
+        phone_number_id="222222",
+        display_phone_number="+49 561 123456",
+        status="disconnected",
+        active=False,
+        settings={
+            "phone_registered": True,
+            "webhook_subscription_confirmed": True,
+        },
+        encrypted_token=None,
+    )
+    db.add(existing)
+    db.flush()
+    template = WhatsAppMessageTemplate(
+        channel_connection_id=existing.id,
+        provider_template_id="historical-template",
+        name="historische_vorlage",
+        message_type="announcement",
+        status="approved",
+    )
+    recipient = WhatsAppRecipient(
+        channel_connection_id=existing.id,
+        normalized_phone="+49561123456",
+        display_name="Historischer Empfänger",
+        opt_in_status="confirmed",
+        active=True,
+    )
+    db.add_all([template, recipient])
+    db.flush()
+
+    reconnected = complete_whatsapp_onboarding(
+        db,
+        settings,
+        user=user,
+        code="embedded-code",
+        waba_id="111111",
+        phone_number_id="222222",
+        registration_pin="123456",
+        api=WhatsAppApiStub(),
+    )
+
+    assert reconnected.id == existing.id
+    assert reconnected.status == "connected"
+    assert reconnected.active is True
+    assert reconnected.encrypted_token
+    assert db.scalar(select(WhatsAppRecipient).where(WhatsAppRecipient.id == recipient.id))
+    assert db.scalar(
+        select(WhatsAppMessageTemplate).where(WhatsAppMessageTemplate.id == template.id)
+    )
+    assert len(
+        list(
+            db.scalars(
+                select(SocialChannelConnection).where(
+                    SocialChannelConnection.channel_type == "whatsapp"
+                )
+            )
+        )
+    ) == 1
+
+
+def test_whatsapp_card_exposes_reconnect_and_reregistration_states(db):
+    disconnected = SocialChannelConnection(
+        channel_type="whatsapp",
+        internal_name="disconnected-whatsapp",
+        display_name="Getrenntes WhatsApp",
+        external_account_id="waba-disconnected",
+        parent_business_id="waba-disconnected",
+        phone_number_id="phone-disconnected",
+        status="disrupted",
+        settings={"phone_registered": True},
+        encrypted_token=None,
+    )
+    connected = SocialChannelConnection(
+        channel_type="whatsapp",
+        internal_name="connected-whatsapp",
+        display_name="Verbundenes WhatsApp",
+        external_account_id="waba-connected",
+        parent_business_id="waba-connected",
+        phone_number_id="phone-connected",
+        status="connected",
+        settings={"phone_registered": True},
+        encrypted_token="encrypted-token-placeholder",
+    )
+    db.add_all([disconnected, connected])
+    db.flush()
+
+    cards = {item["connection"].id: item for item in channel_cards(db)["whatsapp"]}
+
+    assert cards[disconnected.id]["reconnect_required"] is True
+    assert cards[disconnected.id]["has_token"] is False
+    assert cards[disconnected.id]["reregistration_available"] is False
+    assert cards[connected.id]["reconnect_required"] is False
+    assert cards[connected.id]["has_token"] is True
+    assert cards[connected.id]["reregistration_available"] is True
 
 
 def test_whatsapp_onboarding_does_not_require_business_management(db):
