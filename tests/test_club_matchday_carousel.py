@@ -28,6 +28,11 @@ from app.posts.club_carousel import (
     matchday_bundle_jobs,
     reorder_matchday_carousel,
 )
+from app.posts.media_versions import (
+    register_media_version,
+    select_media_version,
+    synchronize_post_versions,
+)
 from app.posts.service import (
     PARTIAL_GENERATION_WARNING,
     create_matchday_bundle_posts,
@@ -627,6 +632,68 @@ def test_preferred_team_image_is_first_even_when_it_plays_later(db, tmp_path):
         first_post.feed_path,
         second_post.feed_path,
     ]
+
+
+def test_selected_member_version_repairs_frozen_carousel_position(db, tmp_path):
+    page = _page(db)
+    first = _team(db, page, number=1, mode="announcements")
+    second = _team(db, page, number=2, mode="announcements")
+    first_game = _game(db, first, hour=15, number=1)
+    second_game = _game(db, second, hour=13, number=2)
+    first_post = _feed_post(db, tmp_path, first, first_game, number=1)
+    _feed_post(db, tmp_path, second, second_game, number=2)
+    state = coordinate_club_matchday_feed(db, first_post, requested_by=None)
+    db.flush()
+
+    primary = db.get(Post, state.primary_post_id)
+    members = matchday_bundle_jobs(db, primary)[1]
+    target = next(member for member in members if member.id != primary.id)
+    synchronize_post_versions(db, primary, legacy_import=True)
+    target_slots = synchronize_post_versions(db, target, legacy_import=True)
+    # Keep the lookup explicit: the cancelled member feed has exactly one feed
+    # output and remains the source slot of this carousel position.
+    slot = next(item for item in target_slots if item.media_kind == "feed")
+    version_three = None
+    for version_number in (2, 3):
+        path = tmp_path / f"target-version-{version_number}.png"
+        Image.new("RGB", (1080, 1350), "green").save(path)
+        version_three = register_media_version(db, target, slot, str(path))
+    assert version_three is not None
+    slot.selection_mode = "manual"
+    slot.selected_version_id = version_three.id
+
+    carousel = db.query(PublicationJob).filter_by(
+        post_id=primary.id,
+        kind="carousel",
+    ).one()
+    position = list(state.member_post_ids).index(target.id) + 1
+    frozen = db.query(PublicationMediaItem).filter_by(
+        publication_job_id=carousel.id,
+        position=position,
+    ).one()
+    assert frozen.media_version_id != version_three.id
+    carousel.status = JobStatus.SCHEDULED
+    carousel.approval_status = "approved"
+    primary.status = PostStatus.APPROVED
+    primary.approved_version = primary.version
+    cancelled_feed = db.query(PublicationJob).filter_by(
+        post_id=target.id,
+        kind="feed",
+    ).one()
+    assert cancelled_feed.status == JobStatus.CANCELLED
+    primary_version = primary.version
+    db.flush()
+
+    select_media_version(db, target, slot.id, version_three.id)
+    db.flush()
+
+    assert frozen.media_version_id == version_three.id
+    assert frozen.media_path == version_three.media_path
+    assert carousel.status == JobStatus.UNAPPROVED
+    assert carousel.approval_status == "reapproval_required"
+    assert primary.status == PostStatus.REAPPROVAL
+    assert primary.version == primary_version + 1
+    assert cancelled_feed.status == JobStatus.CANCELLED
 
 
 def test_default_order_prefers_first_team_even_when_second_team_plays_earlier(db):

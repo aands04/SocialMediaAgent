@@ -351,6 +351,10 @@ def test_post_detail_uses_one_media_catalog_with_per_image_actions():
     source = Path("app/templates/post_detail.html").read_text(encoding="utf-8")
 
     assert source.count("Medien für die Veröffentlichung") == 1
+    assert "Zur Veröffentlichung: Version" in source
+    assert "Im Entwurf ausgewählt: Version" in source
+    assert "Für Veröffentlichung übernehmen" in source
+    assert "media_version.id==slot.selected_version_id %}selected" not in source
     assert "Medienausgaben und Versionen" not in source
     assert "Dieses Karussell enthält genau" in source
     assert "publication.selected_version" in source
