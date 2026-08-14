@@ -2153,6 +2153,95 @@ def test_games_filters_reject_invisible_team(browser):
     assert client.get("/games?contribution_status=unknown").status_code == 422
 
 
+def test_games_page_ignores_superseded_post_approval_status(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="active-post-status-page",
+            display_name="Aktiver Beitragsstatus",
+            username="active_post_status",
+            account_id="ig-active-post-status",
+            club="Dashboard Testverein",
+            active=True,
+            connection_status="connected",
+            publishing_enabled=True,
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="active-post-status-team",
+            display_name="Aktive Mannschaft",
+            short_name="AM",
+            slug="active-post-status-team",
+            club="Dashboard Testverein",
+            fussball_url="https://example.invalid/active-post-status",
+            instagram_page_id=page.id,
+            media_subdir="active-post-status/players",
+            timezone="Europe/Berlin",
+        )
+        db.add(team)
+        db.flush()
+        game = Game(
+            team_id=team.id,
+            provider="mock",
+            external_id="active-post-status-game",
+            home_team=team.display_name,
+            away_team="FC Status",
+            kickoff=datetime.now(timezone.utc) + timedelta(days=4),
+            competition="Kreisliga",
+            venue="Sportplatz",
+            source_url="fixture://active-post-status-game",
+        )
+        db.add(game)
+        db.flush()
+        db.add(
+            Post(
+                game_id=game.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                post_type="announcement",
+                active_key="superseded",
+                status=PostStatus.REAPPROVAL,
+                text="Nicht mehr aktive Beitragsversion",
+            )
+        )
+        active = Post(
+            game_id=game.id,
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type="announcement",
+            status=PostStatus.APPROVED,
+            text="Freigegebene aktive Beitragsversion",
+        )
+        db.add(active)
+        db.flush()
+        active.approved_version = active.version
+        db.add(
+            PublicationJob(
+                post_id=active.id,
+                game_id=game.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                kind="feed",
+                media_path="/tmp/active-post-status.png",
+                scheduled_at=datetime.now(timezone.utc) + timedelta(days=2),
+                status=JobStatus.SCHEDULED,
+                approval_status="approved",
+                approved_post_version=active.version,
+                idempotency_key="active-post-status-feed",
+            )
+        )
+        db.commit()
+        active_id = active.id
+
+    response = client.get("/games")
+
+    assert response.status_code == 200
+    assert "Freigabe ausstehend" not in response.text
+    assert '<strong class="game-status game-status--planned">Geplant</strong>' in response.text
+    assert f'/posts/{active_id}' in response.text
+
+
 def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_path):
     client, factory = browser
     with factory() as db:
