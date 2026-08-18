@@ -183,6 +183,12 @@ def prepare_facebook_selection(
     granted_scopes = api.granted_permissions(token.access_token)
     missing = FACEBOOK_REQUIRED_SCOPES - granted_scopes
     if missing:
+        if "business_management" in missing:
+            raise ChannelApiError(
+                "Meta hat den Zugriff auf das Business-Portfolio nicht bestätigt. "
+                "Bitte Facebook erneut verbinden und im Meta-Dialog den Zugriff "
+                "auf den Verein sowie seine Facebook-Seite erlauben."
+            )
         raise ChannelApiError("Für Facebook fehlt noch mindestens eine erforderliche Berechtigung")
     pages = api.managed_pages(token.access_token)
     if not pages:
