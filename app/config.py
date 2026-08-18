@@ -93,6 +93,19 @@ class Settings(BaseSettings):
     fussball_result_stability_seconds: int = 600
     fussball_result_max_age_hours: int = 48
     fussball_decode_obfuscated_results: bool = True
+    # FuPa-Spielberichte are isolated from the existing FUSSBALL.DE import.
+    # Every state-changing automation is deliberately opt-in.
+    fupa_reports_enabled: bool = False
+    fupa_report_automatic_generation_enabled: bool = False
+    fupa_report_automatic_publish_enabled: bool = False
+    fupa_report_poll_interval_seconds: int = 900
+    fupa_report_first_check_minutes: int = 30
+    fupa_report_max_poll_hours: int = 6
+    fupa_report_batch_size: int = 5
+    fupa_report_whatsapp_wait_minutes: int = 30
+    fupa_report_feedback_template_name: str = "spielbericht_rueckfrage"
+    fupa_report_feedback_template_language: str = "de"
+    fupa_http_timeout_seconds: float = 20.0
     provider_snapshot_root: Path = Path("data/provider-snapshots")
     log_root: Path = Path("data/logs")
     backup_root: Path = Path("data/backups")

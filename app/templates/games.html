@@ -181,6 +181,7 @@
         <details class="game-card-details game-more-actions">
           <summary>Weitere Aktionen</summary>
           <div class="game-more-actions__content">
+            <a class="button secondary" href="/games/{{x.id}}/match-report">FuPa-Spielbericht bearbeiten</a>
             {% if x.overrides.get('provider_status')=='provisional' and not x.overrides.get('provisional_confirmed_by') %}
             <form method="post" action="/games/{{x.id}}/confirm-provisional" onsubmit="return confirm('Diesen vorläufigen Spieltermin für die Beitragserstellung manuell bestätigen?');">
               <input type="hidden" name="csrf_token" value="{{csrf}}"><button class="secondary">Termin manuell bestätigen</button>

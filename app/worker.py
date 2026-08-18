@@ -14,6 +14,7 @@ from app.db import SessionLocal
 from app.games.automatic import run_automatic_fussball_cycle, run_due_generation_cycle
 from app.jobs.generation import claim_next, process_generation_job
 from app.live.publishing import LivePublishingError, run_live_delivery_cycle
+from app.match_reports.scheduler import run_match_report_cycle
 from app.meta.connection_health import run_automatic_connection_check_cycle
 from app.meta.publishing import MetaPublishingError
 from app.meta.scheduler import run_automatic_publishing_cycle
@@ -148,6 +149,7 @@ def run():
         fussball_result = None
         generation_planning_result = None
         creative_profile_result = None
+        match_report_result = None
         with SessionLocal() as db:
             if loops == 1 or loops % 240 == 0:
                 try:
@@ -189,6 +191,21 @@ def run():
                             "automatic_generation_jobs_planned",
                             **generation_planning_result.__dict__,
                         )
+            if settings.fupa_reports_enabled and (loops == 1 or loops % 4 == 0):
+                try:
+                    match_report_result = run_match_report_cycle(db, settings)
+                    if match_report_result.checked:
+                        log.info(
+                            "fupa_match_report_cycle_finished",
+                            **_result_payload(match_report_result),
+                        )
+                except Exception as exc:
+                    db.rollback()
+                    log.error(
+                        "fupa_match_report_cycle_blocked",
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:500],
+                    )
             generation_ids = []
             for _ in range(5):
                 with system_scope("Generierungsauftrag global beanspruchen"):
@@ -310,6 +327,7 @@ def run():
             "creative_profile_cycle": (
                 _result_payload(creative_profile_result)
             ),
+            "fupa_match_report_cycle": _result_payload(match_report_result),
         }
         temporary = settings.log_root / "worker-heartbeat.tmp"
         temporary.write_text(json.dumps(payload))

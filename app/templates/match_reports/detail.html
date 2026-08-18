@@ -1,0 +1,115 @@
+{% extends 'base.html' %}
+{% block content %}
+<header class="section-heading match-report-heading">
+  <div>
+    <p class="eyebrow">Spielbericht</p>
+    <h1>{{game.home_team}} – {{game.away_team}}</h1>
+    <p>{{team.display_name if team else 'Mannschaft'}} · {{game.kickoff|berlin}}</p>
+  </div>
+  <a class="button secondary" href="/games">Zurück zu den Spielen</a>
+</header>
+
+<section class="match-report-status">
+  <div><span class="eyebrow">Ergebnis</span><strong>{% if game.result_confirmed %}{{game.home_score}} : {{game.away_score}} · bestätigt{% else %}Noch nicht bestätigt{% endif %}</strong></div>
+  <div><span class="eyebrow">Berichtsstatus</span><strong>{{status_labels.get(report.status, report.status) if report else 'Noch nicht angelegt'}}</strong></div>
+  <div><span class="eyebrow">Aktuelle Fassung</span><strong>{% if version %}Version {{version.version_number}}{% else %}Noch keine{% endif %}</strong></div>
+  <div><span class="eyebrow">Automatik</span><strong>{% if automatic_enabled %}Aktiv{% else %}Sicher deaktiviert{% endif %}</strong></div>
+</section>
+
+<div class="match-report-layout">
+<main>
+  <section>
+    <div class="section-heading"><div><p class="eyebrow">1 · Quellen</p><h2>FuPa und bestätigte Informationen</h2></div></div>
+    <p>FuPa wird ausschließlich lesend über die hinterlegte öffentliche Spielseite abgerufen. Widersprüche blockieren Freigabe und Übertragung.</p>
+    <form method="post" action="/games/{{game.id}}/match-report/source" class="match-report-source-form">
+      <input type="hidden" name="csrf_token" value="{{csrf}}">
+      <label>FuPa-Spiel-URL
+        <input type="url" name="fupa_url" value="{{game.fupa_url or ''}}" placeholder="https://www.fupa.net/match/...">
+        <small>Nur öffentliche HTTPS-Spielseiten auf fupa.net werden akzeptiert.</small>
+      </label>
+      <button>Quelle speichern</button>
+    </form>
+    {% if game.fupa_url %}
+    <form method="post" action="/games/{{game.id}}/match-report/refresh" class="button-row">
+      <input type="hidden" name="csrf_token" value="{{csrf}}"><button>FuPa jetzt abrufen</button>
+    </form>
+    {% endif %}
+    {% if snapshot %}
+    <div class="match-source-card match-source-card--{{snapshot.fetch_status}}">
+      <strong>Letzter Abruf: {{snapshot.fetch_status}}</strong>
+      <span>{{snapshot.fetched_at|berlin}}</span>
+      <small>{{snapshot.ticker_data|length}} Tickereinträge · Versuch {{snapshot.attempt_count}}</small>
+      {% if snapshot.last_error %}<p class="error">{{snapshot.last_error}}</p>{% endif %}
+    </div>
+    {% else %}<p class="empty-state">Noch kein FuPa-Abruf vorhanden.</p>{% endif %}
+
+    {% if content_context and content_context.conflicts %}
+    <div class="warning"><strong>Quellenkonflikte</strong><ul>{% for conflict in content_context.conflicts %}<li>{{conflict.message}}</li>{% endfor %}</ul></div>
+    {% endif %}
+
+    <details class="match-report-details">
+      <summary>Redaktionelle Information ergänzen</summary>
+      <form method="post" action="/games/{{game.id}}/match-report/note">
+        <input type="hidden" name="csrf_token" value="{{csrf}}">
+        <label>Notiz<textarea name="body" rows="4" maxlength="5000" required></textarea></label>
+        <label class="checkbox-label"><input type="checkbox" name="confirmed_facts" value="true"> Enthält verbindlich geprüfte Fakten</label>
+        <button>Notiz speichern</button>
+      </form>
+      {% if notes %}<ul class="match-report-list">{% for note in notes %}<li><strong>{% if note.confirmed_facts %}Bestätigte Fakten{% else %}Redaktionelle Notiz{% endif %}</strong><p>{{note.body}}</p></li>{% endfor %}</ul>{% endif %}
+    </details>
+  </section>
+
+  <section>
+    <p class="eyebrow">2 · Rückfragen</p><h2>WhatsApp-Rückmeldungen</h2>
+    <p>Nur aktivierte Kontakte mit dokumentierter Einwilligung werden gefragt. Keine Antwort blockiert die Berichtserstellung nicht dauerhaft.</p>
+    {% if contacts %}
+    <form method="post" action="/games/{{game.id}}/match-report/feedback">
+      <input type="hidden" name="csrf_token" value="{{csrf}}"><button>Rückfragen jetzt versenden</button>
+    </form>
+    {% else %}<p class="empty-state">Für diese Mannschaft ist noch kein Rückfragekontakt eingerichtet.</p>{% endif %}
+    {% if feedback_requests %}<ul class="match-report-list">{% for item in feedback_requests %}<li><strong>{{item.status}}</strong> · {{item.requested_at|berlin if item.requested_at else 'noch nicht versendet'}}{% if responses_by_request.get(item.id) %}<blockquote>{{responses_by_request[item.id].body}}</blockquote>{% endif %}{% if item.last_error %}<small class="error">{{item.last_error}}</small>{% endif %}</li>{% endfor %}</ul>{% endif %}
+    {% if can_admin %}
+    <details class="match-report-details"><summary>Rückfragekontakt hinzufügen</summary>
+      {% if recipients %}<form method="post" action="/games/{{game.id}}/match-report/contact"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>WhatsApp-Kontakt<select name="recipient_id" required>{% for recipient in recipients %}<option value="{{recipient.id}}">{{recipient.display_name or recipient.normalized_phone}} · {{recipient.normalized_phone}}</option>{% endfor %}</select></label><label>Funktion im Team<input name="role_label" maxlength="120" placeholder="z. B. Trainer"></label><button>Kontakt verwenden</button></form>{% else %}<p>Es ist kein aktiver WhatsApp-Empfänger mit bestätigter Einwilligung vorhanden.</p>{% endif %}
+    </details>
+    {% endif %}
+  </section>
+
+  <section>
+    <p class="eyebrow">3 · Erstellung</p><h2>Spielbericht erzeugen</h2>
+    <p>Die KI darf ausschließlich die angezeigten, bestätigten Quellen nutzen. Nicht belegte Spielszenen, Zitate und Personen werden nicht erfunden.</p>
+    <form method="post" action="/games/{{game.id}}/match-report/generate" class="button-row">
+      <input type="hidden" name="csrf_token" value="{{csrf}}">
+      <label>Länge<select name="desired_length"><option value="short" {% if report and report.desired_length=='short' %}selected{% endif %}>Kurz</option><option value="medium" {% if not report or report.desired_length=='medium' %}selected{% endif %}>Mittel</option><option value="long" {% if report and report.desired_length=='long' %}selected{% endif %}>Ausführlich</option></select></label>
+      <button {% if content_context and content_context.has_blocking_conflicts %}disabled title="Zuerst Quellenkonflikte klären"{% endif %}>Neue Fassung erstellen</button>
+    </form>
+  </section>
+
+  {% if version %}
+  <section>
+    <p class="eyebrow">4 · Redaktion</p><h2>Aktuelle Fassung · Version {{version.version_number}}</h2>
+    <article class="match-report-copy"><h3>{{version.headline}}</h3>{% if version.teaser %}<p class="lead">{{version.teaser}}</p>{% endif %}<div class="pre-line">{{version.body}}</div></article>
+    <details class="match-report-details"><summary>Text bearbeiten und neue Version anlegen</summary>
+      <form method="post" action="/games/{{game.id}}/match-report/edit"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Überschrift<input name="headline" maxlength="300" value="{{version.headline}}" required></label><label>Vorspann<textarea name="teaser" rows="3">{{version.teaser or ''}}</textarea></label><label>Bericht<textarea name="body" rows="16" required>{{version.body}}</textarea></label><label>Änderungsgrund<input name="change_reason" maxlength="500" required placeholder="Was wurde geändert?"></label><button>Als neue Version speichern</button></form>
+    </details>
+    <details class="match-report-details"><summary>Frühere Fassungen ({{versions|length}})</summary><div class="match-version-list">{% for item in versions %}<article class="{% if item.version_number==report.current_version_number %}is-current{% endif %}"><strong>Version {{item.version_number}} · {{item.origin}}</strong><small>{{item.created_at|berlin}}{% if item.change_reason %} · {{item.change_reason}}{% endif %}</small><h4>{{item.headline}}</h4></article>{% endfor %}</div></details>
+  </section>
+
+  <section>
+    <p class="eyebrow">5 · Freigabe und FuPa</p><h2>Kontrollierte Übergabe</h2>
+    <p>Eine direkte offizielle FuPa-Schreibschnittstelle ist nicht hinterlegt. Deshalb wird ausschließlich eine manuelle, idempotente Übergabe vorbereitet.</p>
+    <div class="button-row">
+      <form method="post" action="/games/{{game.id}}/match-report/approve" onsubmit="return confirm('Diese Berichtsfassung verbindlich freigeben?');"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="approve">Bericht freigeben</button></form>
+      {% if report.status=='approved' %}<form method="post" action="/games/{{game.id}}/match-report/publish"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Manuelle FuPa-Übertragung vorbereiten</button></form>{% endif %}
+    </div>
+    {% if publications %}<ul class="match-report-list">{% for item in publications %}<li><strong>{{item.status}}</strong> · {{item.created_at|berlin}}{% if item.last_error %}<small>{{item.last_error}}</small>{% endif %}</li>{% endfor %}</ul>{% endif %}
+  </section>
+  {% endif %}
+</main>
+
+<aside>
+  <section class="match-report-sidebar-card"><h2>Quellenübersicht</h2>{% if content_context %}<dl><dt>FuPa-Fakten</dt><dd>{{content_context.facts|length}}</dd><dt>Tickerereignisse</dt><dd>{{content_context.events|length}}</dd><dt>Rückmeldungen</dt><dd>{{content_context.feedback|length}}</dd><dt>Manuelle Notizen</dt><dd>{{content_context.manual_notes|length}}</dd></dl>{% else %}<p>Noch keine auswertbaren Quellen.</p>{% endif %}</section>
+  {% if can_admin %}<section class="match-report-sidebar-card"><h2>Schreibstil lernen</h2><p>Beispiele beeinflussen nur Tonalität und Aufbau, niemals die Fakten.</p><form method="post" action="/games/{{game.id}}/match-report/writing-example"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Kategorie<select name="category"><option value="general">Allgemein</option><option value="win">Sieg</option><option value="loss">Niederlage</option><option value="draw">Unentschieden</option><option value="derby">Derby</option><option value="cup">Pokal</option><option value="friendly">Freundschaftsspiel</option></select></label><label>Titel<input name="title" maxlength="240"></label><label>Beispieltext<textarea name="body" rows="8" maxlength="12000" required></textarea></label><button>Beispiel speichern</button></form></section>{% endif %}
+</aside>
+</div>
+{% endblock %}

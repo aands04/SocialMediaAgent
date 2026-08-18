@@ -228,3 +228,15 @@ Folgeentscheidung besitzen getrennte Idempotenzschlüssel. Externe
 Auslieferungen umgehen weder die bestehenden Kanal- und Not-Aus-Schalter noch
 Opt-in-, Template-, Freigabe- oder Quotenprüfungen. Details stehen in
 [`docs/LIVE_CENTER.md`](docs/LIVE_CENTER.md).
+
+## FuPa-Spielberichte
+
+`app.match_reports` kapselt FuPa-Lesen, Quellenzusammenführung,
+Faktenvalidierung, Rückfragen, Versionierung und die kontrollierte Übergabe.
+Jeder Datensatz trägt eine `club_id`; Abrufe, Routes und Worker prüfen zusätzlich
+Spiel- und Mannschaftszugehörigkeit. Ein `MatchContentContext` priorisiert
+strukturierte FuPa-Daten vor FuPa-Ticker, bestätigten manuellen Angaben und
+eindeutigen WhatsApp-Rückmeldungen. Widersprüche bleiben sichtbar und sperren
+Generierung beziehungsweise Freigabe. Mangels dokumentierter Schreib-API nutzt
+der `FupaPublisher` derzeit ausschließlich eine idempotente manuelle Übergabe.
+Details stehen in [`docs/FUPA_MATCH_REPORTS.md`](docs/FUPA_MATCH_REPORTS.md).

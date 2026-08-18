@@ -264,6 +264,18 @@ Opt-in-Prüfungen. Einrichtung, Datenschutz, Providergrenzen und Rollout sind in
 Die WhatsApp-Einrichtung und der sichere Live-Versand sind in
 [`docs/WHATSAPP.md`](docs/WHATSAPP.md) beschrieben.
 
+## FuPa-Spielberichte
+
+Die optionale Spielberichtsfunktion führt strukturierte FuPa-Daten,
+bestätigte Live-Ereignisse, manuelle Vereinsangaben und eindeutig zugeordnete
+WhatsApp-Rückmeldungen in einem quellenbelegten Bericht zusammen. Konflikte
+blockieren Freigabe und Übergabe; jede Textänderung erzeugt eine unveränderliche
+Version. Da keine dokumentierte FuPa-Schreib-API vorausgesetzt wird, erfolgt die
+Übergabe sicher und manuell. Leser, automatische Generierung und automatische
+Veröffentlichung sind standardmäßig deaktiviert. Architektur, Betrieb und
+Sicherheitsgrenzen beschreibt
+[`docs/FUPA_MATCH_REPORTS.md`](docs/FUPA_MATCH_REPORTS.md).
+
 ## Creative Intelligence
 
 Creative Intelligence speichert Auswahl-, Freigabe-, Ablehnungs-,

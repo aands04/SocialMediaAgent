@@ -389,6 +389,7 @@ class Team(Base, Timestamped):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fussball_url: Mapped[str] = mapped_column(String(1000))
+    fupa_url: Mapped[str | None] = mapped_column(String(1000))
     # Compatibility link for the original Instagram-only workflow. New teams
     # may be created without Instagram and use TeamChannelAssignment instead.
     instagram_page_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
@@ -441,6 +442,7 @@ class Game(Base, Timestamped):
     halftime: Mapped[str | None] = mapped_column(String(20))
     result_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
     source_url: Mapped[str] = mapped_column(String(1000))
+    fupa_url: Mapped[str | None] = mapped_column(String(1000))
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     overrides: Mapped[dict] = mapped_column(JSON, default=dict)
     data_hash: Mapped[str | None] = mapped_column(String(64))
@@ -1969,6 +1971,264 @@ class MetaPublishConfirmation(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class FupaMatchSnapshot(Base, Timestamped):
+    """Immutable, tenant-owned result of one FuPa read operation."""
+
+    __tablename__ = "fupa_match_snapshots"
+    __table_args__ = (
+        UniqueConstraint("club_id", "game_id", "content_digest", name="uq_fupa_snapshot_digest"),
+        ForeignKeyConstraint(
+            ["game_id", "club_id"], ["games.id", "games.club_id"], ondelete="CASCADE"
+        ),
+        CheckConstraint(
+            "fetch_status IN ('pending','success','not_found','incomplete','failed')",
+            name="ck_fupa_snapshot_fetch_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    game_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_url: Mapped[str] = mapped_column(String(1000))
+    fetch_status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    structured_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    ticker_data: Mapped[list] = mapped_column(JSON, default=list)
+    source_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    content_digest: Mapped[str] = mapped_column(String(64), index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1)
+    last_error_category: Mapped[str | None] = mapped_column(String(80))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class MatchFeedbackContact(Base, Timestamped):
+    __tablename__ = "match_feedback_contacts"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_match_feedback_contacts_id_club"),
+        UniqueConstraint(
+            "club_id", "team_id", "normalized_phone", name="uq_match_feedback_contact_phone"
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["recipient_id", "club_id"],
+            ["whatsapp_recipients.id", "whatsapp_recipients.club_id"],
+            ondelete="RESTRICT",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    team_id: Mapped[str] = mapped_column(String(36), index=True)
+    recipient_id: Mapped[str] = mapped_column(String(36), index=True)
+    normalized_phone: Mapped[str] = mapped_column(String(32))
+    display_name: Mapped[str] = mapped_column(String(160))
+    role_label: Mapped[str | None] = mapped_column(String(120))
+    request_match_reports: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+
+
+class MatchFeedbackRequest(Base, Timestamped):
+    __tablename__ = "match_feedback_requests"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_match_feedback_requests_id_club"),
+        UniqueConstraint("club_id", "idempotency_key", name="uq_match_feedback_request_key"),
+        ForeignKeyConstraint(
+            ["game_id", "club_id"], ["games.id", "games.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["contact_id", "club_id"],
+            ["match_feedback_contacts.id", "match_feedback_contacts.club_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["channel_connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["template_id", "club_id"],
+            ["whatsapp_message_templates.id", "whatsapp_message_templates.club_id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('pending','sent','answered','expired','failed','cancelled')",
+            name="ck_match_feedback_request_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    game_id: Mapped[str] = mapped_column(String(36), index=True)
+    team_id: Mapped[str] = mapped_column(String(36), index=True)
+    contact_id: Mapped[str] = mapped_column(String(36), index=True)
+    channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    template_id: Mapped[str | None] = mapped_column(String(36))
+    provider_message_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200))
+    requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class MatchFeedbackResponse(Base, Timestamped):
+    __tablename__ = "match_feedback_responses"
+    __table_args__ = (
+        UniqueConstraint("club_id", "provider_message_id", name="uq_match_feedback_response_msg"),
+        ForeignKeyConstraint(
+            ["request_id", "club_id"],
+            ["match_feedback_requests.id", "match_feedback_requests.club_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    request_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider_message_id: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(Text)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ClubWritingExample(Base, Timestamped):
+    __tablename__ = "club_writing_examples"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="CASCADE"
+        ),
+        UniqueConstraint("id", "club_id", name="uq_club_writing_examples_id_club"),
+        CheckConstraint(
+            "category IN ('general','win','loss','draw','derby','cup','friendly')",
+            name="ck_club_writing_example_category",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    team_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    category: Mapped[str] = mapped_column(String(30), default="general", index=True)
+    title: Mapped[str | None] = mapped_column(String(240))
+    body: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class MatchManualNote(Base, Timestamped):
+    __tablename__ = "match_manual_notes"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["game_id", "club_id"], ["games.id", "games.club_id"], ondelete="CASCADE"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    game_id: Mapped[str] = mapped_column(String(36), index=True)
+    body: Mapped[str] = mapped_column(Text)
+    confirmed_facts: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class MatchReport(Base, Timestamped):
+    __tablename__ = "match_reports"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_match_reports_id_club"),
+        UniqueConstraint("club_id", "game_id", "report_type", name="uq_match_report_game_type"),
+        ForeignKeyConstraint(
+            ["game_id", "club_id"], ["games.id", "games.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["team_id", "club_id"], ["teams.id", "teams.club_id"], ondelete="RESTRICT"
+        ),
+        CheckConstraint(
+            "status IN ('waiting_for_sources','waiting_for_feedback','ready_to_generate',"
+            "'conflict_requires_review','generating','draft','review_required','approved',"
+            "'publishing','published','failed','cancelled')",
+            name="ck_match_report_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    team_id: Mapped[str] = mapped_column(String(36), index=True)
+    game_id: Mapped[str] = mapped_column(String(36), index=True)
+    report_type: Mapped[str] = mapped_column(String(30), default="match_report")
+    status: Mapped[str] = mapped_column(String(40), default="waiting_for_sources", index=True)
+    desired_length: Mapped[str] = mapped_column(String(20), default="medium")
+    source_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_conflicts: Mapped[list] = mapped_column(JSON, default=list)
+    generation_settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    generation_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    current_version_number: Mapped[int | None] = mapped_column(Integer)
+    automatic_publish_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    approved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_category: Mapped[str | None] = mapped_column(String(80))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class MatchReportVersion(Base, Timestamped):
+    __tablename__ = "match_report_versions"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_match_report_versions_id_club"),
+        UniqueConstraint("club_id", "report_id", "version_number", name="uq_match_report_version"),
+        ForeignKeyConstraint(
+            ["report_id", "club_id"], ["match_reports.id", "match_reports.club_id"], ondelete="CASCADE"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    report_id: Mapped[str] = mapped_column(String(36), index=True)
+    version_number: Mapped[int] = mapped_column(Integer)
+    origin: Mapped[str] = mapped_column(String(30), default="generated")
+    headline: Mapped[str] = mapped_column(String(300))
+    teaser: Mapped[str | None] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text)
+    used_sources: Mapped[list] = mapped_column(JSON, default=list)
+    omitted_sources: Mapped[list] = mapped_column(JSON, default=list)
+    source_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    model: Mapped[str | None] = mapped_column(String(100))
+    prompt_template_id: Mapped[str | None] = mapped_column(String(100))
+    prompt_version: Mapped[int | None] = mapped_column(Integer)
+    change_reason: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class MatchReportPublication(Base, Timestamped):
+    __tablename__ = "match_report_publications"
+    __table_args__ = (
+        UniqueConstraint("club_id", "idempotency_key", name="uq_match_report_publication_key"),
+        ForeignKeyConstraint(
+            ["report_id", "club_id"], ["match_reports.id", "match_reports.club_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(
+            ["version_id", "club_id"],
+            ["match_report_versions.id", "match_report_versions.club_id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('pending','publishing','published','manual_required','retry','failed','cancelled')",
+            name="ck_match_report_publication_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    report_id: Mapped[str] = mapped_column(String(36), index=True)
+    version_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider: Mapped[str] = mapped_column(String(30), default="fupa")
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200))
+    external_id: Mapped[str | None] = mapped_column(String(200))
+    external_url: Mapped[str | None] = mapped_column(String(1000))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_error_category: Mapped[str | None] = mapped_column(String(80))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AuditLog(Base):
