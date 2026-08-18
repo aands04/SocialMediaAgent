@@ -15,6 +15,15 @@ FACEBOOK_REQUIRED_SCOPES = {
     "pages_read_engagement",
     "pages_show_list",
 }
+FACEBOOK_PUBLISH_TASKS = {
+    # Legacy task names are kept for existing Meta connections.
+    "CREATE_CONTENT",
+    "MANAGE",
+    # Current Page task names returned by recent Graph API versions.
+    "PROFILE_PLUS_CREATE_CONTENT",
+    "PROFILE_PLUS_MANAGE",
+    "PROFILE_PLUS_FULL_CONTROL",
+}
 WHATSAPP_REQUIRED_SCOPES = {
     "whatsapp_business_management",
     "whatsapp_business_messaging",
@@ -141,7 +150,7 @@ class MetaGraphClient:
         return MetaToken(token, int(data["expires_in"]) if data.get("expires_in") else None)
 
     def managed_pages(self, access_token: str) -> list[dict]:
-        pages = []
+        candidates: dict[str, dict] = {}
         after = None
         for _page in range(10):
             params = {
@@ -159,24 +168,93 @@ class MetaGraphClient:
             )
             for item in data.get("data", []):
                 page_id = str(item.get("id") or "")
-                page_token = str(item.get("access_token") or "")
-                tasks = {str(value).upper() for value in item.get("tasks", [])}
-                if not page_id or not page_token:
-                    continue
-                pages.append(
-                    {
-                        "id": page_id,
-                        "name": str(item.get("name") or "Facebook-Seite"),
-                        "access_token": page_token,
-                        "tasks": sorted(tasks),
-                        "can_publish": "CREATE_CONTENT" in tasks or "MANAGE" in tasks,
-                    }
-                )
+                if page_id:
+                    candidates[page_id] = item
             paging = data.get("paging") or {}
             after = str((paging.get("cursors") or {}).get("after") or "")
             if not after or not paging.get("next"):
                 break
+
+        # Meta can expose the selected Page only as a granular permission
+        # target, or omit its Page token from /me/accounts. In either case the
+        # official Page endpoint can resolve the Page token with the user token.
+        target_page_ids = self._granted_facebook_page_ids(access_token)
+        for page_id in target_page_ids:
+            candidates.setdefault(page_id, {"id": page_id})
+
+        pages = []
+        unresolved_page_ids = []
+        for page_id, candidate in candidates.items():
+            item = candidate
+            if not item.get("access_token"):
+                try:
+                    item = self._facebook_page_access(
+                        page_id=page_id,
+                        user_access_token=access_token,
+                    )
+                except ChannelApiError:
+                    unresolved_page_ids.append(page_id)
+                    continue
+
+            page_token = str(item.get("access_token") or "")
+            if not page_token:
+                unresolved_page_ids.append(page_id)
+                continue
+            tasks = {str(value).upper() for value in item.get("tasks", [])}
+            pages.append(
+                {
+                    "id": page_id,
+                    "name": str(item.get("name") or candidate.get("name") or "Facebook-Seite"),
+                    "access_token": page_token,
+                    "tasks": sorted(tasks),
+                    "can_publish": bool(tasks & FACEBOOK_PUBLISH_TASKS),
+                }
+            )
+
+        if not pages and (target_page_ids or unresolved_page_ids):
+            raise ChannelApiError(
+                "Die ausgewählte Facebook-Seite wurde gefunden, aber Meta hat keinen "
+                "verwendbaren Seitenzugriff bereitgestellt. Bitte Facebook erneut "
+                "verbinden und den vollständigen Seitenzugriff bestätigen."
+            )
         return pages
+
+    def _granted_facebook_page_ids(self, access_token: str) -> set[str]:
+        data = self._request_json(
+            "GET",
+            "me/permissions",
+            "Facebook-Seitenauswahl prüfen",
+            params={
+                "fields": "permission,status,granular_scopes",
+                "access_token": access_token,
+            },
+        )
+        page_ids: set[str] = set()
+        for item in data.get("data", []):
+            if item.get("status") != "granted":
+                continue
+            permission = str(item.get("permission") or "")
+            if permission not in FACEBOOK_REQUIRED_SCOPES:
+                continue
+            for granular_scope in item.get("granular_scopes") or []:
+                if not isinstance(granular_scope, dict):
+                    continue
+                for target_id in granular_scope.get("target_ids") or []:
+                    value = str(target_id or "").strip()
+                    if value:
+                        page_ids.add(value)
+        return page_ids
+
+    def _facebook_page_access(self, *, page_id: str, user_access_token: str) -> dict:
+        return self._request_json(
+            "GET",
+            page_id,
+            "Facebook-Seitenzugriff abrufen",
+            params={
+                "fields": "id,name,access_token,tasks,picture",
+                "access_token": user_access_token,
+            },
+        )
 
     def granted_permissions(self, access_token: str) -> set[str]:
         data = self._request_json(
