@@ -12,6 +12,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import select
 
 from app.channels.api import (
+    FACEBOOK_PUBLISH_TASKS,
     FACEBOOK_REQUIRED_SCOPES,
     WHATSAPP_REQUIRED_SCOPES,
     ChannelApiError,
@@ -101,6 +102,108 @@ def test_channel_client_uses_dedicated_meta_app_id():
 
     assert "client_id=channels-app" in url
     assert "instagram-app" not in url
+
+
+def test_facebook_managed_pages_accepts_current_profile_plus_tasks():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/me/accounts"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "123456",
+                            "name": "Testvereinsseite",
+                            "access_token": "page-access-token",
+                            "tasks": ["PROFILE_PLUS_CREATE_CONTENT"],
+                        }
+                    ]
+                },
+            )
+        if request.url.path.endswith("/me/permissions"):
+            return httpx.Response(200, json={"data": []})
+        raise AssertionError(f"Unerwarteter Meta-Aufruf: {request.url}")
+
+    client = MetaGraphClient(
+        channel_settings(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    pages = client.managed_pages("user-access-token")
+
+    assert pages == [
+        {
+            "id": "123456",
+            "name": "Testvereinsseite",
+            "access_token": "page-access-token",
+            "tasks": ["PROFILE_PLUS_CREATE_CONTENT"],
+            "can_publish": True,
+        }
+    ]
+    assert "PROFILE_PLUS_CREATE_CONTENT" in FACEBOOK_PUBLISH_TASKS
+
+
+def test_facebook_managed_pages_recovers_granularly_selected_page():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/me/accounts"):
+            return httpx.Response(200, json={"data": []})
+        if request.url.path.endswith("/me/permissions"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "permission": "pages_manage_posts",
+                            "status": "granted",
+                            "granular_scopes": [
+                                {
+                                    "scope": "pages_manage_posts",
+                                    "target_ids": ["123456"],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+        if request.url.path.endswith("/123456"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "123456",
+                    "name": "Ausgewählte Vereinsseite",
+                    "access_token": "page-access-token",
+                    "tasks": ["PROFILE_PLUS_FULL_CONTROL"],
+                },
+            )
+        raise AssertionError(f"Unerwarteter Meta-Aufruf: {request.url}")
+
+    client = MetaGraphClient(
+        channel_settings(),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    pages = client.managed_pages("user-access-token")
+
+    assert pages == [
+        {
+            "id": "123456",
+            "name": "Ausgewählte Vereinsseite",
+            "access_token": "page-access-token",
+            "tasks": ["PROFILE_PLUS_FULL_CONTROL"],
+            "can_publish": True,
+        }
+    ]
+    assert [request.url.path.rsplit("/", 1)[-1] for request in requests] == [
+        "accounts",
+        "permissions",
+        "123456",
+    ]
 
 
 def test_whatsapp_phone_registration_uses_official_endpoint_without_exposing_pin():

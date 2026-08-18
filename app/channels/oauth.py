@@ -86,9 +86,7 @@ def ensure_whatsapp_webhook_subscription(
             access_token=access_token,
         )
         if not _whatsapp_app_is_subscribed(subscribed, app_id):
-            raise ChannelApiError(
-                "Das WhatsApp-Webhook-Abonnement konnte nicht bestätigt werden"
-            )
+            raise ChannelApiError("Das WhatsApp-Webhook-Abonnement konnte nicht bestätigt werden")
 
     connection.settings = {
         **(connection.settings or {}),
@@ -188,7 +186,11 @@ def prepare_facebook_selection(
         raise ChannelApiError("Für Facebook fehlt noch mindestens eine erforderliche Berechtigung")
     pages = api.managed_pages(token.access_token)
     if not pages:
-        raise ChannelApiError("Es wurde keine verwaltbare Facebook-Seite gefunden")
+        raise ChannelApiError(
+            "Meta hat trotz bestätigter Berechtigungen keine ausgewählte Facebook-Seite "
+            "übermittelt. Bitte die Verbindung erneut starten und die Vereinsseite im "
+            "Meta-Dialog ausdrücklich auswählen."
+        )
     state.encrypted_selection_payload = TokenCipher(settings.meta_token_encryption_key).encrypt(
         json.dumps(
             {
@@ -225,6 +227,10 @@ def complete_facebook_selection(
     if not selected or not selected.get("can_publish"):
         raise ChannelApiError("Für diese Facebook-Seite fehlt das Recht zum Veröffentlichen")
     page_token = str(selected.get("access_token") or "")
+    if not page_token:
+        raise ChannelApiError(
+            "Meta hat für diese Facebook-Seite keinen sicheren Seitenzugriff bereitgestellt"
+        )
     profile = api.page_profile(page_id=page_id, access_token=page_token)
     item = db.scalar(
         select(SocialChannelConnection).where(
