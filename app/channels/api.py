@@ -11,6 +11,7 @@ from app.config import Settings
 from app.meta.security import sanitize_platform_data
 
 FACEBOOK_REQUIRED_SCOPES = {
+    "business_management",
     "pages_manage_posts",
     "pages_read_engagement",
     "pages_show_list",

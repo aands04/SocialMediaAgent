@@ -104,6 +104,34 @@ def test_channel_client_uses_dedicated_meta_app_id():
     assert "instagram-app" not in url
 
 
+def test_facebook_oauth_requests_business_portfolio_and_page_permissions():
+    url = MetaGraphClient(channel_settings()).authorization_url(
+        state="state",
+        redirect_uri="https://example.invalid/callback",
+        channel_type="facebook",
+    )
+
+    scopes = set(parse_qs(urlparse(url).query)["scope"][0].split(","))
+    assert scopes == {
+        "business_management",
+        "pages_manage_posts",
+        "pages_read_engagement",
+        "pages_show_list",
+    }
+
+
+def test_whatsapp_oauth_does_not_request_facebook_business_portfolio_scope():
+    url = MetaGraphClient(channel_settings()).authorization_url(
+        state="state",
+        redirect_uri="https://example.invalid/callback",
+        channel_type="whatsapp",
+    )
+
+    scopes = set(parse_qs(urlparse(url).query)["scope"][0].split(","))
+    assert scopes == WHATSAPP_REQUIRED_SCOPES
+    assert "business_management" not in scopes
+
+
 def test_facebook_managed_pages_accepts_current_profile_plus_tasks():
     requests: list[httpx.Request] = []
 

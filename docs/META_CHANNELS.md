@@ -50,9 +50,15 @@ gespeichert und nie an den Browser zurückgegeben.
 
 Technisch werden für den derzeit implementierten Funktionsumfang benötigt:
 
+- `business_management` für Seiten in einem Meta-Business-Portfolio,
 - `pages_show_list`,
 - `pages_read_engagement`,
 - `pages_manage_posts`.
+
+Meta liefert über `/me/accounts` Seiten eines Business-Portfolios nur dann zuverlässig aus,
+wenn der angemeldete Benutzer Zugriff auf das Portfolio besitzt und diesen Zugriff im
+OAuth-Dialog bestätigt. Die Vereinszentrale fordert dieses Recht ausschließlich im
+Facebook-Verbindungsablauf an; der WhatsApp-Embedded-Signup bleibt davon unberührt.
 
 Implementiert sind Text-/Bildbeiträge und Mehrbildbeiträge auf einer Facebook-Seite. Der
 Verbindungstest ist rein lesend und erzeugt keinen Testbeitrag. Neue Verbindungen aktivieren
