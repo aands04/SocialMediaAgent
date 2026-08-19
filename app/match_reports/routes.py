@@ -48,10 +48,11 @@ from app.models import (
     User,
     WhatsAppRecipient,
 )
-from app.web import check_csrf, csrf_token, current_user, require, require_admin
+from app.web import berlin_datetime, check_csrf, csrf_token, current_user, require, require_admin
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+templates.env.filters["berlin"] = berlin_datetime
 
 STATUS_LABELS = {
     "waiting_for_sources": "Wartet auf Quellen",

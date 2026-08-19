@@ -9,6 +9,7 @@ import pytest
 from app.match_reports.context import build_match_content_context
 from app.match_reports.fupa import parse_fupa_html, validate_fupa_url
 from app.match_reports.generator import FixtureMatchReportGenerator, MatchReportGenerationError
+from app.match_reports.routes import templates as match_report_templates
 from app.match_reports.scheduler import _final_result_available
 from app.match_reports.service import (
     approve_report,
@@ -28,6 +29,12 @@ from app.models import (
     Team,
     User,
 )
+from app.web import berlin_datetime
+
+
+def test_match_report_template_registers_berlin_datetime_filter():
+    assert match_report_templates.env.filters["berlin"] is berlin_datetime
+    assert match_report_templates.env.get_template("match_reports/detail.html") is not None
 
 
 def _team_and_game(
