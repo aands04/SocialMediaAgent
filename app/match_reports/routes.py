@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
+from app.auth.service import allowed
 from app.config import get_settings
 from app.db import get_db
 from app.match_reports.context import build_match_content_context
@@ -21,6 +22,7 @@ from app.match_reports.service import (
     approve_report,
     create_edited_version,
     current_version,
+    delete_unpublished_report,
     generate_report_version,
     get_or_create_report,
     prepare_fupa_publication,
@@ -256,6 +258,7 @@ def match_report_page(
             "status_labels": STATUS_LABELS,
             "automatic_enabled": get_settings().fupa_report_automatic_generation_enabled,
             "can_admin": current.role == Role.ADMIN,
+            "can_delete_report": allowed(db, current, "approve", game.team_id),
         },
     )
 
@@ -313,9 +316,44 @@ def generate_report(
     def action():
         report = get_or_create_report(db, game)
         report.desired_length = desired_length
-        generate_report_version(db, report, get_settings(), user_id=current.id)
+        generate_report_version(
+            db,
+            report,
+            get_settings(),
+            user_id=current.id,
+            change_reason=(
+                "Spielbericht bewusst mit KI neu erstellt"
+                if report.current_version_number is not None
+                else None
+            ),
+        )
 
     return _safe_action(db, game.id, action, "Neue Berichtsfassung wurde erstellt")
+
+
+@router.post("/games/{game_id}/match-report/delete")
+def delete_report(
+    game_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    current: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    game = _game(db, game_id, current, "approve")
+
+    def action():
+        report = _report(db, game)
+        if not report:
+            raise MatchReportServiceError("Es existiert kein löschbarer Spielbericht")
+        delete_unpublished_report(db, report, user_id=current.id)
+
+    return _safe_action(
+        db,
+        game.id,
+        action,
+        "Spielbericht und zugehörige Fassungen wurden gelöscht; die Quellen bleiben erhalten",
+    )
 
 
 @router.post("/games/{game_id}/match-report/note")

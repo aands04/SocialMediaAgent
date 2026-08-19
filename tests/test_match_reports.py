@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from app.match_reports.context import build_match_content_context
 from app.match_reports.fupa import parse_fupa_html, validate_fupa_url
@@ -15,11 +16,13 @@ from app.match_reports.service import (
     approve_report,
     create_edited_version,
     current_version,
+    delete_unpublished_report,
     generate_report_version,
     get_or_create_report,
     prepare_fupa_publication,
 )
 from app.models import (
+    AuditLog,
     FupaMatchSnapshot,
     Game,
     MatchEvent,
@@ -202,6 +205,27 @@ def test_fupa_parser_reads_current_redux_bootstrap_and_ticker():
     assert (result.ticker[-1].home_score, result.ticker[-1].away_score) == (1, 2)
 
 
+def test_fupa_parser_reads_current_nested_team_names():
+    html = """
+    <html><head><title>FuPa Spielbericht</title></head><body><script>
+    window.REDUX_DATA = {"dataHistory":[{"key":"undefined","MatchPage":{
+      "matchInfo":{
+        "homeTeam":{"name":{"full":"TSV Carlsdorf","middle":"Carlsdorf","short":"Carls"}},
+        "awayTeam":{"name":{"full":"SV Ehlen","middle":"Ehlen","short":"SVE"}},
+        "homeTeamName":"TSV Carlsdorf","awayTeamName":"SV Ehlen",
+        "kickoff":"2026-08-16T15:00:00+02:00","section":"POST"
+      }
+    }}]};
+    </script></body></html>
+    """
+
+    result = parse_fupa_html("https://www.fupa.net/match/test", html)
+
+    assert result.fetch_status == "success"
+    assert result.structured_data["home_team"] == "TSV Carlsdorf"
+    assert result.structured_data["away_team"] == "SV Ehlen"
+
+
 def test_fupa_parser_does_not_execute_invalid_redux_javascript():
     html = """
     <html><head><title>Anstoß 14:30 Uhr</title></head><body>
@@ -359,3 +383,56 @@ def test_generated_version_keeps_source_snapshot_for_audit(db):
     persisted = db.get(MatchReportVersion, version.id)
     assert persisted.source_snapshot["provenance"]["snapshot_id"] == snapshot.id
     assert persisted.used_sources == [f"fupa:{snapshot.id}"]
+
+
+def test_delete_unpublished_report_removes_versions_but_keeps_sources_and_audit(db):
+    _, game = _team_and_game(db)
+    snapshot = _snapshot(db, game)
+    user = _admin(db)
+    report = get_or_create_report(db, game)
+    version = generate_report_version(
+        db,
+        report,
+        SimpleNamespace(text_generator_mode="fixture"),
+        user_id=user.id,
+    )
+    approve_report(db, report, user_id=user.id)
+    publication = prepare_fupa_publication(db, report, user_id=user.id)
+    db.flush()
+
+    delete_unpublished_report(db, report, user_id=user.id)
+    db.flush()
+
+    assert db.get(type(report), report.id) is None
+    assert db.get(MatchReportVersion, version.id) is None
+    assert db.get(MatchReportPublication, publication.id) is None
+    assert db.get(FupaMatchSnapshot, snapshot.id) is not None
+    audit = db.scalar(
+        select(AuditLog).where(
+            AuditLog.action == "match_report.deleted",
+            AuditLog.entity_id == report.id,
+        )
+    )
+    assert audit is not None
+    assert audit.details["sources_retained"] is True
+    assert audit.details["deleted_versions"] == 1
+    assert audit.details["deleted_publication_preparations"] == 1
+
+
+def test_delete_published_report_is_blocked(db):
+    _, game = _team_and_game(db)
+    _snapshot(db, game)
+    user = _admin(db)
+    report = get_or_create_report(db, game)
+    generate_report_version(
+        db,
+        report,
+        SimpleNamespace(text_generator_mode="fixture"),
+        user_id=user.id,
+    )
+    report.status = "published"
+    report.published_at = datetime.now(timezone.utc)
+    db.flush()
+
+    with pytest.raises(RuntimeError, match="kann nicht gelöscht werden"):
+        delete_unpublished_report(db, report, user_id=user.id)

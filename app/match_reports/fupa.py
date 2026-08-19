@@ -61,14 +61,27 @@ def _walk(value: Any):
 
 
 def _name(value: Any) -> str | None:
+    """Return a human-readable name from FuPa's changing nested structures."""
+
+    if value is None:
+        return None
     if isinstance(value, dict):
-        value = (
-            value.get("name")
-            or " ".join(
-                str(value.get(key) or "").strip() for key in ("firstName", "lastName")
-            ).strip()
-        )
-    return str(value).strip() if value not in {None, ""} else None
+        # Current FuPa match data uses structures such as
+        # ``{"name": {"full": "TSV Carlsdorf", "short": "Carls"}}``.
+        # Resolve these values recursively instead of comparing the nested
+        # dictionary with a set (which raises ``unhashable type: 'dict'``).
+        for key in ("full", "displayName", "name", "title", "label", "middle", "short"):
+            resolved = _name(value.get(key))
+            if resolved:
+                return resolved
+        person = " ".join(
+            part for key in ("firstName", "lastName") if (part := _name(value.get(key)))
+        ).strip()
+        return person or None
+    if isinstance(value, (list, tuple, set)):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _parse_datetime(value: Any) -> str | None:
