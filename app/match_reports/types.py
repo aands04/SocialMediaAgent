@@ -76,3 +76,4 @@ class GeneratedMatchReport:
     model: str | None = None
     prompt_template_id: str = "match-report-system"
     prompt_version: int = 1
+    rendered_prompt: str | None = None

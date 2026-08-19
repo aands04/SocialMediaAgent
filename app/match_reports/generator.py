@@ -12,6 +12,28 @@ class MatchReportGenerationError(RuntimeError):
     pass
 
 
+def render_match_report_prompt(
+    context: MatchContentContext,
+    *,
+    desired_length: str,
+) -> str:
+    public_context = context.as_dict()
+    public_context.pop("conflicts", None)
+    return (
+        "Du verfasst einen deutschen Spielbericht für einen Amateurfußballverein. "
+        "Verwende ausschließlich die Fakten und wörtlichen Informationen im JSON. "
+        "Berücksichtige die gelieferten FuPa-Tickerereignisse mit Minute, Spielstand, "
+        "Torschützen und Beschreibung, soweit diese Angaben vorhanden sind. "
+        "Erfinde keine Spielszenen, Personen, Zitate, Gründe, Bewertungen oder zeitlichen Abläufe. "
+        "Unsichere Angaben lässt du weg. Schreibstil-Beispiele dienen nur Tonalität und Aufbau, "
+        "niemals als Faktenquelle. WhatsApp-Antworten und Notizen sind ergänzende Aussagen und "
+        "dürfen strukturierte FuPa-Fakten nicht überschreiben. Antworte ausschließlich als JSON "
+        "mit headline, teaser, body, used_sources und omitted_sources. In den Quellenlisten dürfen "
+        "nur die gelieferten source_id-Werte stehen. Gewünschte Länge: "
+        f"{desired_length}. DATEN:\n{json.dumps(public_context, ensure_ascii=False, default=str)}"
+    )
+
+
 def _source_ids(context: MatchContentContext) -> set[str]:
     result = {
         item["source_id"]
@@ -24,7 +46,9 @@ def _source_ids(context: MatchContentContext) -> set[str]:
     return result
 
 
-def _validate_payload(payload: dict[str, Any], context: MatchContentContext) -> GeneratedMatchReport:
+def _validate_payload(
+    payload: dict[str, Any], context: MatchContentContext
+) -> GeneratedMatchReport:
     headline = str(payload.get("headline") or "").strip()
     teaser = str(payload.get("teaser") or "").strip() or None
     body = str(payload.get("body") or "").strip()
@@ -47,7 +71,9 @@ def _validate_payload(payload: dict[str, Any], context: MatchContentContext) -> 
 class FixtureMatchReportGenerator:
     model = "fixture"
 
-    def generate(self, context: MatchContentContext, *, desired_length: str) -> GeneratedMatchReport:
+    def generate(
+        self, context: MatchContentContext, *, desired_length: str
+    ) -> GeneratedMatchReport:
         if context.has_blocking_conflicts:
             raise MatchReportGenerationError(
                 "Der Spielbericht kann wegen offener Quellenkonflikte nicht erzeugt werden"
@@ -58,9 +84,8 @@ class FixtureMatchReportGenerator:
         sources = sorted(_source_ids(context))
         details = [item["body"] for item in context.manual_notes if item.get("confirmed_facts")]
         details.extend(item["body"] for item in context.feedback)
-        body = (
-            f"Das Spiel {facts['home_team']} gegen {facts['away_team']} endete {score}. "
-            + (" ".join(details) if details else "Weitere bestätigte Spielszenen liegen nicht vor.")
+        body = f"Das Spiel {facts['home_team']} gegen {facts['away_team']} endete {score}. " + (
+            " ".join(details) if details else "Weitere bestätigte Spielszenen liegen nicht vor."
         )
         return GeneratedMatchReport(
             headline=headline,
@@ -78,24 +103,14 @@ class OpenAIMatchReportGenerator:
         self.client = OpenAI(api_key=api_key, max_retries=0)
         self.model = model
 
-    def generate(self, context: MatchContentContext, *, desired_length: str) -> GeneratedMatchReport:
+    def generate(
+        self, context: MatchContentContext, *, desired_length: str
+    ) -> GeneratedMatchReport:
         if context.has_blocking_conflicts:
             raise MatchReportGenerationError(
                 "Widersprüchliche oder unvollständige Quellen müssen zuerst geprüft werden"
             )
-        public_context = context.as_dict()
-        public_context.pop("conflicts", None)
-        prompt = (
-            "Du verfasst einen deutschen Spielbericht für einen Amateurfußballverein. "
-            "Verwende ausschließlich die Fakten und wörtlichen Informationen im JSON. "
-            "Erfinde keine Spielszenen, Personen, Zitate, Gründe, Bewertungen oder zeitlichen Abläufe. "
-            "Unsichere Angaben lässt du weg. Schreibstil-Beispiele dienen nur Tonalität und Aufbau, "
-            "niemals als Faktenquelle. WhatsApp-Antworten und Notizen sind ergänzende Aussagen und "
-            "dürfen strukturierte FuPa-Fakten nicht überschreiben. Antworte ausschließlich als JSON "
-            "mit headline, teaser, body, used_sources und omitted_sources. In den Quellenlisten dürfen "
-            "nur die gelieferten source_id-Werte stehen. Gewünschte Länge: "
-            f"{desired_length}. DATEN:\n{json.dumps(public_context, ensure_ascii=False, default=str)}"
-        )
+        prompt = render_match_report_prompt(context, desired_length=desired_length)
         response = self.client.responses.create(
             model=self.model,
             input=prompt,
@@ -117,6 +132,7 @@ class OpenAIMatchReportGenerator:
                 "model": self.model,
                 "prompt_template_id": "match-report-system",
                 "prompt_version": 1,
+                "rendered_prompt": prompt,
             }
         )
 

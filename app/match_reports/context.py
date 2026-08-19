@@ -181,9 +181,24 @@ def build_match_content_context(db: Session, game_id: str) -> MatchContentContex
         "result_confirmed": final_score is not None,
         "source_url": snapshot.source_url if snapshot else game.fupa_url,
     }
-    event_payload = tuple(
+    ticker_event_payload = tuple(
+        {
+            "source_id": f"fupa-ticker:{item.get('source_id') or index}",
+            "provider": "fupa",
+            "type": item.get("event_type"),
+            "minute": item.get("minute"),
+            "team": item.get("team"),
+            "player": item.get("player"),
+            "score": [item.get("home_score"), item.get("away_score")],
+            "comment": item.get("text"),
+        }
+        for index, item in enumerate(ticker, start=1)
+        if isinstance(item, dict)
+    )
+    live_event_payload = tuple(
         {
             "source_id": f"live:{item.id}",
+            "provider": item.provider,
             "type": item.event_type,
             "minute": item.minute,
             "team_side": item.team_side,
@@ -194,6 +209,7 @@ def build_match_content_context(db: Session, game_id: str) -> MatchContentContex
         }
         for item in events
     )
+    event_payload = ticker_event_payload + live_event_payload
     feedback_payload = tuple(
         {
             "source_id": f"{item.provider}:{item.id}",

@@ -8,6 +8,7 @@ import httpx
 import pytest
 from sqlalchemy import select
 
+from app.match_reports import service as match_report_service
 from app.match_reports.context import build_match_content_context
 from app.match_reports.fupa import (
     FupaReader,
@@ -15,7 +16,11 @@ from app.match_reports.fupa import (
     parse_fupa_stream,
     validate_fupa_url,
 )
-from app.match_reports.generator import FixtureMatchReportGenerator, MatchReportGenerationError
+from app.match_reports.generator import (
+    FixtureMatchReportGenerator,
+    MatchReportGenerationError,
+    render_match_report_prompt,
+)
 from app.match_reports.routes import templates as match_report_templates
 from app.match_reports.scheduler import _final_result_available
 from app.match_reports.service import (
@@ -27,7 +32,9 @@ from app.match_reports.service import (
     get_or_create_report,
     prepare_fupa_publication,
 )
+from app.match_reports.types import GeneratedMatchReport
 from app.models import (
+    AiPromptDispatch,
     AuditLog,
     FupaMatchSnapshot,
     Game,
@@ -493,6 +500,86 @@ def test_context_uses_confirmed_live_event_when_fupa_has_no_score(db):
     assert context.facts["away_score"] == 2
     assert context.has_blocking_conflicts is False
     assert context.events[0]["source_id"].startswith("live:")
+
+
+def test_context_includes_fupa_ticker_events_in_summary_and_ai_prompt(db):
+    _, game = _team_and_game(db)
+    _snapshot(
+        db,
+        game,
+        ticker=[
+            {
+                "source_id": "goal-17",
+                "event_type": "goal",
+                "minute": 17,
+                "text": "Nach einer Drehung schiebt er links unten ein.",
+                "team": game.home_team,
+                "player": "Owen Louis Wenzel",
+                "home_score": 3,
+                "away_score": 0,
+            },
+            {
+                "source_id": "end-90",
+                "event_type": "fulltime",
+                "minute": 90,
+                "text": "Abpfiff",
+                "home_score": 6,
+                "away_score": 0,
+            },
+        ],
+    )
+
+    context = build_match_content_context(db, game.id)
+    prompt = render_match_report_prompt(context, desired_length="medium")
+
+    assert len(context.events) == 2
+    assert context.events[0]["source_id"] == "fupa-ticker:goal-17"
+    assert context.events[0]["player"] == "Owen Louis Wenzel"
+    assert context.events[0]["comment"] == "Nach einer Drehung schiebt er links unten ein."
+    assert "Owen Louis Wenzel" in prompt
+    assert "Nach einer Drehung schiebt er links unten ein." in prompt
+
+
+def test_generated_match_report_records_exact_prompt_for_platform_admin(db, monkeypatch):
+    _, game = _team_and_game(db)
+    _snapshot(db, game)
+    user = _admin(db)
+    report = get_or_create_report(db, game)
+    exact_prompt = "GESCHÜTZTER EXAKTER SPIELBERICHT-PROMPT"
+
+    class FakeGenerator:
+        def generate(self, context, *, desired_length):
+            return GeneratedMatchReport(
+                headline="Testbericht",
+                teaser="Test",
+                body="Ein technisch gültiger Testbericht.",
+                used_sources=(),
+                model="test-model",
+                rendered_prompt=exact_prompt,
+            )
+
+    monkeypatch.setattr(
+        match_report_service,
+        "build_match_report_generator",
+        lambda _settings: FakeGenerator(),
+    )
+    settings = SimpleNamespace(text_generator_mode="openai", openai_model="test-model")
+
+    version = generate_report_version(db, report, settings, user_id=user.id)
+    dispatch = db.scalar(
+        select(AiPromptDispatch).where(
+            AiPromptDispatch.club_id == game.club_id,
+            AiPromptDispatch.post_type == "match_report",
+        )
+    )
+
+    assert version.version_number == 1
+    assert dispatch is not None
+    assert dispatch.generation_job_id is None
+    assert dispatch.game_id == game.id
+    assert dispatch.prompt_name == "Spielbericht"
+    assert dispatch.rendered_prompt == exact_prompt
+    assert dispatch.status == "completed"
 
 
 def test_generator_refuses_incomplete_context(db):

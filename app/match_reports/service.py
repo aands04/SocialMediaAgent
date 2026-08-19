@@ -11,6 +11,7 @@ from app.match_reports.fupa import FupaReader
 from app.match_reports.generator import build_match_report_generator
 from app.match_reports.publisher import ManualFupaPublisher
 from app.models import (
+    AiPromptDispatch,
     AuditLog,
     FupaMatchSnapshot,
     Game,
@@ -145,6 +146,53 @@ def generate_report_version(
         )
         + 1
     )
+    if result.rendered_prompt:
+        idempotency_key = f"match-report:{report.id}:version:{next_number}:text"
+        prompt_checksum = hashlib.sha256(result.rendered_prompt.encode("utf-8")).hexdigest()
+        existing_dispatch = db.scalar(
+            select(AiPromptDispatch).where(
+                AiPromptDispatch.club_id == report.club_id,
+                AiPromptDispatch.idempotency_key == idempotency_key,
+            )
+        )
+        if existing_dispatch and existing_dispatch.prompt_checksum != prompt_checksum:
+            raise MatchReportServiceError(
+                "Der Spielbericht-Prompt widerspricht einem bereits protokollierten KI-Aufruf"
+            )
+        if existing_dispatch is None:
+            completed_at = datetime.now(timezone.utc)
+            db.add(
+                AiPromptDispatch(
+                    club_id=report.club_id,
+                    generation_job_id=None,
+                    post_id=None,
+                    team_id=report.team_id,
+                    game_id=report.game_id,
+                    prompt_kind="text",
+                    post_type="match_report",
+                    media_kind="none",
+                    provider="openai",
+                    model=result.model or settings.openai_model,
+                    prompt_template_id=None,
+                    prompt_name="Spielbericht",
+                    prompt_version=result.prompt_version,
+                    prompt_checksum=prompt_checksum,
+                    rendered_prompt=result.rendered_prompt,
+                    creative_profile_snapshot={
+                        "workflow": "match_report",
+                        "desired_length": report.desired_length,
+                        "source_event_count": len(context.events),
+                    },
+                    reference_images=[],
+                    attempt_number=1,
+                    call_index=next_number,
+                    status="completed",
+                    error_summary=None,
+                    idempotency_key=idempotency_key,
+                    dispatched_at=completed_at,
+                    completed_at=completed_at,
+                )
+            )
     version = MatchReportVersion(
         club_id=report.club_id,
         report_id=report.id,
