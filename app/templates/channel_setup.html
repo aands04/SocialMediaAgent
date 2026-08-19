@@ -15,6 +15,31 @@
 <section><h2>1. Erklärung</h2><p>Verbinde die offizielle Facebook-Seite deines Vereins, damit freigegebene Beiträge automatisch dort veröffentlicht werden können.</p></section>
 <section><h2>2. Meta-Anmeldung</h2><p>Du meldest dich direkt bei Meta an. Die Vereinszentrale erhält niemals dein Passwort.</p>{% if facebook_available %}<form method="post" action="/channels/facebook/connect"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Mit Meta verbinden</button></form>{% else %}<p class="warning">Facebook ist derzeit plattformweit pausiert. Bereits gespeicherte Inhalte bleiben erhalten.</p>{% endif %}</section>
 <section><h2>3 bis 6. Seite auswählen und prüfen</h2><p>Nach der Anmeldung werden ausschließlich Seiten angeboten, für die du Inhalte verwalten darfst. Die Verbindung wird ohne öffentliche Testveröffentlichung geprüft und startet sicher deaktiviert.</p></section>
+{% elif channel_type == 'telegram' %}
+<section>
+  <h2>1. Telegram-Bot vorbereiten</h2>
+  <p>Erstelle deinen Vereins-Bot direkt in Telegram bei <strong>@BotFather</strong> mit dem Befehl <code>/newbot</code>. Telegram zeigt dir danach einmalig ein Bot-Token.</p>
+  <p class="field-help">Der Bot dient ausschließlich für private Rückfragen zu FuPa-Spielberichten. Er veröffentlicht keine Beiträge und liest keine Gruppen mit.</p>
+</section>
+<section>
+  <h2>2. Bot sicher verbinden</h2>
+  {% if telegram_available %}
+  <form method="post" action="/channels/telegram/connect" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Bot-Token <span class="field-help">Nur aus @BotFather</span>
+      <input type="password" name="bot_token" autocomplete="new-password" minlength="20" maxlength="300" required>
+    </label>
+    <button>Telegram-Bot verbinden</button>
+  </form>
+  <p>Das Token wird verschlüsselt gespeichert und weder später angezeigt noch in Protokolle übernommen. Die Vereinszentrale richtet automatisch einen signaturgeschützten HTTPS-Webhook ein.</p>
+  {% else %}
+  <p class="warning">Telegram ist für diesen Verein noch nicht durch den PlatformAdmin freigeschaltet.</p>
+  {% endif %}
+</section>
+<section>
+  <h2>3. Kontakte verknüpfen</h2>
+  <p>Nach erfolgreicher Verbindung erzeugst du beim jeweiligen FuPa-Spielbericht einen kurzlebigen Einmallink für den gewünschten Kontakt. Erst wenn die Person den Bot privat über diesen Link startet, ist ihr Telegram-Chat zugeordnet.</p>
+</section>
 {% else %}
 <section><h2>1. Erklärung</h2><p>Mit WhatsApp kannst du Spielankündigungen und Ergebnisse direkt an Personen senden, die dem Empfang zugestimmt haben. WhatsApp-Nachrichten sind nicht öffentlich.</p></section>
 <section><h2>2. Voraussetzungen</h2><ul><li>Meta Business Einrichtung</li><li>WhatsApp Business Account</li><li>registrierte Telefonnummer</li><li>benötigte Berechtigungen</li><li>genehmigte Nachrichtenvorlagen für proaktive Nachrichten</li></ul></section>

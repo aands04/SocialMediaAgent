@@ -230,6 +230,7 @@ def _process_whatsapp_payload(
                 if consume_feedback_response(
                     db,
                     connection=connection,
+                    provider="whatsapp",
                     sender=sender,
                     provider_message_id=str(message["id"]),
                     body=original_text,

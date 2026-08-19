@@ -103,8 +103,13 @@ class Settings(BaseSettings):
     fupa_report_max_poll_hours: int = 6
     fupa_report_batch_size: int = 5
     fupa_report_whatsapp_wait_minutes: int = 30
+    fupa_report_feedback_wait_minutes: int = 30
     fupa_report_feedback_template_name: str = "spielbericht_rueckfrage"
     fupa_report_feedback_template_language: str = "de"
+    telegram_bot_api_base_url: str = "https://api.telegram.org"
+    telegram_webhook_base_url: str | None = None
+    telegram_link_ttl_minutes: int = 30
+    telegram_http_timeout_seconds: float = 20.0
     fupa_http_timeout_seconds: float = 20.0
     provider_snapshot_root: Path = Path("data/provider-snapshots")
     log_root: Path = Path("data/logs")

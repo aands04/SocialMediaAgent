@@ -236,7 +236,11 @@ Faktenvalidierung, Rückfragen, Versionierung und die kontrollierte Übergabe.
 Jeder Datensatz trägt eine `club_id`; Abrufe, Routes und Worker prüfen zusätzlich
 Spiel- und Mannschaftszugehörigkeit. Ein `MatchContentContext` priorisiert
 strukturierte FuPa-Daten vor FuPa-Ticker, bestätigten manuellen Angaben und
-eindeutigen WhatsApp-Rückmeldungen. Widersprüche bleiben sichtbar und sperren
+eindeutigen providerneutralen WhatsApp-/Telegram-Rückmeldungen. Ein
+`FeedbackProvider` kapselt den Versand; providergebundene Endpunkte, Requests,
+Responses und Webhook-Ledger bleiben mandantenbezogen. Widersprüche bleiben sichtbar und sperren
 Generierung beziehungsweise Freigabe. Mangels dokumentierter Schreib-API nutzt
 der `FupaPublisher` derzeit ausschließlich eine idempotente manuelle Übergabe.
 Details stehen in [`docs/FUPA_MATCH_REPORTS.md`](docs/FUPA_MATCH_REPORTS.md).
+Telegram-Einrichtung und Sicherheitsgrenzen stehen ergänzend in
+[`docs/TELEGRAM_MATCH_FEEDBACK.md`](docs/TELEGRAM_MATCH_FEEDBACK.md).

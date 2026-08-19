@@ -73,6 +73,45 @@
     {% endfor %}
   </table>
 </section>
+<section>
+  <h2>Anbieter für FuPa-Spielbericht-Rückfragen</h2>
+  <p><strong>Freigegeben</strong> erlaubt einem Verein die Nutzung. <strong>Verbunden</strong> zeigt davon getrennt, ob der Verein den Anbieter technisch eingerichtet hat. Eine Freigabe versendet noch keine Nachricht.</p>
+  <table>
+    <tr><th>Verein</th><th>WhatsApp</th><th>Telegram</th></tr>
+    {% for club in clubs %}
+    <tr>
+      <td>{{club.name}}</td>
+      {% for provider in ['whatsapp', 'telegram'] %}
+      {% set state = feedback_connection_status[club.id][provider] %}
+      <td>
+        <span class="status-pill">{{'Freigegeben' if state.enabled else 'Gesperrt'}}</span>
+        · {{'Verbunden' if state.connected else 'Nicht verbunden'}}
+      </td>
+      {% endfor %}
+    </tr>
+    {% else %}<tr><td colspan="3">Noch kein Verein vorhanden.</td></tr>{% endfor %}
+  </table>
+  <h3>Freigabe ändern</h3>
+  <p>Eine plattformweite Sperre blockiert den Anbieter für alle Vereine. Zugangsdaten bleiben erhalten und werden durch eine Sperre nicht gelöscht.</p>
+  <form method="post" action="/platform/feature-flags" class="gridform">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <input type="hidden" name="value_json" value="{}">
+    <label>Anbieter
+      <select name="key" required>
+        <option value="match_feedback.whatsapp">WhatsApp</option>
+        <option value="match_feedback.telegram">Telegram</option>
+      </select>
+    </label>
+    <label>Geltungsbereich
+      <select name="club_id">
+        <option value="">Plattformweit</option>
+        {% for club in clubs %}<option value="{{club.id}}">{{club.name}}</option>{% endfor %}
+      </select>
+    </label>
+    <label><input type="checkbox" name="enabled" value="true"> Anbieter freigeben</label>
+    <button>Anbieterfreigabe speichern</button>
+  </form>
+</section>
 <section><h2>Feature Flag verwalten</h2><form method="post" action="/platform/feature-flags" class="gridform"><input type="hidden" name="csrf_token" value="{{csrf}}"><label>Schlüssel<input name="key" placeholder="feature.name" required></label><label>Verein (leer = Plattform)<select name="club_id"><option value="">Plattformweit</option>{% for club in clubs %}<option value="{{club.id}}">{{club.name}}</option>{% endfor %}</select></label><label><input type="checkbox" name="enabled" value="true"> Aktiv</label><label>JSON-Wert<textarea name="value_json">{}</textarea></label><button>Feature Flag speichern</button></form></section>
 <section><h2>Aktuelle Feature Flags</h2><table><tr><th>Schlüssel</th><th>Geltungsbereich</th><th>Status</th><th>Wert</th></tr>{% for flag in feature_flags %}<tr><td>{{flag.key}}</td><td>{{flag.club_id or 'Plattform'}}</td><td>{{'aktiv' if flag.enabled else 'inaktiv'}}</td><td>{{flag.value}}</td></tr>{% else %}<tr><td colspan="4">Keine Feature Flags angelegt.</td></tr>{% endfor %}</table></section>
 {% endblock %}

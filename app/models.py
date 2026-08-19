@@ -636,25 +636,19 @@ class ClubMediaUsagePolicy(Base, Timestamped):
 
     __tablename__ = "club_media_usage_policies"
     __table_args__ = (
-        UniqueConstraint(
-            "club_id", "contribution_type", name="uq_club_media_policy_contribution"
-        ),
+        UniqueConstraint("club_id", "contribution_type", name="uq_club_media_policy_contribution"),
         CheckConstraint(
             "contribution_type IN ('announcement', 'reminder', 'result', 'live')",
             name="ck_club_media_policy_contribution_type",
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
     contribution_type: Mapped[str] = mapped_column(String(30), index=True)
     allowed_media_categories: Mapped[list] = mapped_column(JSON, default=list)
     category_priority: Mapped[list] = mapped_column(JSON, default=list)
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
-    updated_by: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL")
-    )
+    updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
 
 class GameMediaPreference(Base, Timestamped):
@@ -709,12 +703,8 @@ class GameMediaPreference(Base, Timestamped):
         String(20), default="automatic", server_default="automatic"
     )
     selected_media_asset_id: Mapped[str | None] = mapped_column(String(36), index=True)
-    allow_used_once: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="false"
-    )
-    selected_by: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL")
-    )
+    allow_used_once: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    selected_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     selected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -1196,13 +1186,27 @@ class SocialChannelConnection(Base, Timestamped):
             name="uq_social_channel_external_account",
         ),
         CheckConstraint(
-            "channel_type IN ('instagram', 'facebook', 'whatsapp')",
+            "channel_type IN ('instagram', 'facebook', 'whatsapp', 'telegram')",
             name="ck_social_channel_type",
         ),
         ForeignKeyConstraint(
             ["legacy_instagram_page_id", "club_id"],
             ["instagram_pages.id", "instagram_pages.club_id"],
             ondelete="RESTRICT",
+        ),
+        Index(
+            "uq_social_channel_telegram_bot_global",
+            "external_account_id",
+            unique=True,
+            postgresql_where=text("channel_type = 'telegram' AND external_account_id IS NOT NULL"),
+            sqlite_where=text("channel_type = 'telegram' AND external_account_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_social_channel_telegram_active_club",
+            "club_id",
+            unique=True,
+            postgresql_where=text("channel_type = 'telegram' AND active IS TRUE"),
+            sqlite_where=text("channel_type = 'telegram' AND active = 1"),
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
@@ -2018,14 +2022,28 @@ class MatchFeedbackContact(Base, Timestamped):
             ["whatsapp_recipients.id", "whatsapp_recipients.club_id"],
             ondelete="RESTRICT",
         ),
+        CheckConstraint(
+            "preferred_provider IS NULL OR preferred_provider IN ('whatsapp','telegram')",
+            name="ck_match_feedback_contact_preferred_provider",
+        ),
+        CheckConstraint(
+            "fallback_provider IS NULL OR fallback_provider IN ('whatsapp','telegram')",
+            name="ck_match_feedback_contact_fallback_provider",
+        ),
+        CheckConstraint(
+            "fallback_provider IS NULL OR fallback_provider <> preferred_provider",
+            name="ck_match_feedback_contact_distinct_providers",
+        ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     team_id: Mapped[str] = mapped_column(String(36), index=True)
-    recipient_id: Mapped[str] = mapped_column(String(36), index=True)
-    normalized_phone: Mapped[str] = mapped_column(String(32))
+    recipient_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    normalized_phone: Mapped[str | None] = mapped_column(String(32))
     display_name: Mapped[str] = mapped_column(String(160))
     role_label: Mapped[str | None] = mapped_column(String(120))
+    preferred_provider: Mapped[str | None] = mapped_column(String(20), index=True)
+    fallback_provider: Mapped[str | None] = mapped_column(String(20))
     request_match_reports: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     priority: Mapped[int] = mapped_column(Integer, default=100)
@@ -2061,6 +2079,10 @@ class MatchFeedbackRequest(Base, Timestamped):
             "status IN ('pending','sent','answered','expired','failed','cancelled')",
             name="ck_match_feedback_request_status",
         ),
+        CheckConstraint(
+            "provider IN ('whatsapp','telegram')",
+            name="ck_match_feedback_request_provider",
+        ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
@@ -2068,6 +2090,11 @@ class MatchFeedbackRequest(Base, Timestamped):
     team_id: Mapped[str] = mapped_column(String(36), index=True)
     contact_id: Mapped[str] = mapped_column(String(36), index=True)
     channel_connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider: Mapped[str] = mapped_column(String(20), default="whatsapp", index=True)
+    external_chat_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    external_message_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     template_id: Mapped[str | None] = mapped_column(String(36))
     provider_message_id: Mapped[str | None] = mapped_column(String(200), index=True)
@@ -2081,19 +2108,128 @@ class MatchFeedbackRequest(Base, Timestamped):
 class MatchFeedbackResponse(Base, Timestamped):
     __tablename__ = "match_feedback_responses"
     __table_args__ = (
-        UniqueConstraint("club_id", "provider_message_id", name="uq_match_feedback_response_msg"),
+        UniqueConstraint(
+            "club_id",
+            "provider",
+            "provider_message_id",
+            name="uq_match_feedback_response_provider_msg",
+        ),
         ForeignKeyConstraint(
             ["request_id", "club_id"],
             ["match_feedback_requests.id", "match_feedback_requests.club_id"],
             ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "provider IN ('whatsapp','telegram')",
+            name="ck_match_feedback_response_provider",
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     request_id: Mapped[str] = mapped_column(String(36), index=True)
     provider_message_id: Mapped[str] = mapped_column(String(200))
+    provider: Mapped[str] = mapped_column(String(20), default="whatsapp", index=True)
+    external_chat_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    external_sender_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    payload_type: Mapped[str] = mapped_column(String(30), default="text")
+    payload_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_role: Mapped[str | None] = mapped_column(String(40))
+    no_additional_feedback: Mapped[bool] = mapped_column(Boolean, default=False)
     body: Mapped[str] = mapped_column(Text)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class MatchFeedbackEndpoint(Base, Timestamped):
+    """A provider-specific address owned by one tenant feedback contact."""
+
+    __tablename__ = "match_feedback_endpoints"
+    __table_args__ = (
+        UniqueConstraint("id", "club_id", name="uq_match_feedback_endpoints_id_club"),
+        UniqueConstraint(
+            "club_id", "provider", "external_chat_id", name="uq_match_feedback_endpoint_chat"
+        ),
+        UniqueConstraint(
+            "club_id", "contact_id", "provider", name="uq_match_feedback_endpoint_contact"
+        ),
+        ForeignKeyConstraint(
+            ["contact_id", "club_id"],
+            ["match_feedback_contacts.id", "match_feedback_contacts.club_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "provider IN ('whatsapp','telegram')", name="ck_match_feedback_endpoint_provider"
+        ),
+        CheckConstraint(
+            "status IN ('pending','connected','disabled','error')",
+            name="ck_match_feedback_endpoint_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    contact_id: Mapped[str] = mapped_column(String(36), index=True)
+    provider: Mapped[str] = mapped_column(String(20), index=True)
+    connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    external_user_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    external_chat_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    external_username: Mapped[str | None] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MatchFeedbackLinkToken(Base, Timestamped):
+    """Single-use Telegram deep-link token. Only its SHA-256 digest is stored."""
+
+    __tablename__ = "match_feedback_link_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_digest", name="uq_match_feedback_link_token_digest"),
+        ForeignKeyConstraint(
+            ["contact_id", "club_id"],
+            ["match_feedback_contacts.id", "match_feedback_contacts.club_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    contact_id: Mapped[str] = mapped_column(String(36), index=True)
+    connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    token_digest: Mapped[str] = mapped_column(String(64), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class TelegramWebhookUpdate(Base, Timestamped):
+    """Idempotency ledger for tenant-resolved Telegram webhook updates."""
+
+    __tablename__ = "telegram_webhook_updates"
+    __table_args__ = (
+        UniqueConstraint("connection_id", "update_id", name="uq_telegram_webhook_update"),
+        ForeignKeyConstraint(
+            ["connection_id", "club_id"],
+            ["social_channel_connections.id", "social_channel_connections.club_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
+    connection_id: Mapped[str] = mapped_column(String(36), index=True)
+    update_id: Mapped[str] = mapped_column(String(80), index=True)
+    update_type: Mapped[str] = mapped_column(String(40))
+    payload_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(30), default="received", index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ClubWritingExample(Base, Timestamped):
@@ -2177,7 +2313,9 @@ class MatchReportVersion(Base, Timestamped):
         UniqueConstraint("id", "club_id", name="uq_match_report_versions_id_club"),
         UniqueConstraint("club_id", "report_id", "version_number", name="uq_match_report_version"),
         ForeignKeyConstraint(
-            ["report_id", "club_id"], ["match_reports.id", "match_reports.club_id"], ondelete="CASCADE"
+            ["report_id", "club_id"],
+            ["match_reports.id", "match_reports.club_id"],
+            ondelete="CASCADE",
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
@@ -2203,7 +2341,9 @@ class MatchReportPublication(Base, Timestamped):
     __table_args__ = (
         UniqueConstraint("club_id", "idempotency_key", name="uq_match_report_publication_key"),
         ForeignKeyConstraint(
-            ["report_id", "club_id"], ["match_reports.id", "match_reports.club_id"], ondelete="CASCADE"
+            ["report_id", "club_id"],
+            ["match_reports.id", "match_reports.club_id"],
+            ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
             ["version_id", "club_id"],
@@ -2428,12 +2568,8 @@ class CreativeFeedbackEvent(Base):
 
     __tablename__ = "creative_feedback_events"
     __table_args__ = (
-        UniqueConstraint(
-            "club_id", "idempotency_key", name="uq_creative_feedback_idempotency"
-        ),
-        CheckConstraint(
-            "modality IN ('image', 'text')", name="ck_creative_feedback_modality"
-        ),
+        UniqueConstraint("club_id", "idempotency_key", name="uq_creative_feedback_idempotency"),
+        CheckConstraint("modality IN ('image', 'text')", name="ck_creative_feedback_modality"),
         CheckConstraint(
             "action IN ('selected', 'published', 'approved', 'rejected', "
             "'regenerated', 'reverted', 'manually_edited', 'replaced', 'skipped')",
@@ -2450,9 +2586,7 @@ class CreativeFeedbackEvent(Base):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="RESTRICT"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     team_id: Mapped[str | None] = mapped_column(
         ForeignKey("teams.id", ondelete="SET NULL"), index=True
     )
@@ -2487,9 +2621,7 @@ class CreativeFeedbackEvent(Base):
         ForeignKey("creative_feedback_events.id", ondelete="RESTRICT"), index=True
     )
     idempotency_key: Mapped[str] = mapped_column(String(255))
-    occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=now, index=True
-    )
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 
 class CreativePreferenceProfile(Base, Timestamped):
@@ -2504,9 +2636,7 @@ class CreativePreferenceProfile(Base, Timestamped):
             "profile_version",
             name="uq_creative_preference_profile_version",
         ),
-        CheckConstraint(
-            "modality IN ('image', 'text')", name="ck_creative_profile_modality"
-        ),
+        CheckConstraint("modality IN ('image', 'text')", name="ck_creative_profile_modality"),
         CheckConstraint(
             "status IN ('active', 'superseded', 'archived')",
             name="ck_creative_profile_status",
@@ -2518,9 +2648,7 @@ class CreativePreferenceProfile(Base, Timestamped):
         CheckConstraint("profile_version > 0", name="ck_creative_profile_version"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
     modality: Mapped[str] = mapped_column(String(10), index=True)
     content_type: Mapped[str] = mapped_column(String(30), index=True)
     profile_version: Mapped[int] = mapped_column(Integer)
@@ -2543,9 +2671,7 @@ class CreativePreferenceProfile(Base, Timestamped):
 class CreativeExampleReference(Base, Timestamped):
     __tablename__ = "creative_example_references"
     __table_args__ = (
-        CheckConstraint(
-            "modality IN ('image', 'text')", name="ck_creative_example_modality"
-        ),
+        CheckConstraint("modality IN ('image', 'text')", name="ck_creative_example_modality"),
         CheckConstraint(
             "sentiment IN ('positive', 'negative')", name="ck_creative_example_sentiment"
         ),
@@ -2556,9 +2682,7 @@ class CreativeExampleReference(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
     profile_id: Mapped[str | None] = mapped_column(
         ForeignKey("creative_preference_profiles.id", ondelete="SET NULL"), index=True
     )
@@ -2575,9 +2699,7 @@ class CreativeExampleReference(Base, Timestamped):
     traits: Mapped[dict] = mapped_column(JSON, default=dict)
     score: Mapped[float] = mapped_column(Numeric(8, 4), default=0)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
-    created_by: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL")
-    )
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
 
 class CreativeProfileOverride(Base, Timestamped):
@@ -2590,15 +2712,11 @@ class CreativeProfileOverride(Base, Timestamped):
             "override_version",
             name="uq_creative_profile_override_version",
         ),
-        CheckConstraint(
-            "modality IN ('image', 'text')", name="ck_creative_override_modality"
-        ),
+        CheckConstraint("modality IN ('image', 'text')", name="ck_creative_override_modality"),
         CheckConstraint("override_version > 0", name="ck_creative_override_version"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
     modality: Mapped[str] = mapped_column(String(10), index=True)
     content_type: Mapped[str] = mapped_column(String(30), index=True)
     override_version: Mapped[int] = mapped_column(Integer)
@@ -2621,9 +2739,7 @@ class CreativeRecipe(Base, Timestamped):
     __tablename__ = "creative_recipes"
     __table_args__ = (
         UniqueConstraint("key", "recipe_version", name="uq_creative_recipe_version"),
-        CheckConstraint(
-            "modality IN ('image', 'text')", name="ck_creative_recipe_modality"
-        ),
+        CheckConstraint("modality IN ('image', 'text')", name="ck_creative_recipe_modality"),
         CheckConstraint(
             "status IN ('draft', 'active', 'archived')", name="ck_creative_recipe_status"
         ),
@@ -2655,9 +2771,7 @@ class VisualTraitAnalysisCache(Base, Timestamped):
         ),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
     checksum: Mapped[str] = mapped_column(String(64), index=True)
     media_asset_id: Mapped[str | None] = mapped_column(
         ForeignKey("media_assets.id", ondelete="SET NULL"), index=True
@@ -2684,9 +2798,7 @@ class ClubOnboardingSession(Base, Timestamped):
             "'completed', 'skipped')",
             name="ck_club_onboarding_status",
         ),
-        CheckConstraint(
-            "current_step >= 1 AND current_step <= 11", name="ck_club_onboarding_step"
-        ),
+        CheckConstraint("current_step >= 1 AND current_step <= 11", name="ck_club_onboarding_step"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     club_id: Mapped[str] = mapped_column(
@@ -2699,9 +2811,7 @@ class ClubOnboardingSession(Base, Timestamped):
     answers: Mapped[dict] = mapped_column(JSON, default=dict)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    skipped_calibration_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
-    )
+    skipped_calibration_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_user_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -2721,15 +2831,11 @@ class OnboardingCalibrationSample(Base, Timestamped):
             "sample_index",
             name="uq_onboarding_calibration_sample",
         ),
-        CheckConstraint(
-            "modality IN ('image', 'text')", name="ck_onboarding_sample_modality"
-        ),
+        CheckConstraint("modality IN ('image', 'text')", name="ck_onboarding_sample_modality"),
         CheckConstraint("sample_index > 0", name="ck_onboarding_sample_index"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    club_id: Mapped[str] = mapped_column(
-        ForeignKey("clubs.id", ondelete="CASCADE"), index=True
-    )
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
     session_id: Mapped[str] = mapped_column(
         ForeignKey("club_onboarding_sessions.id", ondelete="CASCADE"), index=True
     )

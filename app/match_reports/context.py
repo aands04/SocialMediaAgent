@@ -135,9 +135,7 @@ def build_match_content_context(db: Session, game_id: str) -> MatchContentContex
         if candidate:
             confirmed_event_score = candidate
             break
-    game_score = (
-        _score([game.home_score, game.away_score]) if game.result_confirmed else None
-    )
+    game_score = _score([game.home_score, game.away_score]) if game.result_confirmed else None
 
     conflicts: list[ContentConflict] = []
     score_candidates = {
@@ -198,7 +196,11 @@ def build_match_content_context(db: Session, game_id: str) -> MatchContentContex
     )
     feedback_payload = tuple(
         {
-            "source_id": f"whatsapp:{item.id}",
+            "source_id": f"{item.provider}:{item.id}",
+            "provider": item.provider,
+            "source_role": item.source_role or f"{item.provider}_trainer",
+            "payload_type": item.payload_type,
+            "payload_metadata": item.payload_metadata,
             "body": item.body,
             "received_at": item.received_at.isoformat(),
         }
@@ -221,8 +223,7 @@ def build_match_content_context(db: Session, game_id: str) -> MatchContentContex
                 ClubWritingExample.club_id == game.club_id,
                 ClubWritingExample.active.is_(True),
                 ClubWritingExample.category.in_([category, "general"]),
-                (ClubWritingExample.team_id == team.id)
-                | (ClubWritingExample.team_id.is_(None)),
+                (ClubWritingExample.team_id == team.id) | (ClubWritingExample.team_id.is_(None)),
             )
             .order_by(
                 (ClubWritingExample.team_id == team.id).desc(),
@@ -242,8 +243,7 @@ def build_match_content_context(db: Session, game_id: str) -> MatchContentContex
         feedback=feedback_payload,
         manual_notes=note_payload,
         writing_examples=tuple(
-            {"category": item.category, "title": item.title, "body": item.body}
-            for item in examples
+            {"category": item.category, "title": item.title, "body": item.body} for item in examples
         ),
         branding={
             "text_settings": branding.text_settings if branding else {},
@@ -253,7 +253,7 @@ def build_match_content_context(db: Session, game_id: str) -> MatchContentContex
                 "fupa_structured",
                 "fupa_ticker",
                 "confirmed_manual",
-                "whatsapp_feedback",
+                "messenger_feedback",
             ],
             "snapshot_id": snapshot.id if snapshot else None,
             "score_candidates": {key: list(value) for key, value in score_candidates.items()},

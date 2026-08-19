@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% block content %}
+<header class="section-heading"><div><p class="eyebrow">Messenger verknüpfen</p><h1>Telegram-Kontakt verbinden</h1></div></header>
+<section>
+  <h2>{{contact.display_name}}</h2>
+  <p>Öffne den folgenden Link auf dem Gerät des Kontakts. Telegram startet einen privaten Chat mit dem Vereinsbot und verknüpft ihn nach Bestätigung mit diesem Rückfragekontakt.</p>
+  <p><a class="button" href="{{deep_link}}" rel="noreferrer noopener">Telegram jetzt öffnen</a></p>
+  <div class="warning"><strong>Nur einmal verwendbar</strong><p>Der Link läuft nach {{ttl_minutes}} Minuten ab. Teile ihn ausschließlich mit der vorgesehenen Person. Die Vereinszentrale speichert nur einen nicht rückrechenbaren Prüfwert.</p></div>
+  <p><a href="/games/{{game.id}}/match-report">Zurück zum Spielbericht</a></p>
+</section>
+{% endblock %}
