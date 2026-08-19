@@ -110,6 +110,11 @@ class Settings(BaseSettings):
     telegram_webhook_base_url: str | None = None
     telegram_link_ttl_minutes: int = 30
     telegram_http_timeout_seconds: float = 20.0
+    telegram_voice_transcription_enabled: bool = True
+    telegram_voice_transcription_model: str = "gpt-4o-transcribe"
+    telegram_voice_max_bytes: int = 20_000_000
+    telegram_voice_max_duration_seconds: int = 300
+    telegram_voice_transcription_timeout_seconds: float = 45.0
     fupa_http_timeout_seconds: float = 20.0
     provider_snapshot_root: Path = Path("data/provider-snapshots")
     log_root: Path = Path("data/logs")

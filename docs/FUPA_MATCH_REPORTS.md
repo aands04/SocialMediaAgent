@@ -107,6 +107,11 @@ Rollback beschreibt [`TELEGRAM_MATCH_FEEDBACK.md`](TELEGRAM_MATCH_FEEDBACK.md).
 ## Verbleibende Grenze
 
 Das Lesen öffentlich erreichbarer FuPa-Spielseiten wird defensiv unterstützt.
+Aktuelle FuPa-Seiten liefern die normalisierten Spieldaten unter anderem in
+einem JSON-Bootstrap unter `window.REDUX_DATA`. Dieser Datenblock wird als JSON
+dekodiert, ohne JavaScript auszuführen; JSON-LD und Next-Daten bleiben als
+Fallback erhalten. Unvollständige Seiten werden weiterhin als `incomplete`
+gekennzeichnet und nicht mit geratenen Fakten aufgefüllt.
 Ein stabiler automatischer Schreibzugriff auf FuPa wird nicht behauptet. Der
 Standard-Publisher kennzeichnet Berichte deshalb als manuell zu übertragen und
 stellt Text sowie Quellenübersicht für die redaktionelle Arbeit bereit.

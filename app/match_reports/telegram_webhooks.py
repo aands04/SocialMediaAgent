@@ -7,6 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.db import get_db
@@ -21,6 +22,10 @@ from app.match_reports.telegram import (
     safe_payload_metadata,
     secret_matches,
     webhook_identifier,
+)
+from app.match_reports.telegram_voice import (
+    TelegramVoiceTranscriptionError,
+    transcribe_telegram_voice,
 )
 from app.models import (
     AuditLog,
@@ -112,6 +117,19 @@ def _safe_answer_callback(
         # Die fachliche Verarbeitung wurde bereits persistiert. Eine nicht
         # erreichbare Bestätigung darf deshalb keine erneute Zustellung auslösen.
         return
+
+
+def _voice_error_message(reason: str) -> str:
+    if reason == "disabled":
+        return "Sprachnachrichten sind für diesen Bot derzeit deaktiviert."
+    if reason == "service_not_configured":
+        return "Die Spracherkennung ist technisch noch nicht eingerichtet."
+    if reason in {"duration_exceeded", "size_exceeded"}:
+        return "Die Sprachnachricht ist für die Verarbeitung zu lang oder zu groß."
+    return (
+        "Die Sprachnachricht konnte technisch nicht erkannt werden. "
+        "Bitte sende deine Ergänzung noch einmal als Text."
+    )
 
 
 def _audit(
@@ -358,26 +376,73 @@ async def telegram_webhook(
                         or None
                     )
                     metadata = safe_payload_metadata(message)
-                    metadata["unsupported_for_transcription"] = kind != "text"
-                    handled = consume_feedback_response(
-                        db,
-                        connection=connection,
-                        provider="telegram",
-                        sender=sender_id,
-                        provider_message_id=message_id,
-                        body=text if kind == "text" else "",
-                        external_chat_id=chat_id,
-                        reply_to_message_id=reply_id,
-                        payload_type=kind,
-                        payload_metadata=metadata,
+                    response_body = text if kind == "text" else ""
+                    transcription_failed = False
+                    if kind == "voice":
+                        try:
+                            transcription = await run_in_threadpool(
+                                transcribe_telegram_voice,
+                                client=client,
+                                message=message,
+                                settings=settings,
+                            )
+                            response_body = transcription.text
+                            metadata["transcription"] = {
+                                "status": "completed",
+                                "model": transcription.model,
+                            }
+                            if transcription.duration_seconds is not None:
+                                metadata["transcription"]["duration_seconds"] = (
+                                    transcription.duration_seconds
+                                )
+                        except TelegramVoiceTranscriptionError as exc:
+                            transcription_failed = True
+                            metadata["transcription"] = {
+                                "status": "failed",
+                                "reason": exc.reason,
+                            }
+                            background_tasks.add_task(
+                                _safe_send,
+                                client,
+                                chat_id=chat_id,
+                                text=_voice_error_message(exc.reason),
+                            )
+                    elif kind != "text":
+                        metadata["unsupported_for_transcription"] = True
+                    handled = False
+                    if not transcription_failed:
+                        handled = consume_feedback_response(
+                            db,
+                            connection=connection,
+                            provider="telegram",
+                            sender=sender_id,
+                            provider_message_id=message_id,
+                            body=response_body,
+                            external_chat_id=chat_id,
+                            reply_to_message_id=reply_id,
+                            payload_type=kind,
+                            payload_metadata=metadata,
+                        )
+                    ledger.status = (
+                        "voice_transcription_failed"
+                        if transcription_failed
+                        else "processed"
+                        if handled
+                        else "ambiguous"
                     )
-                    ledger.status = "processed" if handled else "ambiguous"
                     if handled:
                         _audit(
                             db,
                             connection=connection,
                             action="match_report.telegram_feedback_received",
-                            details={"payload_type": kind},
+                            details={
+                                "payload_type": kind,
+                                "transcription_status": (
+                                    (metadata.get("transcription") or {}).get("status")
+                                    if kind == "voice"
+                                    else None
+                                ),
+                            },
                         )
                     elif kind == "text":
                         background_tasks.add_task(
