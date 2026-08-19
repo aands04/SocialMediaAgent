@@ -12,8 +12,10 @@ keine vorhandenen WhatsApp-Verbindungen.
 
 Unterstützt werden ausschließlich private Chats mit einem offiziellen Telegram-
 Bot. Gruppen, Kanäle, Polling, n8n und Telegram-Login sind nicht Bestandteil.
-Medienantworten werden datensparsam als Metadaten protokolliert, aber in dieser
-Iteration nicht in den Spielbericht übernommen.
+Sprachnachrichten werden nach ausdrücklicher Aktivierung vorübergehend geladen,
+in ein einheitliches Audioformat umgewandelt und über die bestehende OpenAI-
+Transkriptionsanbindung als Text in den Spielbericht übernommen. Andere
+Medienantworten werden weiterhin nur datensparsam als Metadaten protokolliert.
 
 ## Offizielle Schnittstelle
 
@@ -68,6 +70,11 @@ TELEGRAM_BOT_API_BASE_URL=https://api.telegram.org
 TELEGRAM_WEBHOOK_BASE_URL=https://meta.example.org
 TELEGRAM_LINK_TTL_MINUTES=30
 TELEGRAM_HTTP_TIMEOUT_SECONDS=20
+TELEGRAM_VOICE_TRANSCRIPTION_ENABLED=true
+TELEGRAM_VOICE_TRANSCRIPTION_MODEL=gpt-4o-transcribe
+TELEGRAM_VOICE_MAX_BYTES=20000000
+TELEGRAM_VOICE_MAX_DURATION_SECONDS=300
+TELEGRAM_VOICE_TRANSCRIPTION_TIMEOUT_SECONDS=45
 FUPA_REPORT_FEEDBACK_WAIT_MINUTES=30
 ```
 
@@ -76,6 +83,13 @@ erreichbar sein und auf den öffentlichen Proxy der Anwendung zeigen. Die
 Anwendung erzeugt den vollständigen zufälligen Webhook-Pfad selbst. Der Bot-
 Zugriff und das Webhook-Secret werden mit der bestehenden Tokenverschlüsselung
 gespeichert und nie an den Browser zurückgegeben.
+
+Für Sprachnachrichten verwendet die Anwendung den bereits sicher hinterlegten
+`OPENAI_API_KEY`; Vereinsadministratoren benötigen keinen eigenen Schlüssel.
+Das Container-Image enthält `ffmpeg`, um Telegrams OGG/Opus-Dateien vor der
+Transkription in ein kompatibles Mono-WAV umzuwandeln. Modell, Größen-, Dauer-
+und Zeitlimit sind zentral konfigurierbar. Audiodaten und Telegram-Datei-IDs
+werden nur im Arbeitsspeicher verarbeitet und nicht dauerhaft gespeichert.
 
 ### 3. Provider freigeben
 
@@ -118,6 +132,12 @@ Gespeichert werden die technisch notwendigen Telegram-IDs, Zeitpunkte und
 Statusdaten. Bot-Token und Webhook-Secret bleiben verschlüsselt. Weder Secrets
 noch vollständige Providerantworten erscheinen in HTML, Audit oder normalen
 Fehlermeldungen.
+
+Bei erfolgreicher Spracherkennung wird ausschließlich das erkannte Transkript
+samt Modell- und Dauer-Metadaten gespeichert. Schlägt Download, Konvertierung
+oder Transkription fehl, bleibt die Rückfrage offen und der Bot bittet um eine
+erneute Textantwort. Dadurch wird eine Rückfrage nicht durch eine leere
+Medienantwort fälschlich als beantwortet markiert.
 
 ## Fehler, Wiederholung und Status
 

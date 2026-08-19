@@ -156,11 +156,68 @@ def test_fupa_parser_reads_structured_match_and_fulltime_ticker():
     assert result.ticker[-1].event_type == "fulltime"
 
 
+def test_fupa_parser_reads_current_redux_bootstrap_and_ticker():
+    html = """
+    <html><head><title>FuPa Spielbericht</title></head><body>
+      <script>
+      window.REDUX_DATA = {"dataHistory":[{"MatchPage":{
+        "matchInfo":{
+          "homeTeamName":"TSV Carlsdorf",
+          "awayTeamName":"SV Ehlen",
+          "homeGoal":1,
+          "awayGoal":2,
+          "kickoff":"2026-08-16T15:00:00+02:00",
+          "competitionName":"Kreisliga A",
+          "venueName":"RP Hofgeismar-Carlsdorf",
+          "section":"POST"
+        },
+        "ticker":{"events":[
+          {"id":"goal-1","type":"goal","minute":18,
+           "homeGoal":0,"awayGoal":1,
+           "primaryRole":{"firstName":"Max","lastName":"Muster"}},
+          {"id":"end","type":"fulltime","minute":90,
+           "homeGoal":1,"awayGoal":2}
+        ]}
+      }}]};
+      </script>
+    </body></html>
+    """
+
+    result = parse_fupa_html("https://www.fupa.net/match/test", html)
+
+    assert result.fetch_status == "success"
+    assert result.metadata["parser"] == "jsonld-nextdata-redux-v2"
+    assert result.structured_data == {
+        "home_team": "TSV Carlsdorf",
+        "away_team": "SV Ehlen",
+        "home_score": 1,
+        "away_score": 2,
+        "kickoff": "2026-08-16T15:00:00+02:00",
+        "competition": "Kreisliga A",
+        "venue": "RP Hofgeismar-Carlsdorf",
+        "status": "finished",
+    }
+    assert [item.event_type for item in result.ticker] == ["goal", "fulltime"]
+    assert result.ticker[0].player == "Max Muster"
+    assert (result.ticker[-1].home_score, result.ticker[-1].away_score) == (1, 2)
+
+
+def test_fupa_parser_does_not_execute_invalid_redux_javascript():
+    html = """
+    <html><head><title>Anstoß 14:30 Uhr</title></head><body>
+      <script>window.REDUX_DATA = alert('darf nicht ausgeführt werden');</script>
+    </body></html>
+    """
+
+    result = parse_fupa_html("https://www.fupa.net/match/no-data", html)
+
+    assert result.fetch_status == "incomplete"
+    assert result.structured_data["home_score"] is None
+    assert result.structured_data["away_score"] is None
+
+
 def test_fupa_parser_never_treats_page_wide_time_as_a_score():
-    html = (
-        "<html><head><title>Anstoß 14:30 Uhr</title></head>"
-        "<body>Beginn 14:30 Uhr</body></html>"
-    )
+    html = "<html><head><title>Anstoß 14:30 Uhr</title></head><body>Beginn 14:30 Uhr</body></html>"
     result = parse_fupa_html("https://www.fupa.net/match/no-data", html)
     assert result.fetch_status == "incomplete"
     assert result.structured_data["home_score"] is None

@@ -22,10 +22,15 @@ from app.match_reports.feedback_providers import FeedbackSendResult, FeedbackTar
 from app.match_reports.telegram import (
     TelegramApiError,
     TelegramBotClient,
+    TelegramDownloadedFile,
     consume_contact_link,
     create_contact_link,
     feedback_provider_enabled,
     safe_payload_metadata,
+)
+from app.match_reports.telegram_voice import (
+    TelegramVoiceTranscriptionError,
+    transcribe_telegram_voice,
 )
 from app.match_reports.telegram_webhooks import router as telegram_webhook_router
 from app.models import (
@@ -685,6 +690,112 @@ def test_telegram_client_get_me_send_and_rate_limit(monkeypatch):
     assert exc_info.value.permanent is False
 
 
+def test_telegram_client_downloads_voice_without_exposing_token(monkeypatch):
+    token = "123456:secret-token"
+
+    def telegram_post(url, *, json, timeout):
+        assert token in url
+        assert json == {"file_id": "voice-id"}
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {"file_path": "voice/file_0.oga", "file_size": 8},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    def telegram_get(url, *, timeout):
+        assert token in url
+        return httpx.Response(
+            200,
+            content=b"ogg-data",
+            headers={"content-length": "8"},
+            request=httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", telegram_post)
+    monkeypatch.setattr(httpx, "get", telegram_get)
+
+    downloaded = TelegramBotClient(Settings(), token).download_file("voice-id", max_bytes=100)
+
+    assert downloaded == TelegramDownloadedFile(
+        content=b"ogg-data",
+        filename="file_0.oga",
+        mime_type="audio/ogg",
+    )
+
+
+@pytest.mark.parametrize("file_path", ["../secret", "/etc/passwd", "C:/secret", "a\\b"])
+def test_telegram_client_rejects_unsafe_download_paths(monkeypatch, file_path):
+    def telegram_post(url, *, json, timeout):
+        return httpx.Response(
+            200,
+            json={"ok": True, "result": {"file_path": file_path, "file_size": 8}},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", telegram_post)
+    with pytest.raises(TelegramApiError, match="nicht zulässig"):
+        TelegramBotClient(Settings(), "123456:secret-token").download_file(
+            "voice-id", max_bytes=100
+        )
+
+
+def test_voice_transcription_converts_transient_audio_and_returns_text(monkeypatch):
+    captured: dict = {}
+
+    class FakeClient:
+        def download_file(self, file_id, *, max_bytes):
+            captured["download"] = (file_id, max_bytes)
+            return TelegramDownloadedFile(b"telegram-ogg", "voice.oga", "audio/ogg")
+
+    class FakeTranscriptions:
+        def create(self, **kwargs):
+            captured["request"] = kwargs
+            return SimpleNamespace(text="  In der 55. Minute fiel der Ausgleich.  ")
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.audio = SimpleNamespace(transcriptions=FakeTranscriptions())
+
+    monkeypatch.setattr("app.match_reports.telegram_voice.OpenAI", FakeOpenAI)
+    monkeypatch.setattr(
+        "app.match_reports.telegram_voice._to_wav",
+        lambda content, **kwargs: b"wav-data",
+    )
+    settings = Settings(
+        openai_api_key="test-key",
+        telegram_voice_transcription_model="gpt-transcribe",
+    )
+
+    result = transcribe_telegram_voice(
+        client=FakeClient(),
+        message={"voice": {"file_id": "voice-id", "duration": 12, "file_size": 42}},
+        settings=settings,
+    )
+
+    assert result.text == "In der 55. Minute fiel der Ausgleich."
+    assert result.duration_seconds == 12
+    assert captured["download"] == ("voice-id", settings.telegram_voice_max_bytes)
+    assert captured["request"]["model"] == "gpt-transcribe"
+    assert captured["request"]["language"] == "de"
+    assert captured["request"]["file"].getvalue() == b"wav-data"
+
+
+def test_voice_transcription_rejects_missing_key_and_oversized_audio():
+    message = {"voice": {"file_id": "voice-id", "duration": 12, "file_size": 42}}
+    with pytest.raises(TelegramVoiceTranscriptionError) as exc_info:
+        transcribe_telegram_voice(client=object(), message=message, settings=Settings())
+    assert exc_info.value.reason == "service_not_configured"
+
+    settings = Settings(openai_api_key="test-key", telegram_voice_max_bytes=10)
+    with pytest.raises(TelegramVoiceTranscriptionError) as exc_info:
+        transcribe_telegram_voice(client=object(), message=message, settings=settings)
+    assert exc_info.value.reason == "size_exceeded"
+
+
 @pytest.mark.parametrize("status_code", [401, 403, 404])
 def test_telegram_client_classifies_permanent_api_errors(monkeypatch, status_code):
     def rejected(url, *, json, timeout):
@@ -926,6 +1037,14 @@ def test_webhook_text_voice_callback_unknown_and_unknown_connection(db, monkeypa
     )
     db.add(voice_request)
     db.flush()
+    monkeypatch.setattr(
+        "app.match_reports.telegram_webhooks.transcribe_telegram_voice",
+        lambda **kwargs: SimpleNamespace(
+            text="Nach dem Ausgleich wurde die Mannschaft stärker.",
+            model="gpt-transcribe",
+            duration_seconds=9,
+        ),
+    )
     with TestClient(client.app) as active_client:
         assert (
             active_client.post(
@@ -948,9 +1067,71 @@ def test_webhook_text_voice_callback_unknown_and_unknown_connection(db, monkeypa
         select(MatchFeedbackResponse).where(MatchFeedbackResponse.provider_message_id == "102")
     )
     assert voice.payload_type == "voice"
-    assert voice.body == ""
+    assert voice.body == "Nach dem Ausgleich wurde die Mannschaft stärker."
     assert voice.payload_metadata["has_voice"] is True
+    assert voice.payload_metadata["transcription"] == {
+        "status": "completed",
+        "model": "gpt-transcribe",
+        "duration_seconds": 9,
+    }
     assert "must-not-be-stored" not in str(voice.payload_metadata)
+
+    failed_voice_request = MatchFeedbackRequest(
+        game_id=game.id,
+        team_id=team.id,
+        contact_id=contact.id,
+        channel_connection_id=connection.id,
+        provider="telegram",
+        external_chat_id="5151",
+        external_message_id="106",
+        provider_message_id="106",
+        idempotency_key=f"request-{uuid4().hex}",
+        requested_at=datetime.now(timezone.utc),
+        deadline_at=deadline,
+        status="sent",
+        delivery_status="sent",
+    )
+    db.add(failed_voice_request)
+    db.flush()
+
+    def fail_transcription(**kwargs):
+        raise TelegramVoiceTranscriptionError("provider_failed")
+
+    monkeypatch.setattr(
+        "app.match_reports.telegram_webhooks.transcribe_telegram_voice",
+        fail_transcription,
+    )
+    with TestClient(client.app) as active_client:
+        assert (
+            active_client.post(
+                f"/webhooks/telegram/{identifier}",
+                json={
+                    "update_id": 7195,
+                    "message": {
+                        "message_id": 107,
+                        "chat": {"id": 5151, "type": "private"},
+                        "from": {"id": 5151},
+                        "reply_to_message": {"message_id": 106},
+                        "voice": {"file_id": "must-not-be-stored-on-failure"},
+                    },
+                },
+                headers={"X-Telegram-Bot-Api-Secret-Token": "valid-secret"},
+            ).status_code
+            == 200
+        )
+    assert (
+        db.scalar(
+            select(MatchFeedbackResponse).where(MatchFeedbackResponse.provider_message_id == "107")
+        )
+        is None
+    )
+    db.refresh(failed_voice_request)
+    assert failed_voice_request.status == "sent"
+    failed_update = db.scalar(
+        select(TelegramWebhookUpdate).where(TelegramWebhookUpdate.update_id == "7195")
+    )
+    assert failed_update.status == "voice_transcription_failed"
+    assert any("noch einmal als Text" in sent["text"] for sent in _FakeTelegramClient.sent)
 
     callback_request = MatchFeedbackRequest(
         game_id=game.id,

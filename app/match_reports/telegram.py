@@ -6,6 +6,7 @@ import json
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import PurePosixPath
 from typing import Any
 
 import httpx
@@ -42,6 +43,13 @@ class TelegramBotIdentity:
     bot_id: str
     username: str
     display_name: str
+
+
+@dataclass(frozen=True)
+class TelegramDownloadedFile:
+    content: bytes
+    filename: str
+    mime_type: str
 
 
 class TelegramBotClient:
@@ -108,6 +116,61 @@ class TelegramBotClient:
 
     def get_webhook_info(self) -> dict:
         return self._call("getWebhookInfo")
+
+    def download_file(self, file_id: str, *, max_bytes: int) -> TelegramDownloadedFile:
+        if not file_id or max_bytes <= 0:
+            raise TelegramApiError("Die Telegram-Datei ist ungültig", permanent=True)
+        item = self._call("getFile", {"file_id": file_id})
+        file_path = str(item.get("file_path") or "").strip()
+        provider_size = item.get("file_size")
+        try:
+            provider_size = int(provider_size) if provider_size is not None else None
+        except (TypeError, ValueError):
+            provider_size = None
+        path = PurePosixPath(file_path)
+        if (
+            not file_path
+            or path.is_absolute()
+            or ".." in path.parts
+            or "\\" in file_path
+            or (path.parts and path.parts[0].endswith(":"))
+            or "://" in file_path
+            or "?" in file_path
+            or "#" in file_path
+            or provider_size is not None
+            and provider_size > max_bytes
+        ):
+            raise TelegramApiError("Die Telegram-Datei ist nicht zulässig", permanent=True)
+        url = (
+            f"{self.settings.telegram_bot_api_base_url.rstrip('/')}/file/"
+            f"bot{self.token}/{file_path}"
+        )
+        try:
+            response = httpx.get(url, timeout=self.settings.telegram_http_timeout_seconds)
+        except httpx.HTTPError:
+            raise TelegramApiError("Telegram ist vorübergehend nicht erreichbar") from None
+        if response.status_code >= 400:
+            raise TelegramApiError(
+                "Telegram konnte die Sprachdatei nicht bereitstellen",
+                status_code=response.status_code,
+                permanent=response.status_code in {400, 401, 403, 404},
+            )
+        content_length = response.headers.get("content-length")
+        try:
+            announced_size = int(content_length) if content_length else None
+        except ValueError:
+            announced_size = None
+        if announced_size is not None and announced_size > max_bytes:
+            raise TelegramApiError("Die Telegram-Datei ist zu groß", permanent=True)
+        content = response.content
+        if not content or len(content) > max_bytes:
+            raise TelegramApiError("Die Telegram-Datei ist leer oder zu groß", permanent=True)
+        filename = path.name[:160] or "telegram-voice.oga"
+        suffix = path.suffix.casefold()
+        mime_type = (
+            "audio/ogg" if suffix in {".oga", ".ogg", ".opus"} else "application/octet-stream"
+        )
+        return TelegramDownloadedFile(content=content, filename=filename, mime_type=mime_type)
 
     def delete_webhook(self) -> None:
         self._call("deleteWebhook", {"drop_pending_updates": False})

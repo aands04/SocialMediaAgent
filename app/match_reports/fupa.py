@@ -18,6 +18,7 @@ _MAX_BYTES = 2_000_000
 _ALLOWED_HOSTS = {"fupa.net", "www.fupa.net"}
 _SCORE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[:\-]\s*(\d{1,2})(?!\d)")
 _MINUTE_RE = re.compile(r"(?<!\d)(\d{1,3})(?:\+\d{1,2})?\s*[.'’]")
+_REDUX_DATA_RE = re.compile(r"(?:window\.)?REDUX_DATA\s*=\s*")
 
 
 class FupaReadError(RuntimeError):
@@ -61,7 +62,12 @@ def _walk(value: Any):
 
 def _name(value: Any) -> str | None:
     if isinstance(value, dict):
-        value = value.get("name")
+        value = (
+            value.get("name")
+            or " ".join(
+                str(value.get(key) or "").strip() for key in ("firstName", "lastName")
+            ).strip()
+        )
     return str(value).strip() if value not in {None, ""} else None
 
 
@@ -102,6 +108,36 @@ def _ticker_item(raw: dict[str, Any], index: int) -> FupaTickerItem | None:
         str(raw.get(key) or "").strip()
         for key in ("title", "text", "description", "comment", "message")
     ).strip()
+    provider_type = str(raw.get("type") or raw.get("eventType") or "").casefold()
+    provider_subtype = str(raw.get("subtype") or "").casefold()
+    inferred_types = {
+        "goal": ("goal", "Tor"),
+        "yellow_card": ("yellow_card", "Gelbe Karte"),
+        "yellowcard": ("yellow_card", "Gelbe Karte"),
+        "red_card": ("red_card", "Rote Karte"),
+        "redcard": ("red_card", "Rote Karte"),
+        "substitution": ("substitution", "Auswechslung"),
+        "kickoff": ("kickoff", "Anpfiff"),
+        "halftime": ("halftime", "Halbzeit"),
+        "fulltime": ("fulltime", "Abpfiff"),
+    }
+    inferred = inferred_types.get(provider_type) or inferred_types.get(provider_subtype)
+    player = _name(
+        raw.get("player") or raw.get("person") or raw.get("primaryRole") or raw.get("primaryPerson")
+    )
+    explicit_home_score = raw.get("homeScore")
+    if explicit_home_score is None:
+        explicit_home_score = raw.get("homeGoal")
+    explicit_away_score = raw.get("awayScore")
+    if explicit_away_score is None:
+        explicit_away_score = raw.get("awayGoal")
+    if not text and inferred:
+        text_parts = [inferred[1]]
+        if player:
+            text_parts.append(player)
+        if explicit_home_score is not None and explicit_away_score is not None:
+            text_parts.append(f"{explicit_home_score}:{explicit_away_score}")
+        text = " – ".join(text_parts)
     if not text:
         return None
     minute_value = raw.get("minute") or raw.get("matchMinute")
@@ -112,18 +148,71 @@ def _ticker_item(raw: dict[str, Any], index: int) -> FupaTickerItem | None:
         minute = None
     if minute is None and minute_match:
         minute = int(minute_match.group(1))
-    score = _SCORE_RE.search(text)
     source_id = str(raw.get("id") or raw.get("eventId") or f"ticker-{index}")[:200]
+    score = _SCORE_RE.search(text)
+
+    def _score(value: Any, fallback: int | None) -> int | None:
+        try:
+            return int(value) if value is not None else fallback
+        except (TypeError, ValueError):
+            return fallback
+
     return FupaTickerItem(
         source_id=source_id,
-        event_type=_event_type(text),
+        event_type=inferred[0] if inferred else _event_type(text),
         minute=minute,
         text=text[:1000],
-        team=_name(raw.get("team") or raw.get("club")),
-        player=_name(raw.get("player") or raw.get("person")),
-        home_score=int(score.group(1)) if score else None,
-        away_score=int(score.group(2)) if score else None,
+        team=_name(raw.get("team") or raw.get("club") or raw.get("teamName")),
+        player=player,
+        home_score=_score(explicit_home_score, int(score.group(1)) if score else None),
+        away_score=_score(explicit_away_score, int(score.group(2)) if score else None),
     )
+
+
+def _redux_document(script_text: str) -> Any | None:
+    """Decode FuPa's current Redux bootstrap without evaluating JavaScript."""
+
+    marker = _REDUX_DATA_RE.search(script_text)
+    if marker is None:
+        return None
+    try:
+        document, _ = json.JSONDecoder().raw_decode(script_text[marker.end() :].lstrip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return document
+
+
+def _redux_match_page(document: Any) -> dict[str, Any] | None:
+    for item in _walk(document):
+        match_info = item.get("matchInfo")
+        if isinstance(match_info, dict) and any(
+            key in match_info for key in ("homeTeamName", "awayTeamName", "kickoff")
+        ):
+            return item
+    return None
+
+
+def _redux_ticker_candidates(match_page: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for key in ("ticker", "tickerEvents", "events", "matchTicker", "matchEvents"):
+        value = match_page.get(key)
+        if value is None:
+            continue
+        for item in _walk(value):
+            provider_type = str(item.get("type") or item.get("eventType") or "").casefold()
+            if provider_type in {
+                "goal",
+                "yellow_card",
+                "yellowcard",
+                "red_card",
+                "redcard",
+                "substitution",
+                "kickoff",
+                "halftime",
+                "fulltime",
+            } or any(key in item for key in ("text", "comment", "message", "title")):
+                candidates.append(item)
+    return candidates
 
 
 def _extract_json(soup: BeautifulSoup) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -133,13 +222,22 @@ def _extract_json(soup: BeautifulSoup) -> tuple[dict[str, Any], list[dict[str, A
     for script in soup.find_all("script"):
         script_type = (script.get("type") or "").lower()
         script_id = script.get("id") or ""
+        script_text = script.string or script.get_text() or ""
+        redux = _redux_document(script_text)
+        if redux is not None:
+            documents.append(redux)
         if script_type != "application/ld+json" and script_id != "__NEXT_DATA__":
             continue
         try:
-            documents.append(json.loads(script.string or script.get_text() or "null"))
+            documents.append(json.loads(script_text or "null"))
         except json.JSONDecodeError:
             continue
     for document in documents:
+        match_page = _redux_match_page(document)
+        if match_page is not None:
+            match = match_page["matchInfo"]
+            ticker.extend(_redux_ticker_candidates(match_page))
+            continue
         for item in _walk(document):
             item_type = str(item.get("@type") or item.get("type") or "").casefold()
             if not match and item_type in {"sportsevent", "game", "match"}:
@@ -155,10 +253,14 @@ def parse_fupa_html(source_url: str, html: str, *, status_code: int = 200) -> Fu
     source_url = validate_fupa_url(source_url)
     soup = BeautifulSoup(html, "html.parser")
     match, raw_ticker = _extract_json(soup)
-    home = _name(match.get("homeTeam") or match.get("home"))
-    away = _name(match.get("awayTeam") or match.get("away"))
+    home = _name(match.get("homeTeam") or match.get("home") or match.get("homeTeamName"))
+    away = _name(match.get("awayTeam") or match.get("away") or match.get("awayTeamName"))
     home_score = match.get("homeScore")
+    if home_score is None:
+        home_score = match.get("homeGoal")
     away_score = match.get("awayScore")
+    if away_score is None:
+        away_score = match.get("awayGoal")
     items = tuple(
         item
         for index, raw in enumerate(raw_ticker)
@@ -181,15 +283,28 @@ def parse_fupa_html(source_url: str, html: str, *, status_code: int = 200) -> Fu
         if final_ticker is not None:
             home_score = final_ticker.home_score
             away_score = final_ticker.away_score
+    raw_status = _name(match.get("eventStatus") or match.get("status") or match.get("section"))
+    status = {
+        "pre": "scheduled",
+        "live": "live",
+        "post": "finished",
+    }.get((raw_status or "").casefold(), raw_status)
     structured = {
         "home_team": home,
         "away_team": away,
         "home_score": home_score,
         "away_score": away_score,
-        "kickoff": _parse_datetime(match.get("startDate") or match.get("date")),
-        "competition": _name(match.get("superEvent") or match.get("competition")),
-        "venue": _name(match.get("location") or match.get("venue")),
-        "status": _name(match.get("eventStatus") or match.get("status")),
+        "kickoff": _parse_datetime(
+            match.get("startDate") or match.get("date") or match.get("kickoff")
+        ),
+        "competition": _name(
+            match.get("superEvent")
+            or match.get("competition")
+            or match.get("competitionName")
+            or match.get("leagueName")
+        ),
+        "venue": _name(match.get("location") or match.get("venue") or match.get("venueName")),
+        "status": status,
     }
     normalized = json.dumps(
         {"structured": structured, "ticker": [item.__dict__ for item in items]},
@@ -206,7 +321,7 @@ def parse_fupa_html(source_url: str, html: str, *, status_code: int = 200) -> Fu
         metadata={
             "http_status": status_code,
             "title": (soup.title.string or "")[:300] if soup.title else None,
-            "parser": "jsonld-nextdata-v1",
+            "parser": "jsonld-nextdata-redux-v2",
         },
         content_digest=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
     )
