@@ -10,12 +10,13 @@
 
 <section class="channel-intro">
   <h2>Deine Kanäle verbinden</h2>
-  <p>Du kannst Instagram, Facebook und WhatsApp mit der Vereinszentrale verbinden.</p>
-  <p>Die Verbindung erfolgt über die offiziellen Schnittstellen von Meta. Passwörter für Instagram, Facebook oder WhatsApp werden nicht in der Vereinszentrale gespeichert.</p>
+  <p>Du kannst Instagram, Facebook und WhatsApp verbinden. Für private Rückfragen zu FuPa-Spielberichten steht optional ein Telegram-Bot zur Verfügung.</p>
+  <p>Die Verbindungen erfolgen über die offiziellen Schnittstellen der Anbieter. Plattformpasswörter werden nicht in der Vereinszentrale gespeichert.</p>
   <div class="channel-info-grid">
     <article><strong>Instagram</strong><span>Veröffentliche automatisch Feed-Beiträge, Beiträge mit mehreren Bildern und Storys.</span></article>
     <article><strong>Facebook</strong><span>Veröffentliche Beiträge und Bilder automatisch auf deiner Facebook-Seite.</span></article>
     <article><strong>WhatsApp</strong><span>Versende Spielankündigungen und Ergebnisse an dafür freigegebene Empfänger.</span><small>WhatsApp funktioniert anders: Inhalte werden als private Nachrichten versendet und nicht öffentlich veröffentlicht.</small></article>
+    <article><strong>Telegram</strong><span>Hole private Rückmeldungen zu automatisch gelesenen FuPa-Spielberichten ein.</span><small>Telegram ist optional, verwendet einen vereinseigenen Bot und ersetzt WhatsApp nicht.</small></article>
   </div>
 </section>
 
@@ -38,7 +39,8 @@
 {% for channel_type, label, icon, empty_title, empty_text in [
   ('instagram','Instagram','◎','Noch nicht verbunden','Verbinde ein professionelles Instagram-Konto, um Feed-Beiträge, Karussells und unterstützte Storys zu veröffentlichen.'),
   ('facebook','Facebook','f','Noch nicht verbunden','Verbinde deine Facebook-Seite, um freigegebene Beiträge automatisch auch dort zu veröffentlichen.'),
-  ('whatsapp','WhatsApp','✆','Noch nicht eingerichtet','Verbinde die WhatsApp Business Platform, um Spielankündigungen oder Ergebnisse zulässig zu versenden.')
+  ('whatsapp','WhatsApp','✆','Noch nicht eingerichtet','Verbinde die WhatsApp Business Platform, um Spielankündigungen oder Ergebnisse zulässig zu versenden.'),
+  ('telegram','Telegram','✈','Noch nicht eingerichtet','Verbinde optional einen Telegram-Bot für private Rückfragen zu FuPa-Spielberichten.')
 ] %}
   <section class="channel-card" aria-labelledby="channel-{{ channel_type }}">
     <header class="channel-card-header"><span class="channel-icon channel-icon-{{ channel_type }}" aria-hidden="true">{{ icon }}</span><h2 id="channel-{{ channel_type }}">{{ label }}</h2></header>
@@ -50,7 +52,7 @@
         {% if connection.username %}<p>@{{ connection.username }}</p>{% elif connection.display_phone_number %}<p>{{ connection.display_phone_number }}</p>{% endif %}
         <p><span class="channel-status channel-status-{{ card.display_status }}">{{ '✓ ' if card.display_status == 'connected' else '' }}{{ card.status_label }}</span></p>
         <dl class="channel-summary-list">
-          <dt>Automatische {{ 'Nachrichten' if channel_type == 'whatsapp' else 'Veröffentlichung' }}</dt><dd>{{ 'Aktiv' if connection.automatic_delivery_enabled else 'Pausiert' }}</dd>
+          <dt>{{ 'Spielbericht-Rückfragen' if channel_type == 'telegram' else ('Automatische Nachrichten' if channel_type == 'whatsapp' else 'Automatische Veröffentlichung') }}</dt><dd>{{ 'Aktiv' if channel_type == 'telegram' and connection.status == 'connected' else ('Aktiv' if connection.automatic_delivery_enabled else 'Pausiert') }}</dd>
           <dt>Aktive Funktionen</dt><dd>{{ card.capability_labels | join(' · ') if card.capability_labels else 'Noch keine' }}</dd>
           <dt>Zuletzt geprüft</dt><dd>{{ connection.last_check_at | berlin if connection.last_check_at else 'Noch nicht geprüft' }}</dd>
         </dl>
@@ -83,6 +85,7 @@
         {% if is_admin %}
         <details class="channel-manage">
           <summary>Verwalten</summary>
+          {% if channel_type != 'telegram' %}
           <form method="post" action="/channels/{{ connection.id }}/settings" class="channel-settings-form">
             <input type="hidden" name="csrf_token" value="{{ csrf }}">
             <label><input type="checkbox" name="publishing_enabled" {% if connection.publishing_enabled %}checked{% endif %}> Kanal verwenden</label>
@@ -97,10 +100,13 @@
             {% if channel_type == 'instagram' %}<label><input type="checkbox" name="stories" {% if connection.settings.get('story_enabled') %}checked{% endif %}> Storys</label>{% endif %}
             <button>Kanaleinstellungen speichern</button>
           </form>
+          {% else %}
+          <p>Kontakte, Anbieterpriorität und Rückfragen verwaltest du direkt beim jeweiligen FuPa-Spielbericht. Der Bot dient nicht als Veröffentlichungsziel.</p>
+          {% endif %}
           <div class="button-row">
-            <form method="post" action="/channels/{{ connection.id }}/check"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>{{ 'Verbindung und Webhook prüfen' if channel_type == 'whatsapp' else 'Verbindung prüfen' }}</button></form>
+            <form method="post" action="/channels/{{ connection.id }}/check"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>{{ 'Verbindung und Webhook prüfen' if channel_type in ['whatsapp', 'telegram'] else 'Verbindung prüfen' }}</button></form>
             {% if channel_type == 'instagram' and connection.legacy_instagram_page_id %}<form method="post" action="/instagram/{{ connection.legacy_instagram_page_id }}/meta/refresh"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Verbindung erneuern</button></form>
-            {% elif channel_type in ['facebook', 'whatsapp'] %}<a class="button secondary" href="/channels/{{ channel_type }}/setup">{{ 'WhatsApp neu verbinden' if channel_type == 'whatsapp' else 'Verbindung erneuern' }}</a>{% endif %}
+            {% elif channel_type in ['facebook', 'whatsapp', 'telegram'] %}<a class="button secondary" href="/channels/{{ channel_type }}/setup">{{ 'Neu verbinden' if channel_type == 'telegram' else ('WhatsApp neu verbinden' if channel_type == 'whatsapp' else 'Verbindung erneuern') }}</a>{% endif %}
           </div>
           {% if channel_type == 'whatsapp' %}
           <p class="field-help">Die Prüfung kontrolliert Telefonnummer und Webhook-Abonnement. Fehlt der Zugriff, verbinde WhatsApp erneut; gespeicherte Empfänger, Vorlagen und Einstellungen bleiben bestehen.</p>
@@ -118,8 +124,10 @@
             </form>
           </details>
           {% endif %}
-          {% else %}
+          {% elif channel_type != 'telegram' %}
           <p class="field-help">Meta verlangt gelegentlich eine erneute Bestätigung. Gespeicherte Beiträge und Einstellungen bleiben erhalten.</p>
+          {% else %}
+          <p class="field-help">Telegram-Rückfragen laufen ausschließlich über den sicheren Bot-Webhook. Bot-Token werden nie angezeigt.</p>
           {% endif %}
           <details>
             <summary>Verbindung trennen</summary>
@@ -140,9 +148,7 @@
             <dt>Meta-Konto</dt><dd>{{ connection.external_account_id or '—' }}</dd>
             {% if channel_type == 'facebook' %}<dt>Page ID</dt><dd>{{ connection.external_account_id or '—' }}</dd>{% endif %}
             {% if channel_type == 'whatsapp' %}<dt>WhatsApp Business Account</dt><dd>{{ connection.parent_business_id or '—' }}</dd><dt>Phone Number ID</dt><dd>{{ connection.phone_number_id or '—' }}</dd><dt>Sicherer Zugriff</dt><dd>{{ 'Vorhanden' if card.has_token else 'Erneute Verbindung erforderlich' }}</dd><dt>Telefonregistrierung</dt><dd>{{ 'Bestätigt' if not card.registration_required else 'Noch ausstehend' }}</dd><dt>Webhook-Abonnement</dt><dd>{{ 'Bestätigt' if card.webhook_subscription_confirmed else 'Noch nicht geprüft' }}</dd>{% endif %}
-            <dt>Graph-Version</dt><dd>{{ connection.api_version or 'zentral konfiguriert' }}</dd>
-            <dt>Berechtigungen</dt><dd>{{ connection.scopes | join(', ') if connection.scopes else '—' }}</dd>
-            <dt>Verbindungsablauf</dt><dd>{{ connection.token_expires_at | berlin if connection.token_expires_at else 'nicht von Meta gemeldet' }}</dd>
+            {% if channel_type == 'telegram' %}<dt>Bot-ID</dt><dd>{{ connection.external_account_id or '—' }}</dd><dt>Sicherer Zugriff</dt><dd>{{ 'Vorhanden' if card.has_token else 'Erneute Verbindung erforderlich' }}</dd><dt>Webhook</dt><dd>{{ 'Eingerichtet' if connection.settings.get('webhook_identifier') else 'Unvollständig' }}</dd>{% else %}<dt>Graph-Version</dt><dd>{{ connection.api_version or 'zentral konfiguriert' }}</dd><dt>Berechtigungen</dt><dd>{{ connection.scopes | join(', ') if connection.scopes else '—' }}</dd><dt>Verbindungsablauf</dt><dd>{{ connection.token_expires_at | berlin if connection.token_expires_at else 'nicht von Meta gemeldet' }}</dd>{% endif %}
             <dt>Letzter technischer Fehler</dt><dd>{{ connection.last_error or 'keiner' }}</dd>
           </dl>
         </details>
@@ -152,15 +158,16 @@
     {% else %}
       <div class="channel-empty"><strong>{{ empty_title }}</strong><p>{{ empty_text }}</p>
       {% if is_admin %}
-        {% if channel_type == 'facebook' and not facebook_available %}<p class="field-help">Facebook ist derzeit plattformweit pausiert.</p>{% elif channel_type == 'whatsapp' and not whatsapp_available %}<p class="field-help">WhatsApp ist derzeit plattformweit pausiert.</p>{% endif %}
-        <a class="button" href="/channels/{{ channel_type }}/setup">{{ 'WhatsApp einrichten' if channel_type == 'whatsapp' else label ~ ' verbinden' }}</a>
+        {% if channel_type == 'facebook' and not facebook_available %}<p class="field-help">Facebook ist derzeit plattformweit pausiert.</p>{% elif channel_type == 'whatsapp' and not whatsapp_available %}<p class="field-help">WhatsApp ist derzeit plattformweit pausiert.</p>{% elif channel_type == 'telegram' and not telegram_available %}<p class="field-help">Telegram ist für diesen Verein noch nicht freigeschaltet.</p>{% endif %}
+        {% if (channel_type == 'facebook' and facebook_available) or (channel_type == 'whatsapp' and whatsapp_available) or (channel_type == 'telegram' and telegram_available) or channel_type == 'instagram' %}<a class="button" href="/channels/{{ channel_type }}/setup">{{ label ~ ' einrichten' if channel_type in ['whatsapp', 'telegram'] else label ~ ' verbinden' }}</a>{% else %}<span class="status-pill">Nicht freigeschaltet</span>{% endif %}
       {% endif %}
       </div>
     {% endif %}
     <details class="channel-help"><summary>Wie richte ich das ein?</summary>
       {% if channel_type == 'instagram' %}<ol><li>Professionelles Konto vorbereiten.</li><li>Mit Meta anmelden.</li><li>Konto auswählen.</li><li>Zugriff erlauben.</li><li>Verbindung prüfen.</li></ol>
       {% elif channel_type == 'facebook' %}<ol><li>Facebook-Seite vorbereiten.</li><li>Mit Meta anmelden.</li><li>Seite auswählen.</li><li>Zugriff erlauben.</li><li>Verbindung prüfen.</li></ol>
-      {% else %}<ol><li>WhatsApp-Business-Voraussetzungen prüfen.</li><li>Business-Konto verbinden.</li><li>Telefonnummer einrichten.</li><li>genehmigte Vorlagen synchronisieren.</li><li>Empfänger mit nachweisbarer Zustimmung hinzufügen.</li></ol><p>Ein automatisches Veröffentlichen im WhatsApp-Status wird nicht angeboten.</p>{% endif %}
+      {% elif channel_type == 'whatsapp' %}<ol><li>WhatsApp-Business-Voraussetzungen prüfen.</li><li>Business-Konto verbinden.</li><li>Telefonnummer einrichten.</li><li>genehmigte Vorlagen synchronisieren.</li><li>Empfänger mit nachweisbarer Zustimmung hinzufügen.</li></ol><p>Ein automatisches Veröffentlichen im WhatsApp-Status wird nicht angeboten.</p>
+      {% else %}<ol><li>Bei @BotFather einen Bot anlegen.</li><li>Das einmalige Bot-Token hier sicher verbinden.</li><li>Beim Spielbericht einen Kontakt anlegen.</li><li>Den kurzlebigen Einmallink privat an den Kontakt senden.</li></ol><p>Der Bot verarbeitet nur private Nachrichten und Rückfragen zu zugeordneten Spielberichten.</p>{% endif %}
     </details>
   </section>
 {% endfor %}

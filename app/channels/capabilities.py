@@ -24,12 +24,14 @@ CHANNEL_CAPABILITIES: dict[str, tuple[ChannelCapability, ...]] = {
         ChannelCapability("text", "Textbeiträge", "publish"),
     ),
     "whatsapp": (ChannelCapability("template_message", "Vorlagennachrichten", "send"),),
+    "telegram": (ChannelCapability("match_feedback", "Spielberichts-Rückfragen", "send"),),
 }
 
 CHANNEL_LABELS = {
     "instagram": "Instagram",
     "facebook": "Facebook",
     "whatsapp": "WhatsApp",
+    "telegram": "Telegram",
 }
 
 STATUS_LABELS = {

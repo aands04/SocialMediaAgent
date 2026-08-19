@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.file_delivery import detached_file_response
 from app.limits.service import effective_limits
+from app.match_reports.telegram import feedback_provider_enabled
 from app.media.storage import StorageError, media_asset_path
 from app.models import (
     AiPromptDispatch,
@@ -35,6 +36,7 @@ from app.models import (
     MediaAsset,
     PlanProfile,
     PromptTemplate,
+    SocialChannelConnection,
     StorageObject,
     StorageReconciliationRun,
     Team,
@@ -131,12 +133,8 @@ def dashboard(
         )
         or 0
     )
-    prompt_template_count = int(
-        db.scalar(select(func.count()).select_from(PromptTemplate)) or 0
-    )
-    prompt_dispatch_count = int(
-        db.scalar(select(func.count()).select_from(AiPromptDispatch)) or 0
-    )
+    prompt_template_count = int(db.scalar(select(func.count()).select_from(PromptTemplate)) or 0)
+    prompt_dispatch_count = int(db.scalar(select(func.count()).select_from(AiPromptDispatch)) or 0)
     near_limit_clubs: set[str] = set()
     over_limit_clubs: set[str] = set()
     clubs_list = list(db.scalars(select(Club).order_by(Club.name)))
@@ -145,7 +143,9 @@ def dashboard(
         values = {
             "teams": int(
                 db.scalar(
-                    select(func.count()).select_from(Team).where(
+                    select(func.count())
+                    .select_from(Team)
+                    .where(
                         Team.club_id == club.id,
                         Team.active.is_(True),
                         Team.archived_at.is_(None),
@@ -175,9 +175,9 @@ def dashboard(
     near_limit_clubs -= over_limit_clubs
     reconciliation_alerts = int(
         db.scalar(
-            select(func.count()).select_from(StorageReconciliationRun).where(
-                StorageReconciliationRun.status == "attention_required"
-            )
+            select(func.count())
+            .select_from(StorageReconciliationRun)
+            .where(StorageReconciliationRun.status == "attention_required")
         )
         or 0
     )
@@ -188,6 +188,29 @@ def dashboard(
             .limit(10)
         )
     )
+    feedback_connections = list(
+        db.scalars(
+            select(SocialChannelConnection).where(
+                SocialChannelConnection.channel_type.in_(["whatsapp", "telegram"]),
+                SocialChannelConnection.active.is_(True),
+            )
+        )
+    )
+    feedback_connection_status = {
+        club.id: {
+            provider: {
+                "enabled": feedback_provider_enabled(db, club.id, provider),
+                "connected": any(
+                    connection.club_id == club.id
+                    and connection.channel_type == provider
+                    and connection.status == "connected"
+                    for connection in feedback_connections
+                ),
+            }
+            for provider in ("whatsapp", "telegram")
+        }
+        for club in clubs_list
+    }
     return render(
         request,
         "platform_dashboard.html",
@@ -209,6 +232,7 @@ def dashboard(
         feature_flags=db.scalars(
             select(FeatureFlag).order_by(FeatureFlag.key, FeatureFlag.club_id)
         ).all(),
+        feedback_connection_status=feedback_connection_status,
         title="Plattformübersicht",
     )
 
@@ -242,10 +266,7 @@ def ai_generation_prompts(
     if status:
         conditions.append(AiPromptDispatch.status == status)
     total = int(
-        db.scalar(
-            select(func.count()).select_from(AiPromptDispatch).where(*conditions)
-        )
-        or 0
+        db.scalar(select(func.count()).select_from(AiPromptDispatch).where(*conditions)) or 0
     )
     total_pages = max(1, (total + limit - 1) // limit)
     page = min(page, total_pages)
@@ -709,8 +730,10 @@ def club_prompt_override(
     club = db.get(Club, club_id)
     if club is None:
         raise HTTPException(404)
+
     def split(value: str) -> list[str]:
         return [line.strip() for line in value.splitlines() if line.strip()]
+
     try:
         create_prompt_override(
             db,

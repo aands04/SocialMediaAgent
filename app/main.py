@@ -39,6 +39,8 @@ from app.db import get_db
 from app.legal.routes import router as legal_router
 from app.limits.service import effective_limits
 from app.live.routes import router as live_router
+from app.match_reports.routes import router as match_report_router
+from app.match_reports.telegram_webhooks import router as telegram_webhook_router
 from app.meta.routes import router as meta_router
 from app.models import (
     AccountType,
@@ -615,9 +617,7 @@ def dashboard(
                     PublicationJob.team_id.in_(visible_team_ids),
                     PublicationJob.scheduled_at >= now - timedelta(days=90),
                     PublicationJob.scheduled_at <= planned_until,
-                    PublicationJob.status.notin_(
-                        [JobStatus.CANCELLED, JobStatus.SKIPPED]
-                    ),
+                    PublicationJob.status.notin_([JobStatus.CANCELLED, JobStatus.SKIPPED]),
                 )
                 .order_by(PublicationJob.scheduled_at, PublicationJob.created_at)
             )
@@ -633,8 +633,7 @@ def dashboard(
     planned_views = [
         row
         for row in workspace_views
-        if row.scheduled_at >= now
-        and row.job.status not in terminal_publication_statuses
+        if row.scheduled_at >= now and row.job.status not in terminal_publication_statuses
     ]
     next_publication = min(planned_views, key=lambda row: row.scheduled_at, default=None)
     attention_count = sum(
@@ -644,7 +643,9 @@ def dashboard(
         "teams": len(visible_team_ids),
         "games": int(
             db.scalar(
-                select(func.count()).select_from(Game).where(
+                select(func.count())
+                .select_from(Game)
+                .where(
                     Game.club_id == current.club_id,
                     Game.team_id.in_(visible_team_ids),
                 )
@@ -656,7 +657,9 @@ def dashboard(
         "planned_posts": len({row.job.post_id for row in planned_views}),
         "publications": int(
             db.scalar(
-                select(func.count()).select_from(PublicationJob).where(
+                select(func.count())
+                .select_from(PublicationJob)
+                .where(
                     PublicationJob.club_id == current.club_id,
                     PublicationJob.team_id.in_(visible_team_ids),
                     PublicationJob.status == JobStatus.PUBLISHED,
@@ -690,9 +693,7 @@ def dashboard(
             "used": storage_used,
             "limit": limits["storage_bytes"].value,
             "used_gb": format_storage_gb(storage_used, fixed_decimals=True),
-            "limit_gb": format_storage_gb(
-                limits["storage_bytes"].value, fixed_decimals=False
-            ),
+            "limit_gb": format_storage_gb(limits["storage_bytes"].value, fixed_decimals=False),
             "percent": round(storage_used * 100 / max(1, limits["storage_bytes"].value)),
         },
         "text": text_usage,
@@ -732,6 +733,8 @@ app.include_router(meta_router)
 app.include_router(channels_router)
 app.include_router(channel_webhook_router)
 app.include_router(live_router)
+app.include_router(match_report_router)
+app.include_router(telegram_webhook_router)
 app.include_router(platform_router)
 app.include_router(creative_platform_router)
 app.include_router(creative_router)

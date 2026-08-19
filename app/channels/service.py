@@ -79,7 +79,12 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
             )
         )
     )
-    result: dict[str, list[dict]] = {"instagram": [], "facebook": [], "whatsapp": []}
+    result: dict[str, list[dict]] = {
+        "instagram": [],
+        "facebook": [],
+        "whatsapp": [],
+        "telegram": [],
+    }
     for item in connections:
         capabilities = {
             capability.key: capability.label

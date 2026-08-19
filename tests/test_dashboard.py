@@ -1723,7 +1723,7 @@ def test_nginx_proxies_refresh_web_container_address_via_docker_dns():
     nginx_root = Path(__file__).parents[1] / "deploy" / "nginx"
     for filename, expected_proxy_count in (
         ("default.conf", 3),
-        ("meta-public.conf", 5),
+        ("meta-public.conf", 6),
     ):
         config = (nginx_root / filename).read_text(encoding="utf-8")
         assert "resolver 127.0.0.11 ipv6=off valid=10s;" in config
@@ -1731,6 +1731,14 @@ def test_nginx_proxies_refresh_web_container_address_via_docker_dns():
         assert "set $web_backend web:8000;" in config
         assert config.count("proxy_pass http://$web_backend;") == expected_proxy_count
         assert "proxy_pass http://web:8000;" not in config
+
+
+def test_public_nginx_exposes_only_post_for_telegram_webhooks():
+    config = (
+        Path(__file__).parents[1] / "deploy" / "nginx" / "meta-public.conf"
+    ).read_text(encoding="utf-8")
+    assert "location ^~ /webhooks/telegram/" in config
+    assert "limit_except POST { deny all; }" in config
 
 
 def test_nginx_proxy_healthcheck_uses_ipv4_loopback():

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+import secrets
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -25,6 +27,13 @@ from app.channels.service import assignment_map, channel_cards
 from app.config import get_settings
 from app.db import get_db
 from app.limits.service import LimitExceeded, assert_resource_capacity
+from app.match_reports.telegram import (
+    TelegramApiError,
+    TelegramBotClient,
+    decrypt_bot_token,
+    feedback_provider_enabled,
+    webhook_identifier,
+)
 from app.meta.api import MetaApiClient, MetaApiError
 from app.meta.oauth import disconnect as disconnect_instagram
 from app.meta.oauth import start_oauth as start_instagram_oauth
@@ -34,6 +43,7 @@ from app.models import (
     Club,
     InstagramConnection,
     InstagramPage,
+    MatchFeedbackEndpoint,
     Role,
     SocialChannelConnection,
     SystemSetting,
@@ -120,6 +130,7 @@ def channels_dashboard(
             "is_admin": current.role == Role.ADMIN,
             "facebook_available": settings.facebook_channel_enabled,
             "whatsapp_available": settings.whatsapp_channel_enabled,
+            "telegram_available": feedback_provider_enabled(db, current.club_id, "telegram"),
             "title": "Social-Media-Kanäle",
         },
     )
@@ -133,7 +144,7 @@ def channel_setup(
     db: Session = Depends(get_db),
 ):
     require_admin(current)
-    if channel_type not in {"instagram", "facebook", "whatsapp"}:
+    if channel_type not in {"instagram", "facebook", "whatsapp", "telegram"}:
         raise HTTPException(404)
     return templates.TemplateResponse(
         request,
@@ -148,9 +159,157 @@ def channel_setup(
             "meta_graph_version": settings.meta_graph_version,
             "facebook_available": settings.facebook_channel_enabled,
             "whatsapp_available": settings.whatsapp_channel_enabled,
+            "telegram_available": feedback_provider_enabled(db, current.club_id, "telegram"),
             "title": f"{CHANNEL_LABELS[channel_type]} einrichten",
         },
     )
+
+
+@router.post("/channels/telegram/connect")
+def telegram_connect(
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    bot_token: str = Form(),
+    current: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Connect one tenant-owned Telegram bot and register its HTTPS webhook."""
+
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    if not current.club_id or not feedback_provider_enabled(db, current.club_id, "telegram"):
+        raise HTTPException(403, "Telegram ist für diesen Verein nicht freigegeben")
+    base_url = (settings.telegram_webhook_base_url or "").strip().rstrip("/")
+    parsed = urlparse(base_url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise HTTPException(
+            409,
+            "Die Telegram-Webhook-Basis muss vom Plattformbetrieb als HTTPS-Adresse eingerichtet werden",
+        )
+    try:
+        client = TelegramBotClient(settings, bot_token)
+        identity = client.get_me()
+    except (TelegramApiError, MetaSecretError) as exc:
+        raise HTTPException(
+            409,
+            "Telegram konnte nicht verbunden werden. Bitte prüfe das Bot-Token "
+            "und versuche es erneut.",
+        ) from exc
+
+    with system_scope("Telegram-Bot eindeutig einem Verein zuordnen"):
+        foreign_owner = db.scalar(
+            select(SocialChannelConnection).where(
+                SocialChannelConnection.channel_type == "telegram",
+                SocialChannelConnection.external_account_id == identity.bot_id,
+                SocialChannelConnection.club_id != current.club_id,
+            )
+        )
+    if foreign_owner is not None:
+        raise HTTPException(
+            409,
+            "Dieser Telegram-Bot ist bereits einem anderen Verein zugeordnet.",
+        )
+
+    active_club_bot = db.scalar(
+        select(SocialChannelConnection).where(
+            SocialChannelConnection.club_id == current.club_id,
+            SocialChannelConnection.channel_type == "telegram",
+            SocialChannelConnection.active.is_(True),
+            SocialChannelConnection.status != "disconnected",
+        )
+    )
+    if active_club_bot is not None and active_club_bot.external_account_id != identity.bot_id:
+        raise HTTPException(
+            409,
+            "Für diesen Verein ist bereits ein anderer Telegram-Bot verbunden. Trenne ihn zuerst.",
+        )
+    item = db.scalar(
+        select(SocialChannelConnection).where(
+            SocialChannelConnection.club_id == current.club_id,
+            SocialChannelConnection.channel_type == "telegram",
+            SocialChannelConnection.external_account_id == identity.bot_id,
+        )
+    )
+    if item is None:
+        item = SocialChannelConnection(
+            club_id=current.club_id,
+            channel_type="telegram",
+            internal_name=f"telegram-{identity.username}",
+            display_name=identity.display_name,
+            external_account_id=identity.bot_id,
+        )
+        db.add(item)
+
+    identifier = secrets.token_urlsafe(24)
+    webhook_secret = secrets.token_urlsafe(32)
+    webhook_url = f"{base_url}/webhooks/telegram/{identifier}"
+    try:
+        cipher = TokenCipher(settings.meta_token_encryption_key)
+        encrypted_bot_token = cipher.encrypt(bot_token.strip())
+        encrypted_webhook_secret = cipher.encrypt(webhook_secret)
+    except MetaSecretError as exc:
+        raise HTTPException(
+            500,
+            "Die verschlüsselte Telegram-Speicherung ist nicht betriebsbereit.",
+        ) from exc
+    try:
+        client.set_webhook(url=webhook_url, secret_token=webhook_secret)
+        webhook_info = client.get_webhook_info()
+        if str(webhook_info.get("url") or "") != webhook_url:
+            raise TelegramApiError("Telegram hat die Webhook-Adresse nicht bestätigt")
+    except TelegramApiError as exc:
+        raise HTTPException(
+            409,
+            "Telegram konnte den sicheren Webhook nicht bestätigen. Bitte versuche es erneut.",
+        ) from exc
+
+    item.username = identity.username
+    item.encrypted_token = encrypted_bot_token
+    item.token_key_version = settings.meta_token_key_version
+    item.settings = {
+        **(item.settings or {}),
+        "webhook_identifier": identifier,
+        "encrypted_webhook_secret": encrypted_webhook_secret,
+        "webhook_url": webhook_url,
+    }
+    item.status = "connected"
+    item.capabilities = ["match_feedback"]
+    item.active = True
+    item.publishing_enabled = False
+    item.automatic_delivery_enabled = False
+    item.api_version = None
+    item.last_check_at = datetime.now(timezone.utc)
+    item.last_success_at = item.last_check_at
+    item.last_error = None
+    item.disconnected_at = None
+    try:
+        # The audit entry requires the persistent connection identifier. Keep
+        # the flush in the guarded transaction so a database failure also
+        # removes the webhook that was registered immediately beforehand.
+        db.flush()
+        db.add(
+            AuditLog(
+                club_id=current.club_id,
+                user_id=current.id,
+                action="channel.telegram.connected",
+                entity_type="social_channel_connection",
+                entity_id=item.id,
+                details={"bot_username": identity.username},
+            )
+        )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        try:
+            client.delete_webhook()
+        except TelegramApiError:
+            pass
+        raise HTTPException(
+            500,
+            "Die Telegram-Verbindung konnte lokal nicht gespeichert werden; "
+            "der Webhook wurde vorsorglich zurückgenommen.",
+        ) from exc
+    return _redirect("/channels", "Telegram-Bot wurde sicher verbunden")
 
 
 @router.post("/channels/instagram/connect")
@@ -401,14 +560,14 @@ def check_channel_connection(
         if not legacy_page:
             raise HTTPException(409, "Instagram-Verbindung ist unvollständig")
         return RedirectResponse(f"/instagram/{legacy_page}/meta/check", 307)
-    if item.channel_type == "whatsapp" and not item.encrypted_token:
+    if item.channel_type in {"whatsapp", "telegram"} and not item.encrypted_token:
         item.status = "disrupted"
         item.last_error = "Für diese Verbindung ist kein Token gespeichert"
         item.last_check_at = datetime.now(timezone.utc)
         db.commit()
         return _redirect(
-            "/channels/whatsapp/setup",
-            "WhatsApp muss neu verbunden werden",
+            f"/channels/{item.channel_type}/setup",
+            f"{CHANNEL_LABELS[item.channel_type]} muss neu verbunden werden",
         )
     if item.channel_type == "whatsapp" and not whatsapp_phone_is_registered(item):
         item.status = "setup_required"
@@ -420,8 +579,29 @@ def check_channel_connection(
         raise HTTPException(409, item.last_error)
     webhook_repaired = False
     try:
-        token = TokenCipher(settings.meta_token_encryption_key).decrypt(item.encrypted_token)
-        api = MetaGraphClient(settings)
+        if item.channel_type == "telegram":
+            token = decrypt_bot_token(item, settings)
+            telegram = TelegramBotClient(settings, token)
+            identity = telegram.get_me()
+            webhook = telegram.get_webhook_info()
+            identifier = webhook_identifier(item)
+            expected_url = (
+                f"{(settings.telegram_webhook_base_url or '').rstrip('/')}"
+                f"/webhooks/telegram/{identifier}"
+            )
+            if not identifier or not settings.telegram_webhook_base_url:
+                raise TelegramApiError("Die Telegram-Webhook-Konfiguration ist unvollständig")
+            if identity.bot_id != str(item.external_account_id or ""):
+                raise TelegramApiError(
+                    "Das Telegram-Bot-Konto stimmt nicht mit der Verbindung überein"
+                )
+            if str(webhook.get("url") or "") != expected_url:
+                raise TelegramApiError("Der Telegram-Webhook ist nicht korrekt eingerichtet")
+            if webhook.get("last_error_message"):
+                raise TelegramApiError("Telegram meldet einen Fehler bei der Webhook-Zustellung")
+        else:
+            token = TokenCipher(settings.meta_token_encryption_key).decrypt(item.encrypted_token)
+            api = MetaGraphClient(settings)
         if item.channel_type == "facebook":
             api.page_profile(page_id=item.external_account_id or "", access_token=token)
         elif item.channel_type == "whatsapp":
@@ -436,7 +616,7 @@ def check_channel_connection(
         item.last_check_at = datetime.now(timezone.utc)
         item.last_success_at = item.last_check_at
         item.last_error = None
-    except (ChannelApiError, MetaSecretError, ValueError) as exc:
+    except (ChannelApiError, TelegramApiError, MetaSecretError, ValueError) as exc:
         item.status = "disrupted"
         item.last_error = str(exc)[:500]
         item.last_check_at = datetime.now(timezone.utc)
@@ -478,6 +658,12 @@ def save_channel_settings(
     check_csrf(request, csrf_token_value)
     require_admin(current)
     item = _connection(db, connection_id)
+    if item.channel_type == "telegram":
+        raise HTTPException(
+            409,
+            "Telegram wird nur für private Rückfragen zu FuPa-Spielberichten verwendet. "
+            "Kontakte und Zustellpräferenzen verwaltest du beim jeweiligen Spielbericht.",
+        )
     if (
         item.channel_type == "whatsapp"
         and not whatsapp_phone_is_registered(item)
@@ -583,6 +769,30 @@ def disconnect_channel(
         if page is None or legacy is None:
             raise HTTPException(409, "Instagram-Verbindung ist unvollständig")
         disconnect_instagram(db, legacy, page, current)
+    elif item.channel_type == "telegram":
+        if item.encrypted_token:
+            try:
+                TelegramBotClient(settings, decrypt_bot_token(item, settings)).delete_webhook()
+            except (TelegramApiError, MetaSecretError):
+                # Lokales Trennen darf nicht von der Erreichbarkeit Telegrams abhängen.
+                pass
+        now = datetime.now(timezone.utc)
+        for endpoint in db.scalars(
+            select(MatchFeedbackEndpoint).where(
+                MatchFeedbackEndpoint.connection_id == item.id,
+                MatchFeedbackEndpoint.club_id == item.club_id,
+            )
+        ):
+            endpoint.status = "disabled"
+            endpoint.disabled_at = now
+        clean_settings = dict(item.settings or {})
+        for key in (
+            "webhook_identifier",
+            "encrypted_webhook_secret",
+            "webhook_url",
+        ):
+            clean_settings.pop(key, None)
+        item.settings = clean_settings
 
     item.status = "disconnected"
     item.active = False
@@ -596,6 +806,7 @@ def disconnect_channel(
         assignment.enabled = False
     db.add(
         AuditLog(
+            club_id=item.club_id,
             user_id=current.id,
             action=f"channel.{item.channel_type}.disconnected",
             entity_type="social_channel_connection",

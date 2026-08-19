@@ -222,6 +222,20 @@ def _process_whatsapp_payload(
                     continue
                 if not original_text or not message.get("id"):
                     continue
+                # A clearly matching FuPa feedback reply is consumed before the
+                # Live-Center command parser. Ambiguous or expired replies keep
+                # following the existing inbound-message workflow.
+                from app.match_reports.feedback import consume_feedback_response
+
+                if consume_feedback_response(
+                    db,
+                    connection=connection,
+                    provider="whatsapp",
+                    sender=sender,
+                    provider_message_id=str(message["id"]),
+                    body=original_text,
+                ):
+                    continue
                 result = ingest_whatsapp_message(
                     db,
                     connection=connection,
