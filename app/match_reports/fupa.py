@@ -5,6 +5,7 @@ import ipaddress
 import json
 import re
 import socket
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -16,6 +17,7 @@ from app.match_reports.types import FupaReadResult, FupaTickerItem
 
 _MAX_BYTES = 2_000_000
 _ALLOWED_HOSTS = {"fupa.net", "www.fupa.net"}
+_FUPA_API_HOST = "api.fupa.net"
 _SCORE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[:\-]\s*(\d{1,2})(?!\d)")
 _MINUTE_RE = re.compile(r"(?<!\d)(\d{1,3})(?:\+\d{1,2})?\s*[.'’]")
 _REDUX_DATA_RE = re.compile(r"(?:window\.)?REDUX_DATA\s*=\s*")
@@ -70,7 +72,16 @@ def _name(value: Any) -> str | None:
         # ``{"name": {"full": "TSV Carlsdorf", "short": "Carls"}}``.
         # Resolve these values recursively instead of comparing the nested
         # dictionary with a set (which raises ``unhashable type: 'dict'``).
-        for key in ("full", "displayName", "name", "title", "label", "middle", "short"):
+        for key in (
+            "player",
+            "full",
+            "displayName",
+            "name",
+            "title",
+            "label",
+            "middle",
+            "short",
+        ):
             resolved = _name(value.get(key))
             if resolved:
                 return resolved
@@ -130,11 +141,22 @@ def _ticker_item(raw: dict[str, Any], index: int) -> FupaTickerItem | None:
         "red_card": ("red_card", "Rote Karte"),
         "redcard": ("red_card", "Rote Karte"),
         "substitution": ("substitution", "Auswechslung"),
+        "substitute": ("substitution", "Auswechslung"),
         "kickoff": ("kickoff", "Anpfiff"),
         "halftime": ("halftime", "Halbzeit"),
         "fulltime": ("fulltime", "Abpfiff"),
     }
-    inferred = inferred_types.get(provider_type) or inferred_types.get(provider_subtype)
+    if provider_type == "whistle":
+        if "stop_second_half" in provider_subtype:
+            inferred = ("fulltime", "Abpfiff")
+        elif "stop_first_half" in provider_subtype:
+            inferred = ("halftime", "Halbzeit")
+        elif "start" in provider_subtype:
+            inferred = ("kickoff", "Anpfiff")
+        else:
+            inferred = None
+    else:
+        inferred = inferred_types.get(provider_type) or inferred_types.get(provider_subtype)
     player = _name(
         raw.get("player") or raw.get("person") or raw.get("primaryRole") or raw.get("primaryPerson")
     )
@@ -249,6 +271,9 @@ def _extract_json(soup: BeautifulSoup) -> tuple[dict[str, Any], list[dict[str, A
         match_page = _redux_match_page(document)
         if match_page is not None:
             match = match_page["matchInfo"]
+            highlights = match.get("highlights")
+            if isinstance(highlights, list):
+                ticker.extend(item for item in highlights if isinstance(item, dict))
             ticker.extend(_redux_ticker_candidates(match_page))
             continue
         for item in _walk(document):
@@ -260,6 +285,72 @@ def _extract_json(soup: BeautifulSoup) -> tuple[dict[str, Any], list[dict[str, A
             ):
                 ticker.append(item)
     return match, ticker
+
+
+def parse_fupa_stream(payload: Any) -> tuple[FupaTickerItem, ...]:
+    """Parse FuPa's public match stream without trusting arbitrary wrappers."""
+
+    if not isinstance(payload, list):
+        raise ValueError("Der FuPa-Ticker hat kein gültiges Listenformat")
+    items: list[FupaTickerItem] = []
+    for index, wrapper in enumerate(payload):
+        if not isinstance(wrapper, dict) or wrapper.get("type") != "matchevent":
+            continue
+        entity = wrapper.get("entity")
+        if not isinstance(entity, dict):
+            continue
+        item = _ticker_item(entity, index)
+        if item is not None:
+            items.append(item)
+    return _deduplicate_ticker(items)
+
+
+def _deduplicate_ticker(items: Any) -> tuple[FupaTickerItem, ...]:
+    by_source_id: dict[str, FupaTickerItem] = {}
+    for item in items:
+        if isinstance(item, FupaTickerItem):
+            # Later sources win. The stream therefore enriches the compact
+            # highlights with its longer descriptions.
+            by_source_id[item.source_id] = item
+    return tuple(
+        sorted(
+            by_source_id.values(),
+            key=lambda item: (
+                item.minute if item.minute is not None else 10_000,
+                item.source_id,
+            ),
+        )
+    )
+
+
+def _content_digest(structured: dict[str, Any], ticker: tuple[FupaTickerItem, ...]) -> str:
+    normalized = json.dumps(
+        {"structured": structured, "ticker": [item.__dict__ for item in ticker]},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _with_ticker(
+    result: FupaReadResult,
+    ticker: tuple[FupaTickerItem, ...],
+    *,
+    metadata: dict[str, Any],
+    fetch_status: str | None = None,
+    error_category: str | None = None,
+    error: str | None = None,
+) -> FupaReadResult:
+    return replace(
+        result,
+        fetch_status=fetch_status or result.fetch_status,
+        ticker=ticker,
+        metadata={**result.metadata, **metadata},
+        content_digest=_content_digest(result.structured_data, ticker),
+        error_category=error_category,
+        error=error,
+    )
 
 
 def parse_fupa_html(source_url: str, html: str, *, status_code: int = 200) -> FupaReadResult:
@@ -274,7 +365,7 @@ def parse_fupa_html(source_url: str, html: str, *, status_code: int = 200) -> Fu
     away_score = match.get("awayScore")
     if away_score is None:
         away_score = match.get("awayGoal")
-    items = tuple(
+    items = _deduplicate_ticker(
         item
         for index, raw in enumerate(raw_ticker)
         if (item := _ticker_item(raw, index)) is not None
@@ -319,11 +410,16 @@ def parse_fupa_html(source_url: str, html: str, *, status_code: int = 200) -> Fu
         "venue": _name(match.get("location") or match.get("venue") or match.get("venueName")),
         "status": status,
     }
-    normalized = json.dumps(
-        {"structured": structured, "ticker": [item.__dict__ for item in items]},
-        sort_keys=True,
-        ensure_ascii=False,
-        default=str,
+    match_id = match.get("id")
+    try:
+        match_id = int(match_id) if match_id is not None else None
+    except (TypeError, ValueError):
+        match_id = None
+    if match_id is not None and match_id <= 0:
+        match_id = None
+    flags = match.get("flags")
+    ticker_expected = bool(items) or (
+        isinstance(flags, list) and "ticker" in {str(flag).casefold() for flag in flags}
     )
     useful = bool(home or away or items or home_score is not None)
     return FupaReadResult(
@@ -334,26 +430,40 @@ def parse_fupa_html(source_url: str, html: str, *, status_code: int = 200) -> Fu
         metadata={
             "http_status": status_code,
             "title": (soup.title.string or "")[:300] if soup.title else None,
-            "parser": "jsonld-nextdata-redux-v2",
+            "parser": "jsonld-nextdata-redux-v3",
+            "match_id": match_id,
+            "ticker_expected": ticker_expected,
+            "ticker_fallback_count": len(items),
         },
-        content_digest=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+        content_digest=_content_digest(structured, items),
     )
 
 
 class FupaReader:
-    def __init__(self, *, timeout_seconds: float = 20.0):
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 20.0,
+        client: httpx.Client | None = None,
+    ):
         self.timeout_seconds = timeout_seconds
+        self.client = client
 
     def fetch(self, source_url: str) -> FupaReadResult:
+        if self.client is not None:
+            return self._fetch(self.client, source_url)
+        with httpx.Client(timeout=self.timeout_seconds, follow_redirects=False) as client:
+            return self._fetch(client, source_url)
+
+    def _fetch(self, client: httpx.Client, source_url: str) -> FupaReadResult:
         current = validate_fupa_url(source_url)
         for _ in range(4):
             host = urlparse(current).hostname or ""
             _reject_private_resolution(host)
-            with httpx.Client(timeout=self.timeout_seconds, follow_redirects=False) as client:
-                response = client.get(
-                    current,
-                    headers={"User-Agent": "Vereinszentrale/1.0 (+FuPa match report import)"},
-                )
+            response = client.get(
+                current,
+                headers={"User-Agent": "Vereinszentrale/1.0 (+FuPa match report import)"},
+            )
             if response.status_code in {301, 302, 303, 307, 308}:
                 location = response.headers.get("location")
                 if not location:
@@ -363,5 +473,69 @@ class FupaReader:
             response.raise_for_status()
             if len(response.content) > _MAX_BYTES:
                 raise FupaReadError("FuPa-Antwort überschreitet die zulässige Größe")
-            return parse_fupa_html(current, response.text, status_code=response.status_code)
+            result = parse_fupa_html(current, response.text, status_code=response.status_code)
+            return self._enrich_with_stream(client, result)
         raise FupaReadError("Zu viele FuPa-Weiterleitungen")
+
+    def _enrich_with_stream(
+        self,
+        client: httpx.Client,
+        result: FupaReadResult,
+    ) -> FupaReadResult:
+        match_id = result.metadata.get("match_id")
+        if not isinstance(match_id, int) or match_id <= 0:
+            return result
+        stream_url = f"https://{_FUPA_API_HOST}/v2/matches/{match_id}/stream"
+        try:
+            _reject_private_resolution(_FUPA_API_HOST)
+            response = client.get(
+                stream_url,
+                headers={
+                    "User-Agent": "Vereinszentrale/1.0 (+FuPa match report import)",
+                    "Accept": "application/json",
+                    "Origin": "https://www.fupa.net",
+                    "Referer": "https://www.fupa.net/",
+                },
+            )
+            response.raise_for_status()
+            if len(response.content) > _MAX_BYTES:
+                raise FupaReadError("FuPa-Ticker überschreitet die zulässige Größe")
+            stream_items = parse_fupa_stream(response.json())
+        except (FupaReadError, httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
+            ticker_expected = bool(result.metadata.get("ticker_expected"))
+            no_fallback = not result.ticker
+            return _with_ticker(
+                result,
+                result.ticker,
+                metadata={
+                    "stream_status": "unavailable",
+                    "stream_error_category": type(exc).__name__,
+                },
+                fetch_status="incomplete" if ticker_expected and no_fallback else None,
+                error_category="ticker_unavailable" if ticker_expected and no_fallback else None,
+                error=(
+                    "Der FuPa-Liveticker konnte nicht vollständig abgerufen werden."
+                    if ticker_expected and no_fallback
+                    else None
+                ),
+            )
+
+        merged = _deduplicate_ticker((*result.ticker, *stream_items))
+        ticker_expected = bool(result.metadata.get("ticker_expected"))
+        empty_expected_ticker = ticker_expected and not merged
+        return _with_ticker(
+            result,
+            merged,
+            metadata={
+                "stream_status": "success" if stream_items else "empty",
+                "stream_http_status": response.status_code,
+                "stream_event_count": len(stream_items),
+            },
+            fetch_status="incomplete" if empty_expected_ticker else result.fetch_status,
+            error_category="ticker_empty" if empty_expected_ticker else None,
+            error=(
+                "FuPa weist einen Liveticker aus, hat aber keine Ereignisse geliefert."
+                if empty_expected_ticker
+                else None
+            ),
+        )

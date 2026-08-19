@@ -4,11 +4,17 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
 import pytest
 from sqlalchemy import select
 
 from app.match_reports.context import build_match_content_context
-from app.match_reports.fupa import parse_fupa_html, validate_fupa_url
+from app.match_reports.fupa import (
+    FupaReader,
+    parse_fupa_html,
+    parse_fupa_stream,
+    validate_fupa_url,
+)
 from app.match_reports.generator import FixtureMatchReportGenerator, MatchReportGenerationError
 from app.match_reports.routes import templates as match_report_templates
 from app.match_reports.scheduler import _final_result_available
@@ -189,7 +195,7 @@ def test_fupa_parser_reads_current_redux_bootstrap_and_ticker():
     result = parse_fupa_html("https://www.fupa.net/match/test", html)
 
     assert result.fetch_status == "success"
-    assert result.metadata["parser"] == "jsonld-nextdata-redux-v2"
+    assert result.metadata["parser"] == "jsonld-nextdata-redux-v3"
     assert result.structured_data == {
         "home_team": "TSV Carlsdorf",
         "away_team": "SV Ehlen",
@@ -203,6 +209,181 @@ def test_fupa_parser_reads_current_redux_bootstrap_and_ticker():
     assert [item.event_type for item in result.ticker] == ["goal", "fulltime"]
     assert result.ticker[0].player == "Max Muster"
     assert (result.ticker[-1].home_score, result.ticker[-1].away_score) == (1, 2)
+
+
+def test_fupa_stream_reads_scorers_descriptions_scores_and_whistles():
+    result = parse_fupa_stream(
+        [
+            {
+                "type": "matchevent",
+                "entity": {
+                    "id": 3,
+                    "type": "goal",
+                    "subtype": "goal_shoot",
+                    "minute": 17,
+                    "text": "Nach einer Drehung schiebt er links unten ein.",
+                    "homeGoal": 3,
+                    "awayGoal": 0,
+                    "team": {"name": {"full": "TSV Carlsdorf"}},
+                    "primaryRole": {"player": {"firstName": "Owen Louis", "lastName": "Wenzel"}},
+                },
+            },
+            {
+                "type": "matchevent",
+                "entity": {
+                    "id": 1,
+                    "type": "goal",
+                    "subtype": "goal_shoot",
+                    "minute": 3,
+                    "text": "",
+                    "homeGoal": 1,
+                    "awayGoal": 0,
+                    "primaryRole": {"player": {"firstName": "Gian-Luca", "lastName": "Masannek"}},
+                },
+            },
+            {
+                "type": "matchevent",
+                "entity": {
+                    "id": 4,
+                    "type": "whistle",
+                    "subtype": "whistle_regular_stop_second_halftime",
+                    "minute": 90,
+                    "text": "Abpfiff",
+                    "homeGoal": 6,
+                    "awayGoal": 0,
+                },
+            },
+            {"type": "liveticker-eingetragen", "entity": {"id": "ignored"}},
+        ]
+    )
+
+    assert [item.minute for item in result] == [3, 17, 90]
+    assert result[0].player == "Gian-Luca Masannek"
+    assert result[0].text == "Tor – Gian-Luca Masannek – 1:0"
+    assert result[1].player == "Owen Louis Wenzel"
+    assert result[1].team == "TSV Carlsdorf"
+    assert result[1].text == "Nach einer Drehung schiebt er links unten ein."
+    assert (result[1].home_score, result[1].away_score) == (3, 0)
+    assert result[2].event_type == "fulltime"
+
+
+def test_fupa_reader_enriches_highlights_from_public_stream(monkeypatch):
+    html = """
+    <html><head><title>FuPa Spielbericht</title></head><body><script>
+    window.REDUX_DATA = {"dataHistory":[{"MatchPage":{"matchInfo":{
+      "id":14916867,"homeTeamName":"TSV Carlsdorf","awayTeamName":"SV Ehlen",
+      "homeGoal":6,"awayGoal":0,"section":"POST","flags":["ticker"],
+      "highlights":[
+        {"id":84763897,"minute":3,"homeGoal":1,"awayGoal":0,"type":"goal",
+         "primaryRole":{"firstName":"Gian-Luca","lastName":"Masannek"}}
+      ]
+    }}}]};
+    </script></body></html>
+    """
+    stream = [
+        {
+            "type": "matchevent",
+            "entity": {
+                "id": 84763897,
+                "minute": 3,
+                "type": "goal",
+                "homeGoal": 1,
+                "awayGoal": 0,
+                "text": "Kurze Torbeschreibung",
+                "primaryRole": {"player": {"firstName": "Gian-Luca", "lastName": "Masannek"}},
+            },
+        },
+        {
+            "type": "matchevent",
+            "entity": {
+                "id": 84788650,
+                "minute": 90,
+                "type": "whistle",
+                "subtype": "whistle_regular_stop_second_halftime",
+                "text": "Abpfiff",
+                "homeGoal": 6,
+                "awayGoal": 0,
+            },
+        },
+    ]
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if request.url.host == "api.fupa.net":
+            assert request.headers["origin"] == "https://www.fupa.net"
+            return httpx.Response(200, json=stream)
+        return httpx.Response(200, text=html)
+
+    monkeypatch.setattr("app.match_reports.fupa._reject_private_resolution", lambda _host: None)
+    with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False) as client:
+        result = FupaReader(client=client).fetch(
+            "https://www.fupa.net/match/tsv-carlsdorf-m1-sv-ehlen-m1-260816"
+        )
+
+    assert requested == [
+        "https://www.fupa.net/match/tsv-carlsdorf-m1-sv-ehlen-m1-260816",
+        "https://api.fupa.net/v2/matches/14916867/stream",
+    ]
+    assert result.fetch_status == "success"
+    assert result.metadata["stream_status"] == "success"
+    assert result.metadata["stream_event_count"] == 2
+    assert len(result.ticker) == 2
+    assert result.ticker[0].player == "Gian-Luca Masannek"
+    assert result.ticker[0].text == "Kurze Torbeschreibung"
+    assert result.ticker[1].event_type == "fulltime"
+
+
+def test_fupa_reader_uses_structured_highlights_when_stream_is_unavailable(monkeypatch):
+    html = """
+    <html><body><script>
+    window.REDUX_DATA = {"dataHistory":[{"MatchPage":{"matchInfo":{
+      "id":14916867,"homeTeamName":"Heim","awayTeamName":"Gast","flags":["ticker"],
+      "highlights":[
+        {"id":11,"minute":15,"homeGoal":1,"awayGoal":0,"type":"goal",
+         "primaryRole":{"firstName":"Heinrich","lastName":"Deichmann"}}
+      ]
+    }}}]};
+    </script></body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.fupa.net":
+            return httpx.Response(503, text="temporarily unavailable")
+        return httpx.Response(200, text=html)
+
+    monkeypatch.setattr("app.match_reports.fupa._reject_private_resolution", lambda _host: None)
+    with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False) as client:
+        result = FupaReader(client=client).fetch("https://www.fupa.net/match/test")
+
+    assert result.fetch_status == "success"
+    assert result.metadata["stream_status"] == "unavailable"
+    assert result.metadata["ticker_fallback_count"] == 1
+    assert result.ticker[0].player == "Heinrich Deichmann"
+    assert result.error is None
+
+
+def test_fupa_reader_marks_expected_but_missing_ticker_incomplete(monkeypatch):
+    html = """
+    <html><body><script>
+    window.REDUX_DATA = {"dataHistory":[{"MatchPage":{"matchInfo":{
+      "id":14916867,"homeTeamName":"Heim","awayTeamName":"Gast","flags":["ticker"]
+    }}}]};
+    </script></body></html>
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.fupa.net":
+            return httpx.Response(503)
+        return httpx.Response(200, text=html)
+
+    monkeypatch.setattr("app.match_reports.fupa._reject_private_resolution", lambda _host: None)
+    with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False) as client:
+        result = FupaReader(client=client).fetch("https://www.fupa.net/match/test")
+
+    assert result.fetch_status == "incomplete"
+    assert result.error_category == "ticker_unavailable"
+    assert "Liveticker" in (result.error or "")
 
 
 def test_fupa_parser_reads_current_nested_team_names():
