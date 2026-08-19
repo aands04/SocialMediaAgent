@@ -17,6 +17,7 @@ from app.match_reports.fupa import (
     validate_fupa_url,
 )
 from app.match_reports.generator import (
+    MATCH_REPORT_PROMPT_VERSION,
     FixtureMatchReportGenerator,
     MatchReportGenerationError,
     render_match_report_prompt,
@@ -538,6 +539,16 @@ def test_context_includes_fupa_ticker_events_in_summary_and_ai_prompt(db):
     assert context.events[0]["comment"] == "Nach einer Drehung schiebt er links unten ein."
     assert "Owen Louis Wenzel" in prompt
     assert "Nach einer Drehung schiebt er links unten ein." in prompt
+    assert MATCH_REPORT_PROMPT_VERSION == 2
+    assert "veröffentlichungsfertigen deutschen Spielbericht" in prompt
+    assert "ausschließlich aus zusammenhängendem Fließtext" in prompt
+    assert "Verwende keine Aufzählungen" in prompt
+    assert "jede Tickermeldung einzeln abzuschreiben" in prompt
+    assert "Ergebnisse anderer Mannschaften" in prompt
+    assert "nur zulässig" in prompt
+    assert "wenn diese Information" in prompt
+    assert "Quellenhinweise" in prompt
+    assert "im sichtbaren Artikel niemals" in prompt
 
 
 def test_generated_match_report_records_exact_prompt_for_platform_admin(db, monkeypatch):
