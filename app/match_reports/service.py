@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.match_reports.context import build_match_content_context
@@ -111,7 +111,9 @@ def refresh_report_sources(db: Session, report: MatchReport):
         "provenance": context.provenance,
     }
     report.source_conflicts = [item.__dict__ for item in context.conflicts]
-    report.status = "conflict_requires_review" if context.has_blocking_conflicts else "ready_to_generate"
+    report.status = (
+        "conflict_requires_review" if context.has_blocking_conflicts else "ready_to_generate"
+    )
     return context
 
 
@@ -131,15 +133,18 @@ def generate_report_version(
         context,
         desired_length=report.desired_length,
     )
-    next_number = int(
-        db.scalar(
-            select(func.coalesce(func.max(MatchReportVersion.version_number), 0)).where(
-                MatchReportVersion.club_id == report.club_id,
-                MatchReportVersion.report_id == report.id
+    next_number = (
+        int(
+            db.scalar(
+                select(func.coalesce(func.max(MatchReportVersion.version_number), 0)).where(
+                    MatchReportVersion.club_id == report.club_id,
+                    MatchReportVersion.report_id == report.id,
+                )
             )
+            or 0
         )
-        or 0
-    ) + 1
+        + 1
+    )
     version = MatchReportVersion(
         club_id=report.club_id,
         report_id=report.id,
@@ -229,11 +234,99 @@ def current_version(db: Session, report: MatchReport) -> MatchReportVersion | No
     )
 
 
+def delete_unpublished_report(
+    db: Session,
+    report: MatchReport,
+    *,
+    user_id: str,
+) -> None:
+    """Delete an unpublished report while retaining its independent sources and audit trail."""
+
+    publication_statuses = set(
+        db.scalars(
+            select(MatchReportPublication.status).where(
+                MatchReportPublication.club_id == report.club_id,
+                MatchReportPublication.report_id == report.id,
+            )
+        )
+    )
+    if (
+        report.status in {"publishing", "published"}
+        or report.published_at is not None
+        or publication_statuses.intersection({"publishing", "published"})
+    ):
+        raise MatchReportServiceError(
+            "Ein bereits übertragener oder aktuell übertragener Spielbericht kann nicht gelöscht werden"
+        )
+
+    version_count = int(
+        db.scalar(
+            select(func.count(MatchReportVersion.id)).where(
+                MatchReportVersion.club_id == report.club_id,
+                MatchReportVersion.report_id == report.id,
+            )
+        )
+        or 0
+    )
+    publication_count = int(
+        db.scalar(
+            select(func.count(MatchReportPublication.id)).where(
+                MatchReportPublication.club_id == report.club_id,
+                MatchReportPublication.report_id == report.id,
+            )
+        )
+        or 0
+    )
+    report_id = report.id
+    club_id = report.club_id
+    game_id = report.game_id
+    previous_status = report.status
+
+    # Delete dependants explicitly so this operation behaves identically on
+    # PostgreSQL and SQLite despite the publication-to-version RESTRICT key.
+    db.execute(
+        delete(MatchReportPublication).where(
+            MatchReportPublication.club_id == club_id,
+            MatchReportPublication.report_id == report_id,
+        )
+    )
+    db.execute(
+        delete(MatchReportVersion).where(
+            MatchReportVersion.club_id == club_id,
+            MatchReportVersion.report_id == report_id,
+        )
+    )
+    db.execute(
+        delete(MatchReport).where(
+            MatchReport.club_id == club_id,
+            MatchReport.id == report_id,
+        )
+    )
+    db.add(
+        AuditLog(
+            club_id=club_id,
+            user_id=user_id,
+            action="match_report.deleted",
+            entity_type="match_report",
+            entity_id=report_id,
+            details={
+                "game_id": game_id,
+                "previous_status": previous_status,
+                "deleted_versions": version_count,
+                "deleted_publication_preparations": publication_count,
+                "sources_retained": True,
+            },
+        )
+    )
+
+
 def approve_report(db: Session, report: MatchReport, *, user_id: str) -> MatchReportVersion:
     context = refresh_report_sources(db, report)
     version = current_version(db, report)
     if context.has_blocking_conflicts or version is None:
-        raise MatchReportServiceError("Der Bericht ist wegen offener Quellenkonflikte nicht freigabefähig")
+        raise MatchReportServiceError(
+            "Der Bericht ist wegen offener Quellenkonflikte nicht freigabefähig"
+        )
     report.status = "approved"
     report.approved_by = user_id
     report.approved_at = datetime.now(timezone.utc)

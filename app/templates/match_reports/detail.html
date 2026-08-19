@@ -151,8 +151,9 @@
     <form method="post" action="/games/{{game.id}}/match-report/generate" class="button-row">
       <input type="hidden" name="csrf_token" value="{{csrf}}">
       <label>Länge<select name="desired_length"><option value="short" {% if report and report.desired_length=='short' %}selected{% endif %}>Kurz</option><option value="medium" {% if not report or report.desired_length=='medium' %}selected{% endif %}>Mittel</option><option value="long" {% if report and report.desired_length=='long' %}selected{% endif %}>Ausführlich</option></select></label>
-      <button {% if content_context and content_context.has_blocking_conflicts %}disabled title="Zuerst Quellenkonflikte klären"{% endif %}>Neue Fassung erstellen</button>
+      <button {% if content_context and content_context.has_blocking_conflicts %}disabled title="Zuerst Quellenkonflikte klären"{% endif %}>{% if version %}Spielbericht mit KI neu erstellen{% else %}Spielbericht mit KI erstellen{% endif %}</button>
     </form>
+    {% if version %}<p class="muted">Die neue KI-Fassung wird als weitere Version angelegt. Die bisherige Fassung bleibt im Versionsverlauf erhalten.</p>{% endif %}
   </section>
 
   {% if version %}
@@ -173,6 +174,19 @@
       {% if report.status=='approved' %}<form method="post" action="/games/{{game.id}}/match-report/publish"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Manuelle FuPa-Übertragung vorbereiten</button></form>{% endif %}
     </div>
     {% if publications %}<ul class="match-report-list">{% for item in publications %}<li><strong>{{item.status}}</strong> · {{item.created_at|berlin}}{% if item.last_error %}<small>{{item.last_error}}</small>{% endif %}</li>{% endfor %}</ul>{% endif %}
+  </section>
+
+  {% endif %}
+
+  {% if report and can_delete_report %}
+  <section class="danger-zone">
+    <details class="match-report-details"><summary>Spielbericht löschen</summary>
+      <p>Der noch nicht übertragene Spielbericht, seine KI- und Redaktionsfassungen sowie vorbereitete manuelle Übertragungen werden entfernt. FuPa-Quelldaten, bestätigte Spielinformationen und Audit-Einträge bleiben erhalten.</p>
+      <form method="post" action="/games/{{game.id}}/match-report/delete" onsubmit="return confirm('Spielbericht und alle zugehörigen Fassungen wirklich löschen? Die Quelldaten bleiben erhalten.');">
+        <input type="hidden" name="csrf_token" value="{{csrf}}">
+        <button class="danger">Spielbericht löschen</button>
+      </form>
+    </details>
   </section>
   {% endif %}
 </main>
