@@ -123,6 +123,7 @@ def test_platform_prompt_history_filters_exact_prompts_and_blocks_club_user(db):
     team, game, club_user, job = graph(db)
     text_secret = "EXAKTER TEXT-PROMPT NUR FÜR PLATFORMADMIN"
     image_secret = "EXAKTER BILD-PROMPT NUR FÜR PLATFORMADMIN"
+    match_report_secret = "EXAKTER SPIELBERICHT-PROMPT NUR FÜR PLATFORMADMIN"
     db.add_all(
         [
             AiPromptDispatch(
@@ -164,6 +165,26 @@ def test_platform_prompt_history_filters_exact_prompts_and_blocks_club_user(db):
                 idempotency_key="exact-image-prompt",
                 dispatched_at=datetime.now(timezone.utc),
             ),
+            AiPromptDispatch(
+                club_id=job.club_id,
+                generation_job_id=None,
+                team_id=team.id,
+                game_id=game.id,
+                prompt_kind="text",
+                post_type="match_report",
+                media_kind="none",
+                provider="openai",
+                model="text-model",
+                prompt_name="Spielbericht",
+                prompt_version=1,
+                prompt_checksum="c" * 64,
+                rendered_prompt=match_report_secret,
+                attempt_number=1,
+                call_index=1,
+                status="completed",
+                idempotency_key="exact-match-report-prompt",
+                dispatched_at=datetime.now(timezone.utc),
+            ),
         ]
     )
     db.commit()
@@ -181,8 +202,11 @@ def test_platform_prompt_history_filters_exact_prompts_and_blocks_club_user(db):
         )
     html = response.body.decode("utf-8")
     assert text_secret in html
+    assert match_report_secret in html
     assert image_secret not in html
     assert team.display_name in html
+    assert "Text · Spielbericht" in html
+    assert "Auftrag gelöscht" not in html
 
     with platform_scope(actor.id):
         image_response = platform_routes.ai_generation_prompts(
@@ -306,9 +330,7 @@ def test_prompt_reference_image_is_platform_only_and_tenant_bound(db, tmp_path, 
         )
         db.add(foreign_logo)
         db.flush()
-        dispatch.reference_images = [
-            {"role": "opponent_logo", "logo_asset_id": foreign_logo.id}
-        ]
+        dispatch.reference_images = [{"role": "opponent_logo", "logo_asset_id": foreign_logo.id}]
         db.commit()
     with platform_scope(actor.id), pytest.raises(HTTPException) as cross_tenant:
         platform_routes.ai_generation_reference_image(
@@ -352,9 +374,7 @@ def test_existing_prompt_can_be_opened_and_saved_as_new_version(db):
         )
         db.add(original)
         db.commit()
-        editor = admin_routes.prompts(
-            request(f"/prompts?edit={original.id}"), current=actor, db=db
-        )
+        editor = admin_routes.prompts(request(f"/prompts?edit={original.id}"), current=actor, db=db)
         editor_html = editor.body.decode("utf-8")
         assert "Alte geschützte Vorlage" in editor_html
         assert "Neue Entwurfsversion speichern" in editor_html

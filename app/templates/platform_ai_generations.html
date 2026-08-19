@@ -30,12 +30,12 @@
     <tr>
       <td>{{item.dispatched_at|berlin}}</td>
       <td>{{club_names.get(item.club_id, item.club_id)}}</td>
-      <td>{{'Bild' if item.prompt_kind=='image' else 'Text'}}{% if item.media_kind!='none' %} · {{item.media_kind|upper}}{% endif %}</td>
+      <td>{{'Bild' if item.prompt_kind=='image' else 'Text'}}{% if item.post_type=='match_report' %} · Spielbericht{% elif item.media_kind!='none' %} · {{item.media_kind|upper}}{% endif %}</td>
       <td>
         {% if teams.get(item.team_id) %}<strong>{{teams[item.team_id].display_name}}</strong><br>{% endif %}
         {% if games.get(item.game_id) %}{{games[item.game_id].home_team}} – {{games[item.game_id].away_team}}<br>{% endif %}
-        Auftrag
-        {% if item.generation_job_id %}<code>{{item.generation_job_id[:8]}}</code>{% else %}<span class="muted">gelöscht</span>{% endif %}
+        {% if item.post_type=='match_report' %}<strong>Spielbericht</strong>
+        {% else %}Auftrag {% if item.generation_job_id %}<code>{{item.generation_job_id[:8]}}</code>{% else %}<span class="muted">nicht mehr vorhanden</span>{% endif %}{% endif %}
       </td>
       <td>{{item.model}}<br>{{item.prompt_name or 'Laufzeitprompt'}}{% if item.prompt_version %} · v{{item.prompt_version}}{% endif %}<br><code>{{item.prompt_checksum[:12]}}</code></td>
       <td>{{'Erfolgreich' if item.status=='completed' else ('Fehlgeschlagen' if item.status=='failed' else 'Versandt / offen')}}{% if item.error_summary %}<br>{{item.error_summary}}{% endif %}</td>
