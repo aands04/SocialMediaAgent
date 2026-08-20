@@ -17,7 +17,11 @@ from app.match_reports.fupa import (
     parse_fupa_stream,
     validate_fupa_url,
 )
-from app.match_reports.fupa_browser import FupaBrowserPublishError
+from app.match_reports.fupa_browser import (
+    FupaBrowserPublishError,
+    _match_association_confirmed,
+    _normalize_editor_content,
+)
 from app.match_reports.fupa_session import (
     FupaSessionError,
     decrypt_fupa_browser_session,
@@ -63,6 +67,46 @@ from app.web import berlin_datetime
 def test_match_report_template_registers_berlin_datetime_filter():
     assert match_report_templates.env.filters["berlin"] is berlin_datetime
     assert match_report_templates.env.get_template("match_reports/detail.html") is not None
+
+
+def test_fupa_browser_rejects_unassociated_club_news_editor():
+    assert not _match_association_confirmed(
+        source_url="https://www.fupa.net/match/tsv-carlsdorf-m1-sv-ehlen-m1-260816",
+        editor_url="https://www.fupa.net/vereinsverwaltung/vereinsnachricht/neu",
+        visible_text="Vereinsverwaltung Neuer Bericht Schlagzeile Haupttext",
+        scoped_values=(),
+        home_team="TSV Carlsdorf",
+        away_team="SV Ehlen",
+    )
+
+
+def test_fupa_browser_accepts_editor_with_both_match_teams():
+    assert _match_association_confirmed(
+        source_url="https://www.fupa.net/match/tsv-carlsdorf-m1-sv-ehlen-m1-260816",
+        editor_url="https://www.fupa.net/vereinsverwaltung/spielbericht/neu",
+        visible_text="Spielbericht für TSV Carlsdorf gegen SV Ehlen",
+        scoped_values=(),
+        home_team="TSV Carlsdorf",
+        away_team="SV Ehlen",
+    )
+
+
+def test_fupa_browser_accepts_match_key_in_scoped_editor_value():
+    assert _match_association_confirmed(
+        source_url="https://www.fupa.net/match/tsv-carlsdorf-m1-sv-ehlen-m1-260816",
+        editor_url="https://www.fupa.net/vereinsverwaltung/spielbericht/neu",
+        visible_text="Spielbericht bearbeiten",
+        scoped_values=("tsv-carlsdorf-m1-sv-ehlen-m1-260816",),
+        home_team="TSV Carlsdorf",
+        away_team="SV Ehlen",
+    )
+
+
+def test_fupa_editor_content_comparison_ignores_layout_whitespace_only():
+    expected = "Erste Zeile\n\nZweite Zeile mit Umlaut: Ehlen."
+    actual = "  Erste Zeile  \n  Zweite Zeile mit Umlaut: Ehlen.  "
+
+    assert _normalize_editor_content(actual) == _normalize_editor_content(expected)
 
 
 def _team_and_game(
