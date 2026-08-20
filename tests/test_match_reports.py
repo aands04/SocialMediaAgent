@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import select
 
 from app.match_reports import service as match_report_service
@@ -16,12 +17,21 @@ from app.match_reports.fupa import (
     parse_fupa_stream,
     validate_fupa_url,
 )
+from app.match_reports.fupa_browser import FupaBrowserPublishError
+from app.match_reports.fupa_session import (
+    FupaSessionError,
+    decrypt_fupa_browser_session,
+    revoke_fupa_browser_session,
+    sanitize_storage_state,
+    save_fupa_browser_session,
+)
 from app.match_reports.generator import (
     MATCH_REPORT_PROMPT_VERSION,
     FixtureMatchReportGenerator,
     MatchReportGenerationError,
     render_match_report_prompt,
 )
+from app.match_reports.publisher import FupaPublishResult
 from app.match_reports.routes import templates as match_report_templates
 from app.match_reports.scheduler import _final_result_available
 from app.match_reports.service import (
@@ -37,6 +47,7 @@ from app.match_reports.types import GeneratedMatchReport
 from app.models import (
     AiPromptDispatch,
     AuditLog,
+    FupaBrowserSession,
     FupaMatchSnapshot,
     Game,
     MatchEvent,
@@ -136,6 +147,31 @@ def _admin(db) -> User:
     db.add(user)
     db.flush()
     return user
+
+
+def _fupa_browser_settings(**overrides):
+    values = {
+        "fupa_browser_publish_enabled": True,
+        "fupa_browser_session_max_bytes": 524_288,
+        "fupa_browser_timeout_seconds": 30.0,
+        "fupa_browser_headless": True,
+        "meta_token_encryption_key": Fernet.generate_key().decode("ascii"),
+        "meta_token_key_version": "v1",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _fupa_storage_state(cookie_value: str = "fupa-session-secret") -> str:
+    return (
+        '{"cookies":['
+        '{"name":"session","value":"' + cookie_value + '","domain":".fupa.net","path":"/"},'
+        '{"name":"foreign","value":"discard-me","domain":"accounts.google.com","path":"/"}'
+        '],"origins":['
+        '{"origin":"https://www.fupa.net","localStorage":[]},'
+        '{"origin":"https://accounts.google.com","localStorage":[]}'
+        "]}"
+    )
 
 
 def test_fupa_url_validation_rejects_non_official_and_unsafe_urls():
@@ -644,6 +680,145 @@ def test_report_versions_are_immutable_and_manual_transfer_is_idempotent(db):
         .count()
     )
     assert count == 1
+
+
+def test_fupa_session_state_is_reduced_encrypted_and_revocable(db):
+    settings = _fupa_browser_settings()
+    user = _admin(db)
+
+    sanitized = sanitize_storage_state(_fupa_storage_state())
+    assert "fupa-session-secret" in sanitized
+    assert "accounts.google.com" not in sanitized
+    assert "discard-me" not in sanitized
+
+    session = save_fupa_browser_session(
+        db,
+        club_id=db.info["test_club_id"],
+        raw_state=_fupa_storage_state(),
+        user_id=user.id,
+        settings=settings,
+    )
+    db.flush()
+
+    assert session.id
+    assert session.status == "active"
+    assert "fupa-session-secret" not in session.encrypted_storage_state
+    assert "fupa-session-secret" in decrypt_fupa_browser_session(session, settings)
+    audit = db.scalar(select(AuditLog).where(AuditLog.action == "match_report.fupa_session_saved"))
+    assert audit.details == {
+        "key_version": "v1",
+        "contains_password": False,
+        "contains_encrypted_session": True,
+    }
+
+    revoke_fupa_browser_session(db, session, user_id=user.id)
+    db.flush()
+    assert session.status == "revoked"
+    assert session.encrypted_storage_state is None
+
+
+def test_fupa_session_rejects_state_without_fupa_login():
+    with pytest.raises(FupaSessionError, match="keine FuPa-Sitzung"):
+        sanitize_storage_state(
+            '{"cookies":[{"name":"sid","value":"x",'
+            '"domain":"example.org","path":"/"}],"origins":[]}'
+        )
+
+
+def test_browser_publication_uses_active_tenant_session_and_marks_report_published(db):
+    _, game = _team_and_game(db)
+    _snapshot(db, game)
+    user = _admin(db)
+    report = get_or_create_report(db, game)
+    generate_report_version(
+        db,
+        report,
+        SimpleNamespace(text_generator_mode="fixture"),
+        user_id=user.id,
+    )
+    approve_report(db, report, user_id=user.id)
+    settings = _fupa_browser_settings()
+    session = save_fupa_browser_session(
+        db,
+        club_id=game.club_id,
+        raw_state=_fupa_storage_state(),
+        user_id=user.id,
+        settings=settings,
+    )
+
+    class SuccessfulPublisher:
+        def publish(self, *, context, version, idempotency_key):
+            assert context.club_id == game.club_id
+            assert context.game_id == game.id
+            assert version.report_id == report.id
+            return FupaPublishResult(
+                status="published",
+                external_id=idempotency_key,
+                external_url=game.fupa_url,
+                updated_storage_state=_fupa_storage_state("rotated-fupa-session"),
+            )
+
+    publication = prepare_fupa_publication(
+        db,
+        report,
+        user_id=user.id,
+        settings=settings,
+        publisher=SuccessfulPublisher(),
+    )
+    db.flush()
+
+    assert publication.status == "published"
+    assert publication.attempt_count == 1
+    assert report.status == "published"
+    assert report.published_at is not None
+    assert session.status == "active"
+    assert session.last_verified_at is not None
+    assert "rotated-fupa-session" in decrypt_fupa_browser_session(session, settings)
+
+
+def test_browser_publication_expires_session_when_fupa_requires_login(db):
+    _, game = _team_and_game(db)
+    _snapshot(db, game)
+    user = _admin(db)
+    report = get_or_create_report(db, game)
+    generate_report_version(
+        db,
+        report,
+        SimpleNamespace(text_generator_mode="fixture"),
+        user_id=user.id,
+    )
+    approve_report(db, report, user_id=user.id)
+    settings = _fupa_browser_settings()
+    session = save_fupa_browser_session(
+        db,
+        club_id=game.club_id,
+        raw_state=_fupa_storage_state(),
+        user_id=user.id,
+        settings=settings,
+    )
+
+    class ExpiredPublisher:
+        def publish(self, **_kwargs):
+            raise FupaBrowserPublishError(
+                "authentication_required",
+                "Die FuPa-Anmeldung ist abgelaufen.",
+            )
+
+    publication = prepare_fupa_publication(
+        db,
+        report,
+        user_id=user.id,
+        settings=settings,
+        publisher=ExpiredPublisher(),
+    )
+    db.flush()
+
+    assert publication.status == "failed"
+    assert publication.last_error_category == "authentication_required"
+    assert report.status == "approved"
+    assert session.status == "expired"
+    assert session.last_error == "Die FuPa-Anmeldung ist abgelaufen."
+    assert db.scalar(select(FupaBrowserSession).where(FupaBrowserSession.id == session.id))
 
 
 def test_generated_version_keeps_source_snapshot_for_audit(db):

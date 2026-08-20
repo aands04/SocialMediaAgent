@@ -42,10 +42,11 @@ keinen parallelen Vereins- oder Berechtigungsweg ein:
    über die beantwortete Nachricht zugeordnet. Eine fehlende Antwort blockiert
    die Berichtserstellung nicht; unzuordenbare Antworten werden nicht geraten.
 5. **FuPa-Schreibzugriff.** Es ist keine stabile, dokumentierte Schreib-API Teil
-   der Anwendung. Daher existiert eine austauschbare Publisher-Schnittstelle,
-   aber automatische FuPa-Veröffentlichung bleibt standardmäßig und produktiv
-   deaktiviert. Es gibt keine CAPTCHA-Umgehung und keine versteckte
-   Browser-Automatisierung.
+   der Anwendung. Der optionale Browser-Publisher benötigt deshalb zwingend ein
+   vorhandenes berechtigtes FuPa-Konto und eine interaktiv erzeugte Anmeldung.
+   Er meldet sich nie selbst an, speichert keine Zugangsdaten und umgeht weder
+   CAPTCHA noch Zwei-Faktor-Prüfungen. Details stehen in
+   [`FUPA_BROWSER_PUBLISHING.md`](FUPA_BROWSER_PUBLISHING.md).
 
 ## Datenfluss
 
@@ -80,6 +81,8 @@ Endpunkte übernommen und behalten ihre bisherige Auswahl. Bestehende Spiele und
 Live-Ereignisse bleiben unverändert. Ohne FuPa-URL ist die neue Automatik
 inaktiv. Ein Downgrade von `0033` verweigert sich, sobald Telegram- oder andere
 nicht mehr darstellbare providerneutrale Daten vorhanden sind.
+Migration `0034` ergänzt ausschließlich den verschlüsselten, vereinsgebundenen
+FuPa-Browserzustand. Bestehende Spielberichte bleiben unverändert.
 
 ## Betrieb
 
@@ -90,6 +93,7 @@ FUPA_REPORTS_ENABLED=false
 FUPA_REPORT_AUTOMATIC_GENERATION_ENABLED=false
 FUPA_REPORT_AUTOMATIC_PUBLISH_ENABLED=false
 FUPA_REPORT_FEEDBACK_WAIT_MINUTES=30
+FUPA_BROWSER_PUBLISH_ENABLED=false
 TELEGRAM_WEBHOOK_BASE_URL=https://meta.example.org
 ```
 
@@ -112,6 +116,8 @@ einem JSON-Bootstrap unter `window.REDUX_DATA`. Dieser Datenblock wird als JSON
 dekodiert, ohne JavaScript auszuführen; JSON-LD und Next-Daten bleiben als
 Fallback erhalten. Unvollständige Seiten werden weiterhin als `incomplete`
 gekennzeichnet und nicht mit geratenen Fakten aufgefüllt.
-Ein stabiler automatischer Schreibzugriff auf FuPa wird nicht behauptet. Der
-Standard-Publisher kennzeichnet Berichte deshalb als manuell zu übertragen und
-stellt Text sowie Quellenübersicht für die redaktionelle Arbeit bereit.
+Ein stabiler offizieller Schreibzugriff auf FuPa wird nicht behauptet. Der
+Standard-Publisher kennzeichnet Berichte deshalb als manuell zu übertragen.
+Optional kann ein Administrator die ausdrücklich bestätigte, browsergestützte
+Übergabe aktivieren. Änderungen an der FuPa-Oberfläche führen dabei sicher zum
+Abbruch statt zu einer geratenen Bedienaktion.

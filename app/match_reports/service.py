@@ -8,11 +8,19 @@ from sqlalchemy.orm import Session
 
 from app.match_reports.context import build_match_content_context
 from app.match_reports.fupa import FupaReader
+from app.match_reports.fupa_browser import BrowserFupaPublisher, FupaBrowserPublishError
+from app.match_reports.fupa_session import (
+    FupaSessionError,
+    decrypt_fupa_browser_session,
+    mark_fupa_session_error,
+    update_fupa_browser_session,
+)
 from app.match_reports.generator import build_match_report_generator
 from app.match_reports.publisher import ManualFupaPublisher
 from app.models import (
     AiPromptDispatch,
     AuditLog,
+    FupaBrowserSession,
     FupaMatchSnapshot,
     Game,
     MatchManualNote,
@@ -391,7 +399,14 @@ def approve_report(db: Session, report: MatchReport, *, user_id: str) -> MatchRe
     return version
 
 
-def prepare_fupa_publication(db: Session, report: MatchReport, *, user_id: str):
+def prepare_fupa_publication(
+    db: Session,
+    report: MatchReport,
+    *,
+    user_id: str,
+    settings=None,
+    publisher=None,
+):
     if report.status != "approved":
         raise MatchReportServiceError("Nur freigegebene Berichte können an FuPa übertragen werden")
     version = current_version(db, report)
@@ -399,37 +414,122 @@ def prepare_fupa_publication(db: Session, report: MatchReport, *, user_id: str):
         raise MatchReportServiceError("Freigegebene Berichtsfassung fehlt")
     key = hashlib.sha256(f"{report.id}:{version.id}:fupa".encode()).hexdigest()
     publication = db.scalar(
-        select(MatchReportPublication).where(
+        select(MatchReportPublication)
+        .where(
             MatchReportPublication.club_id == report.club_id,
             MatchReportPublication.idempotency_key == key,
         )
+        .with_for_update()
     )
-    if publication:
+    browser_enabled = bool(settings and settings.fupa_browser_publish_enabled)
+    if publication and (
+        publication.status in {"published", "publishing"}
+        or (publication.status == "manual_required" and not browser_enabled)
+    ):
         return publication
     context = build_match_content_context(db, report.game_id)
-    result = ManualFupaPublisher().publish(
-        context=context,
-        version=version,
-        idempotency_key=key,
-    )
-    publication = MatchReportPublication(
-        club_id=report.club_id,
-        report_id=report.id,
-        version_id=version.id,
-        status=result.status,
-        idempotency_key=key,
-        external_url=result.external_url,
-        last_error=result.message,
-    )
+    browser_session = None
+    if browser_enabled:
+        browser_session = db.scalar(
+            select(FupaBrowserSession)
+            .where(FupaBrowserSession.club_id == report.club_id)
+            .with_for_update()
+        )
+        if browser_session is None or browser_session.status != "active":
+            raise MatchReportServiceError(
+                "Für diesen Verein ist keine aktive FuPa-Anmeldung hinterlegt"
+            )
+        if publisher is None:
+            try:
+                storage_state = decrypt_fupa_browser_session(browser_session, settings)
+            except FupaSessionError as exc:
+                mark_fupa_session_error(
+                    browser_session,
+                    category="decryption_failed",
+                    message=str(exc),
+                )
+                raise MatchReportServiceError(str(exc)) from exc
+            publisher = BrowserFupaPublisher(settings=settings, storage_state=storage_state)
+    else:
+        publisher = publisher or ManualFupaPublisher()
+
+    if publication is None:
+        publication = MatchReportPublication(
+            club_id=report.club_id,
+            report_id=report.id,
+            version_id=version.id,
+            status="pending",
+            idempotency_key=key,
+        )
+    publication.status = "publishing" if browser_enabled else "pending"
+    publication.attempt_count = (publication.attempt_count or 0) + 1
+    publication.last_error_category = None
+    publication.last_error = None
     db.add(publication)
+    db.flush()
+
+    try:
+        result = publisher.publish(
+            context=context,
+            version=version,
+            idempotency_key=key,
+        )
+    except FupaBrowserPublishError as exc:
+        publication.status = "failed"
+        publication.last_error_category = exc.category
+        publication.last_error = exc.user_message
+        if browser_session is not None:
+            mark_fupa_session_error(
+                browser_session,
+                category=exc.category,
+                message=exc.user_message,
+            )
+        db.add(
+            AuditLog(
+                club_id=report.club_id,
+                user_id=user_id,
+                action="match_report.fupa_browser_failed",
+                entity_type="match_report",
+                entity_id=report.id,
+                details={
+                    "version": version.version_number,
+                    "category": exc.category,
+                    "attempt": publication.attempt_count,
+                },
+            )
+        )
+        return publication
+
+    publication.status = result.status
+    publication.external_id = result.external_id
+    publication.external_url = result.external_url
+    publication.last_error = result.message
+    if result.status == "published":
+        publication.published_at = datetime.now(timezone.utc)
+        report.status = "published"
+        report.published_at = publication.published_at
+    if browser_session is not None and result.updated_storage_state:
+        update_fupa_browser_session(
+            browser_session,
+            result.updated_storage_state,
+            settings=settings,
+        )
     db.add(
         AuditLog(
             club_id=report.club_id,
             user_id=user_id,
-            action="match_report.fupa_transfer_prepared",
+            action=(
+                "match_report.fupa_browser_published"
+                if result.status == "published"
+                else "match_report.fupa_transfer_prepared"
+            ),
             entity_type="match_report",
             entity_id=report.id,
-            details={"version": version.version_number, "status": result.status},
+            details={
+                "version": version.version_number,
+                "status": result.status,
+                "attempt": publication.attempt_count,
+            },
         )
     )
     return publication

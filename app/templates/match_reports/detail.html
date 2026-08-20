@@ -168,12 +168,46 @@
 
   <section>
     <p class="eyebrow">5 · Freigabe und FuPa</p><h2>Kontrollierte Übergabe</h2>
-    <p>Eine direkte offizielle FuPa-Schreibschnittstelle ist nicht hinterlegt. Deshalb wird ausschließlich eine manuelle, idempotente Übergabe vorbereitet.</p>
+    {% if fupa_browser_enabled %}
+    <p>FuPa erlaubt Spielberichte nur mit einem berechtigten Konto. Die Vereinszentrale verwendet deshalb ausschließlich eine bereits manuell angemeldete FuPa-Sitzung. FuPa-Benutzername und -Passwort werden weder abgefragt noch gespeichert.</p>
+    {% if can_admin %}
+    <details class="match-report-details" {% if not fupa_browser_session or fupa_browser_session.status!='active' %}open{% endif %}>
+      <summary>FuPa-Anmeldung für diesen Verein verwalten</summary>
+      {% if fupa_browser_session %}
+      <p>Status: <strong>{% if fupa_browser_session.status=='active' %}Bereit{% elif fupa_browser_session.status=='expired' %}Anmeldung abgelaufen{% elif fupa_browser_session.status=='revoked' %}Entfernt{% else %}Prüfung erforderlich{% endif %}</strong>{% if fupa_browser_session.last_used_at %} · zuletzt verwendet {{fupa_browser_session.last_used_at|berlin}}{% endif %}</p>
+      {% if fupa_browser_session.last_error %}<p class="warning-box">{{fupa_browser_session.last_error}}</p>{% endif %}
+      {% else %}<p>Noch keine FuPa-Anmeldung hinterlegt.</p>{% endif %}
+      <p class="muted">Erzeuge die Sitzungsdatei auf einem vertrauenswürdigen Rechner mit <code>python scripts/capture_fupa_session.py --output fupa-session.json</code>. Melde dich im geöffneten echten FuPa-Fenster selbst an und lade anschließend nur die erzeugte JSON-Datei hoch.</p>
+      <form method="post" action="/games/{{game.id}}/match-report/fupa-session" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{{csrf}}">
+        <label>FuPa-Sitzungsdatei<input type="file" name="session_file" accept="application/json,.json" required></label>
+        <button>FuPa-Anmeldung verschlüsselt hinterlegen</button>
+      </form>
+      {% if fupa_browser_session and fupa_browser_session.status!='revoked' %}
+      <form method="post" action="/games/{{game.id}}/match-report/fupa-session/revoke" onsubmit="return confirm('FuPa-Anmeldung wirklich entfernen? Es werden danach keine Spielberichte mehr übertragen.');">
+        <input type="hidden" name="csrf_token" value="{{csrf}}"><button class="danger">FuPa-Anmeldung entfernen</button>
+      </form>
+      {% endif %}
+    </details>
+    {% else %}<p class="warning-box">Nur ein Vereinsadministrator kann die erforderliche FuPa-Anmeldung verwalten.</p>{% endif %}
+    {% else %}
+    <p>Die browsergestützte FuPa-Übergabe ist in dieser Installation deaktiviert. Es wird ausschließlich eine manuelle, idempotente Übergabe vorbereitet.</p>
+    {% endif %}
     <div class="button-row">
       <form method="post" action="/games/{{game.id}}/match-report/approve" onsubmit="return confirm('Diese Berichtsfassung verbindlich freigeben?');"><input type="hidden" name="csrf_token" value="{{csrf}}"><button class="approve">Bericht freigeben</button></form>
-      {% if report.status=='approved' %}<form method="post" action="/games/{{game.id}}/match-report/publish"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Manuelle FuPa-Übertragung vorbereiten</button></form>{% endif %}
+      {% if report.status=='approved' %}
+        {% if fupa_browser_enabled and can_admin and fupa_browser_session and fupa_browser_session.status=='active' %}
+        <form method="post" action="/games/{{game.id}}/match-report/publish" onsubmit="return confirm('Den freigegebenen Spielbericht jetzt mit der hinterlegten FuPa-Anmeldung bei FuPa speichern?');">
+          <input type="hidden" name="csrf_token" value="{{csrf}}">
+          <label><input type="checkbox" name="confirm_fupa_publish" value="true" required> Ich habe Bericht und Zielspiel geprüft und bestätige diese FuPa-Übertragung.</label>
+          <button>Jetzt bei FuPa speichern</button>
+        </form>
+        {% elif not fupa_browser_enabled %}
+        <form method="post" action="/games/{{game.id}}/match-report/publish"><input type="hidden" name="csrf_token" value="{{csrf}}"><button>Manuelle FuPa-Übertragung vorbereiten</button></form>
+        {% endif %}
+      {% endif %}
     </div>
-    {% if publications %}<ul class="match-report-list">{% for item in publications %}<li><strong>{{item.status}}</strong> · {{item.created_at|berlin}}{% if item.last_error %}<small>{{item.last_error}}</small>{% endif %}</li>{% endfor %}</ul>{% endif %}
+    {% if publications %}<ul class="match-report-list">{% for item in publications %}<li><strong>{% if item.status=='published' %}Bei FuPa gespeichert{% elif item.status=='failed' %}Fehlgeschlagen{% elif item.status=='manual_required' %}Manuelle Übergabe erforderlich{% elif item.status=='publishing' %}Übertragung läuft{% else %}{{item.status}}{% endif %}</strong> · {{item.created_at|berlin}}{% if item.last_error %}<small>{{item.last_error}}</small>{% endif %}</li>{% endfor %}</ul>{% endif %}
   </section>
 
   {% endif %}
