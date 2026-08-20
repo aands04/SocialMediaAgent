@@ -12,6 +12,7 @@ class FupaPublishResult:
     external_id: str | None = None
     external_url: str | None = None
     message: str | None = None
+    updated_storage_state: str | None = None
 
 
 class FupaPublisher:

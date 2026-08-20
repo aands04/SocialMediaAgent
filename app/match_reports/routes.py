@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import desc, select
@@ -15,6 +15,11 @@ from app.db import get_db
 from app.match_reports.context import build_match_content_context
 from app.match_reports.feedback import request_match_feedback
 from app.match_reports.fupa import validate_fupa_url
+from app.match_reports.fupa_session import (
+    FupaSessionError,
+    revoke_fupa_browser_session,
+    save_fupa_browser_session,
+)
 from app.match_reports.generator import MatchReportGenerationError
 from app.match_reports.service import (
     MatchReportServiceError,
@@ -30,10 +35,12 @@ from app.match_reports.service import (
     refresh_report_sources,
 )
 from app.match_reports.telegram import create_contact_link, feedback_provider_enabled
+from app.meta.security import MetaSecretError
 from app.models import (
     AuditLog,
     Club,
     ClubWritingExample,
+    FupaBrowserSession,
     FupaMatchSnapshot,
     Game,
     MatchFeedbackContact,
@@ -224,6 +231,10 @@ def match_report_page(
         if report
         else []
     )
+    settings = get_settings()
+    fupa_browser_session = db.scalar(
+        select(FupaBrowserSession).where(FupaBrowserSession.club_id == game.club_id)
+    )
     context = None
     if report:
         try:
@@ -256,7 +267,9 @@ def match_report_page(
             "publications": publications,
             "content_context": context,
             "status_labels": STATUS_LABELS,
-            "automatic_enabled": get_settings().fupa_report_automatic_generation_enabled,
+            "automatic_enabled": settings.fupa_report_automatic_generation_enabled,
+            "fupa_browser_enabled": settings.fupa_browser_publish_enabled,
+            "fupa_browser_session": fupa_browser_session,
             "can_admin": current.role == Role.ADMIN,
             "can_delete_report": allowed(db, current, "approve", game.team_id),
         },
@@ -435,24 +448,99 @@ def publish(
     game_id: str,
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
+    confirm_fupa_publish: bool = Form(default=False),
     current: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     check_csrf(request, csrf_token_value)
     game = _game(db, game_id, current, "publish_retry")
-
-    def action():
+    settings = get_settings()
+    if settings.fupa_browser_publish_enabled:
+        require_admin(current)
+        if not confirm_fupa_publish:
+            return _redirect(
+                game.id, "Fehler: Die FuPa-Übertragung muss ausdrücklich bestätigt werden"
+            )
+    try:
         report = _report(db, game)
         if not report:
             raise MatchReportServiceError("Es existiert noch kein Bericht")
-        prepare_fupa_publication(db, report, user_id=current.id)
+        publication = prepare_fupa_publication(
+            db,
+            report,
+            user_id=current.id,
+            settings=settings,
+        )
+        db.commit()
+        if publication.status == "published":
+            return _redirect(game.id, "Spielbericht wurde bei FuPa gespeichert")
+        if publication.status == "failed":
+            return _redirect(
+                game.id,
+                f"FuPa-Übertragung fehlgeschlagen: {publication.last_error}",
+            )
+        return _redirect(
+            game.id,
+            "Manuelle FuPa-Übertragung wurde vorbereitet; es erfolgt keine automatische Veröffentlichung",
+        )
+    except (MatchReportServiceError, MatchReportGenerationError, ValueError) as exc:
+        db.rollback()
+        return _redirect(game.id, f"Fehler: {exc}")
 
-    return _safe_action(
-        db,
-        game.id,
-        action,
-        "Manuelle FuPa-Übertragung wurde vorbereitet; es erfolgt keine automatische Veröffentlichung",
-    )
+
+@router.post("/games/{game_id}/match-report/fupa-session")
+async def upload_fupa_session(
+    game_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    session_file: UploadFile = File(),
+    current: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    game = _game(db, game_id, current, "approve")
+    settings = get_settings()
+    if not settings.fupa_browser_publish_enabled:
+        return _redirect(game.id, "Fehler: Die FuPa-Browserübergabe ist nicht aktiviert")
+    try:
+        raw = await session_file.read(settings.fupa_browser_session_max_bytes + 1)
+        save_fupa_browser_session(
+            db,
+            club_id=game.club_id,
+            raw_state=raw,
+            user_id=current.id,
+            settings=settings,
+        )
+        db.commit()
+        return _redirect(
+            game.id,
+            "FuPa-Anmeldung wurde verschlüsselt für diesen Verein hinterlegt",
+        )
+    except (FupaSessionError, MetaSecretError, ValueError) as exc:
+        db.rollback()
+        return _redirect(game.id, f"Fehler: {exc}")
+    finally:
+        await session_file.close()
+
+
+@router.post("/games/{game_id}/match-report/fupa-session/revoke")
+def revoke_fupa_session(
+    game_id: str,
+    request: Request,
+    csrf_token_value: str = Form(alias="csrf_token"),
+    current: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    check_csrf(request, csrf_token_value)
+    require_admin(current)
+    game = _game(db, game_id, current, "approve")
+    item = db.scalar(select(FupaBrowserSession).where(FupaBrowserSession.club_id == game.club_id))
+    if item is None:
+        return _redirect(game.id, "Es ist keine FuPa-Anmeldung hinterlegt")
+    revoke_fupa_browser_session(db, item, user_id=current.id)
+    db.commit()
+    return _redirect(game.id, "FuPa-Anmeldung wurde entfernt")
 
 
 @router.post("/games/{game_id}/match-report/feedback")

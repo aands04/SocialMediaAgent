@@ -2371,6 +2371,34 @@ class MatchReportPublication(Base, Timestamped):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class FupaBrowserSession(Base, Timestamped):
+    """Verschluesselter, vereinsgebundener FuPa-Browserzustand.
+
+    Die Tabelle enthaelt niemals FuPa-Benutzernamen oder -Passwoerter. Der
+    Browserzustand wird durch den Administrator nach einer interaktiven
+    Anmeldung erzeugt und serverseitig authentifiziert verschluesselt.
+    """
+
+    __tablename__ = "fupa_browser_sessions"
+    __table_args__ = (
+        UniqueConstraint("club_id", name="uq_fupa_browser_sessions_club"),
+        CheckConstraint(
+            "status IN ('active','expired','revoked','error')",
+            name="ck_fupa_browser_session_status",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="CASCADE"), index=True)
+    encrypted_storage_state: Mapped[str | None] = mapped_column(Text)
+    key_version: Mapped[str] = mapped_column(String(40), default="v1")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_category: Mapped[str | None] = mapped_column(String(80))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     __table_args__ = (
