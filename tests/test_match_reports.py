@@ -19,8 +19,11 @@ from app.match_reports.fupa import (
 )
 from app.match_reports.fupa_browser import (
     FupaBrowserPublishError,
+    _admin_match_report_url,
+    _context_match_id,
     _match_association_confirmed,
     _normalize_editor_content,
+    _url_match_id,
 )
 from app.match_reports.fupa_session import (
     FupaSessionError,
@@ -102,6 +105,54 @@ def test_fupa_browser_accepts_match_key_in_scoped_editor_value():
     )
 
 
+def test_fupa_browser_accepts_exact_numeric_admin_match_id():
+    assert _match_association_confirmed(
+        source_url="https://www.fupa.net/match/tsv-carlsdorf-m2-sv-ehlen-m2-260816",
+        editor_url=(
+            "https://admin.fupa.net/fupa/admin/index.php?page=news_edit2&aktion=edit"
+            "&news_id=3208426&kategorie=58&match_id=14917720"
+        ),
+        visible_text="Spielbericht für TSV Carlsdorf II gegen SV Ehlen II",
+        scoped_values=(),
+        home_team="TSV Carlsdorf II",
+        away_team="SV Ehlen II",
+        expected_match_id=14917720,
+    )
+
+
+def test_fupa_browser_rejects_wrong_numeric_admin_match_id():
+    assert not _match_association_confirmed(
+        source_url="https://www.fupa.net/match/tsv-carlsdorf-m2-sv-ehlen-m2-260816",
+        editor_url=(
+            "https://admin.fupa.net/fupa/admin/index.php?page=news_edit2&match_id=14917721"
+        ),
+        # Even matching team names must never compensate for a mismatched
+        # numeric FuPa game association.
+        visible_text="Spielbericht für TSV Carlsdorf II gegen SV Ehlen II",
+        scoped_values=(),
+        home_team="TSV Carlsdorf II",
+        away_team="SV Ehlen II",
+        expected_match_id=14917720,
+    )
+
+
+def test_fupa_admin_match_report_url_and_parser_are_exact():
+    url = _admin_match_report_url(14917720)
+
+    assert url == "https://admin.fupa.net/fupa/admin/spielbericht.php?spiel=14917720"
+    assert _url_match_id(url) == 14917720
+    assert _url_match_id("https://admin.fupa.net/fupa/admin/index.php?spiel=invalid") is None
+
+
+def test_fupa_context_match_id_reads_provenance_only():
+    context = SimpleNamespace(
+        provenance={"fupa_match_id": "14917720"},
+        facts={"fupa_match_id": "99999999"},
+    )
+
+    assert _context_match_id(context) == 14917720
+
+
 def test_fupa_editor_content_comparison_ignores_layout_whitespace_only():
     expected = "Erste Zeile\n\nZweite Zeile mit Umlaut: Ehlen."
     actual = "  Erste Zeile  \n  Zweite Zeile mit Umlaut: Ehlen.  "
@@ -159,6 +210,7 @@ def _snapshot(
     away_score: int | None = 1,
     status: str | None = "EventCompleted",
     ticker: list[dict] | None = None,
+    match_id: int | None = 14917720,
 ) -> FupaMatchSnapshot:
     snapshot = FupaMatchSnapshot(
         club_id=game.club_id,
@@ -173,7 +225,7 @@ def _snapshot(
             "status": status,
         },
         ticker_data=ticker or [],
-        source_metadata={"parser": "test"},
+        source_metadata={"parser": "test", "match_id": match_id},
         content_digest=uuid4().hex + uuid4().hex,
     )
     db.add(snapshot)
@@ -880,6 +932,7 @@ def test_generated_version_keeps_source_snapshot_for_audit(db):
 
     persisted = db.get(MatchReportVersion, version.id)
     assert persisted.source_snapshot["provenance"]["snapshot_id"] == snapshot.id
+    assert persisted.source_snapshot["provenance"]["fupa_match_id"] == 14917720
     assert persisted.used_sources == [f"fupa:{snapshot.id}"]
 
 

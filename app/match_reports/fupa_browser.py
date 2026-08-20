@@ -6,7 +6,7 @@ import re
 import shutil
 import unicodedata
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -55,6 +55,35 @@ def _source_match_key(source_url: str) -> str:
     return _normalize_identity(unquote(path_parts[match_index + 1]))
 
 
+def _positive_match_id(value) -> int | None:
+    try:
+        match_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return match_id if match_id > 0 else None
+
+
+def _context_match_id(context) -> int | None:
+    provenance = context.provenance if isinstance(context.provenance, dict) else {}
+    return _positive_match_id(provenance.get("fupa_match_id"))
+
+
+def _url_match_id(value: str) -> int | None:
+    parsed = urlparse(value)
+    query = parse_qs(parsed.query)
+    for key in ("match_id", "spiel"):
+        values = query.get(key, ())
+        if values:
+            match_id = _positive_match_id(values[0])
+            if match_id:
+                return match_id
+    return None
+
+
+def _admin_match_report_url(match_id: int) -> str:
+    return f"https://admin.fupa.net/fupa/admin/spielbericht.php?spiel={match_id}"
+
+
 def _match_association_confirmed(
     *,
     source_url: str,
@@ -63,6 +92,7 @@ def _match_association_confirmed(
     scoped_values: tuple[str, ...],
     home_team: str,
     away_team: str,
+    expected_match_id: int | None = None,
 ) -> bool:
     """Require match-specific evidence that FuPa selected the intended game.
 
@@ -70,6 +100,12 @@ def _match_association_confirmed(
     filled by this provider could make an unrelated club-news editor appear to
     be associated with the match.
     """
+
+    if expected_match_id is not None:
+        # Once the trusted snapshot supplied a numeric FuPa match ID, never
+        # weaken the association back to team-name matching. Team names are
+        # not unique and may also occur in unrelated club-news editors.
+        return _url_match_id(editor_url) == expected_match_id
 
     scoped_evidence = _normalize_identity(" ".join((editor_url, *scoped_values)))
     match_key = _source_match_key(source_url)
@@ -178,6 +214,12 @@ class BrowserFupaPublisher(FupaPublisher):
                 "invalid_source",
                 "Für dieses Spiel ist keine gültige öffentliche FuPa-Spielseite hinterlegt.",
             )
+        match_id = _context_match_id(context)
+        if match_id is None:
+            raise FupaBrowserPublishError(
+                "match_association_missing",
+                "Die öffentliche FuPa-Spielseite enthält noch keine eindeutige interne Spiel-ID. Bitte die FuPa-Quelle erneut abrufen und die Übertragung danach wiederholen.",
+            )
         timeout = max(5_000, int(self.settings.fupa_browser_timeout_seconds * 1000))
         try:
             with sync_playwright() as playwright:
@@ -188,24 +230,57 @@ class BrowserFupaPublisher(FupaPublisher):
                 )
                 browser_context = browser.new_context(storage_state=self.storage_state)
                 page = browser_context.new_page()
-                page.goto(source_url, wait_until="domcontentloaded", timeout=timeout)
+                page.goto(
+                    _admin_match_report_url(match_id),
+                    wait_until="domcontentloaded",
+                    timeout=timeout,
+                )
                 self._detect_blocked_state(page)
+
+                if _url_match_id(page.url) != match_id:
+                    raise FupaBrowserPublishError(
+                        "match_association_missing",
+                        "FuPa hat nicht den vorgesehenen spielbezogenen Verwaltungsbereich geöffnet. Es wurde nichts ausgefüllt oder gespeichert.",
+                    )
 
                 open_editor = self._first_visible(
                     page,
                     (
-                        "a:has-text('Spielbericht anlegen')",
-                        "button:has-text('Spielbericht anlegen')",
+                        f"a[href*='news_edit2'][href*='match_id={match_id}']",
+                        "a:has-text('Neuen Spielbericht schreiben')",
                         "a:has-text('Spielbericht bearbeiten')",
+                        "button:has-text('Neuen Spielbericht schreiben')",
                         "button:has-text('Spielbericht bearbeiten')",
-                        "a[href*='spielbericht']",
-                        "a[href*='match-report']",
                     ),
                 )
                 if open_editor is None:
+                    section_toggle = self._first_visible(
+                        page,
+                        (
+                            "button:has-text('Spielbericht schreiben')",
+                            "a:has-text('Spielbericht schreiben')",
+                            "summary:has-text('Spielbericht schreiben')",
+                            "[role='button']:has-text('Spielbericht schreiben')",
+                            "[onclick]:has-text('Spielbericht schreiben')",
+                            "text=Spielbericht schreiben",
+                        ),
+                    )
+                    if section_toggle is not None:
+                        section_toggle.click(timeout=timeout)
+                        open_editor = self._first_visible(
+                            page,
+                            (
+                                f"a[href*='news_edit2'][href*='match_id={match_id}']",
+                                "a:has-text('Neuen Spielbericht schreiben')",
+                                "a:has-text('Spielbericht bearbeiten')",
+                                "button:has-text('Neuen Spielbericht schreiben')",
+                                "button:has-text('Spielbericht bearbeiten')",
+                            ),
+                        )
+                if open_editor is None:
                     raise FupaBrowserPublishError(
                         "ui_changed",
-                        "FuPa zeigt für dieses Konto keine bearbeitbare Spielberichtsfunktion an. Bitte Vereinsrecht und Spielzuordnung bei FuPa prüfen.",
+                        "FuPa zeigt im vorgesehenen Spiel keine bearbeitbare Spielberichtsfunktion an. Bitte Vereinsrecht und Spielzuordnung bei FuPa prüfen.",
                     )
                 open_editor.click(timeout=timeout)
                 page.wait_for_load_state("domcontentloaded", timeout=timeout)
@@ -220,6 +295,7 @@ class BrowserFupaPublisher(FupaPublisher):
                     scoped_values=association_values,
                     home_team=str(context.facts.get("home_team") or ""),
                     away_team=str(context.facts.get("away_team") or ""),
+                    expected_match_id=match_id,
                 ):
                     raise FupaBrowserPublishError(
                         "match_association_missing",
@@ -231,6 +307,9 @@ class BrowserFupaPublisher(FupaPublisher):
                     (
                         "input[name='headline']",
                         "input[name='title']",
+                        "input[name*='headline' i]",
+                        "input[name*='title' i]",
+                        "input[name*='schlagzeile' i]",
                         "input[aria-label*='Überschrift']",
                         "input[placeholder*='Überschrift']",
                         "input[aria-label*='Schlagzeile']",
@@ -245,6 +324,8 @@ class BrowserFupaPublisher(FupaPublisher):
                         "textarea[name='body']",
                         "textarea[aria-label*='Spielbericht']",
                         "textarea[placeholder*='Spielbericht']",
+                        ".ck-editor__editable[contenteditable='true']",
+                        "[contenteditable='true'][role='textbox']",
                         "[contenteditable='true']",
                     ),
                     ("Spielbericht", "Haupttext"),
@@ -282,7 +363,8 @@ class BrowserFupaPublisher(FupaPublisher):
                         "button:has-text('Speichern')",
                         "button:has-text('Veröffentlichen')",
                         "button:has-text('Online stellen')",
-                        "input[type='submit']",
+                        "input[type='submit'][value='Speichern']",
+                        "input[type='submit'][value*='Spielbericht speichern']",
                     ),
                 )
                 if submit is None:
@@ -314,6 +396,8 @@ class BrowserFupaPublisher(FupaPublisher):
                 success_markers = (
                     "spielbericht wurde gespeichert",
                     "spielbericht erfolgreich gespeichert",
+                    "der entwurf wurde gespeichert",
+                    "entwurf gespeichert",
                     "erfolgreich veröffentlicht",
                     "änderungen gespeichert",
                 )
