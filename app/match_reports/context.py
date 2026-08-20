@@ -272,6 +272,14 @@ def build_match_content_context(db: Session, game_id: str) -> MatchContentContex
                 "messenger_feedback",
             ],
             "snapshot_id": snapshot.id if snapshot else None,
+            # FuPa's authenticated editor is addressed by this numeric ID.
+            # Keep it in provenance instead of user-facing facts so it cannot
+            # accidentally become part of the editorial AI prompt.
+            "fupa_match_id": (
+                snapshot.source_metadata.get("match_id")
+                if snapshot and isinstance(snapshot.source_metadata, dict)
+                else None
+            ),
             "score_candidates": {key: list(value) for key, value in score_candidates.items()},
         },
         conflicts=tuple(conflicts),
