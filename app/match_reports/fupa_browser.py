@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import unicodedata
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -38,6 +40,52 @@ def _is_fupa_url(value: str | None) -> bool:
     return parsed.scheme == "https" and (host == "fupa.net" or host.endswith(".fupa.net"))
 
 
+def _normalize_identity(value: str | None) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "").casefold()
+    return " ".join(re.findall(r"[a-z0-9äöüß]+", normalized))
+
+
+def _source_match_key(source_url: str) -> str:
+    path_parts = [part for part in urlparse(source_url).path.split("/") if part]
+    if "match" not in path_parts:
+        return ""
+    match_index = path_parts.index("match")
+    if match_index + 1 >= len(path_parts):
+        return ""
+    return _normalize_identity(unquote(path_parts[match_index + 1]))
+
+
+def _match_association_confirmed(
+    *,
+    source_url: str,
+    editor_url: str,
+    visible_text: str,
+    scoped_values: tuple[str, ...],
+    home_team: str,
+    away_team: str,
+) -> bool:
+    """Require match-specific evidence that FuPa selected the intended game.
+
+    The report text itself must never be passed as evidence: otherwise content
+    filled by this provider could make an unrelated club-news editor appear to
+    be associated with the match.
+    """
+
+    scoped_evidence = _normalize_identity(" ".join((editor_url, *scoped_values)))
+    match_key = _source_match_key(source_url)
+    if match_key and match_key in scoped_evidence:
+        return True
+
+    page_evidence = _normalize_identity(" ".join((visible_text, *scoped_values)))
+    home = _normalize_identity(home_team)
+    away = _normalize_identity(away_team)
+    return bool(home and away and home in page_evidence and away in page_evidence)
+
+
+def _normalize_editor_content(value: str | None) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value or "").split())
+
+
 class BrowserFupaPublisher(FupaPublisher):
     """Submit one approved report through an already authenticated FuPa session.
 
@@ -67,14 +115,61 @@ class BrowserFupaPublisher(FupaPublisher):
             )
 
     @staticmethod
-    def _first_visible(page, selectors: tuple[str, ...]):
+    def _first_visible(page, selectors: tuple[str, ...], labels: tuple[str, ...] = ()):
         for selector in selectors:
             locator = page.locator(selector)
             for index in range(min(locator.count(), 5)):
                 candidate = locator.nth(index)
                 if candidate.is_visible():
                     return candidate
+        for label in labels:
+            locator = page.get_by_label(label, exact=False)
+            for index in range(min(locator.count(), 5)):
+                candidate = locator.nth(index)
+                if candidate.is_visible():
+                    return candidate
         return None
+
+    @staticmethod
+    def _association_values(page) -> tuple[str, ...]:
+        selectors = (
+            "input[name*='match' i]",
+            "input[name*='game' i]",
+            "input[name*='spiel' i]",
+            "select[name*='match' i]",
+            "select[name*='game' i]",
+            "select[name*='spiel' i]",
+            "[data-match-id]",
+            "[data-game-id]",
+            "[data-spiel-id]",
+        )
+        values: list[str] = []
+        for selector in selectors:
+            locator = page.locator(selector)
+            for index in range(min(locator.count(), 25)):
+                candidate = locator.nth(index)
+                for attribute in (
+                    "value",
+                    "data-match-id",
+                    "data-game-id",
+                    "data-spiel-id",
+                ):
+                    value = candidate.get_attribute(attribute)
+                    if value:
+                        values.append(value)
+                try:
+                    text = candidate.inner_text(timeout=1000)
+                except Exception:
+                    text = ""
+                if text:
+                    values.append(text)
+        return tuple(values)
+
+    @staticmethod
+    def _field_value(locator) -> str:
+        if (locator.get_attribute("contenteditable") or "").casefold() == "true":
+            return locator.inner_text(timeout=5000)
+        return locator.input_value(timeout=5000)
 
     def publish(self, *, context, version, idempotency_key: str) -> FupaPublishResult:
         source_url = str(context.facts.get("source_url") or "")
@@ -116,6 +211,21 @@ class BrowserFupaPublisher(FupaPublisher):
                 page.wait_for_load_state("domcontentloaded", timeout=timeout)
                 self._detect_blocked_state(page)
 
+                prefill_text = page.locator("body").inner_text(timeout=5000)[:50000]
+                association_values = self._association_values(page)
+                if not _match_association_confirmed(
+                    source_url=source_url,
+                    editor_url=page.url,
+                    visible_text=prefill_text,
+                    scoped_values=association_values,
+                    home_team=str(context.facts.get("home_team") or ""),
+                    away_team=str(context.facts.get("away_team") or ""),
+                ):
+                    raise FupaBrowserPublishError(
+                        "match_association_missing",
+                        "FuPa hat nur den allgemeinen Vereinsnachrichten-Editor geöffnet und keine eindeutige Zuordnung zum vorgesehenen Spiel geliefert. Es wurde nichts ausgefüllt oder gespeichert.",
+                    )
+
                 headline = self._first_visible(
                     page,
                     (
@@ -123,7 +233,10 @@ class BrowserFupaPublisher(FupaPublisher):
                         "input[name='title']",
                         "input[aria-label*='Überschrift']",
                         "input[placeholder*='Überschrift']",
+                        "input[aria-label*='Schlagzeile']",
+                        "input[placeholder*='Schlagzeile']",
                     ),
+                    ("Überschrift", "Schlagzeile"),
                 )
                 body = self._first_visible(
                     page,
@@ -134,6 +247,7 @@ class BrowserFupaPublisher(FupaPublisher):
                         "textarea[placeholder*='Spielbericht']",
                         "[contenteditable='true']",
                     ),
+                    ("Spielbericht", "Haupttext"),
                 )
                 if headline is None or body is None:
                     raise FupaBrowserPublishError(
@@ -150,6 +264,16 @@ class BrowserFupaPublisher(FupaPublisher):
                     page.keyboard.insert_text(text)
                 else:
                     body.fill(text)
+
+                saved_headline = self._field_value(headline)
+                saved_body = self._field_value(body)
+                if _normalize_editor_content(saved_headline) != _normalize_editor_content(
+                    version.headline[:300]
+                ) or _normalize_editor_content(saved_body) != _normalize_editor_content(text):
+                    raise FupaBrowserPublishError(
+                        "editor_fill_failed",
+                        "FuPa hat Überschrift oder Berichtstext nicht vollständig in den spielbezogenen Editor übernommen. Es wurde nichts gespeichert.",
+                    )
 
                 submit = self._first_visible(
                     page,
@@ -177,13 +301,26 @@ class BrowserFupaPublisher(FupaPublisher):
                 self._detect_blocked_state(page)
                 page.wait_for_timeout(750)
                 visible_text = page.locator("body").inner_text(timeout=5000).casefold()[:20000]
+                failure_markers = (
+                    "entwurf wurde noch nicht gespeichert",
+                    "konnte nicht gespeichert werden",
+                    "speichern fehlgeschlagen",
+                )
+                if any(marker in visible_text for marker in failure_markers):
+                    raise FupaBrowserPublishError(
+                        "unconfirmed_submission",
+                        "FuPa hat den Bericht nicht als gespeichert bestätigt. Die Vereinszentrale markiert ihn deshalb nicht als übertragen.",
+                    )
                 success_markers = (
                     "spielbericht wurde gespeichert",
                     "spielbericht erfolgreich gespeichert",
                     "erfolgreich veröffentlicht",
                     "änderungen gespeichert",
                 )
-                editor_still_visible = headline.is_visible() and body.is_visible()
+                try:
+                    editor_still_visible = headline.is_visible() and body.is_visible()
+                except Exception:
+                    editor_still_visible = False
                 if not any(marker in visible_text for marker in success_markers) and (
                     page.url == editor_url or editor_still_visible
                 ):
