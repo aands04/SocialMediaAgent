@@ -84,6 +84,19 @@ def _admin_match_report_url(match_id: int) -> str:
     return f"https://admin.fupa.net/fupa/admin/spielbericht.php?spiel={match_id}"
 
 
+def _is_exact_match_destination(
+    value: str,
+    *,
+    match_id: int,
+    path_markers: tuple[str, ...],
+) -> bool:
+    parsed = urlparse(value)
+    destination = f"{parsed.path}?{parsed.query}".casefold()
+    return any(marker.casefold() in destination for marker in path_markers) and (
+        _url_match_id(value) == match_id
+    )
+
+
 def _match_association_confirmed(
     *,
     source_url: str,
@@ -228,11 +241,11 @@ class BrowserFupaPublisher(FupaPublisher):
         for index in range(min(links.count(), 300)):
             candidate = links.nth(index)
             href = candidate.get_attribute("href") or ""
-            parsed = urlparse(href)
-            destination = f"{parsed.path}?{parsed.query}".casefold()
-            if not any(marker.casefold() in destination for marker in path_markers):
-                continue
-            if _url_match_id(href) != match_id:
+            if not _is_exact_match_destination(
+                href,
+                match_id=match_id,
+                path_markers=path_markers,
+            ):
                 continue
             if visible_only and not candidate.is_visible():
                 continue
@@ -285,12 +298,19 @@ class BrowserFupaPublisher(FupaPublisher):
                         self._detect_blocked_state(page)
                         report_context_confirmed = _url_match_id(page.url) == match_id
 
-                open_editor = self._exact_match_link(
-                    page,
+                editor_already_open = _is_exact_match_destination(
+                    page.url,
                     match_id=match_id,
                     path_markers=("news_edit2",),
                 )
-                if open_editor is None:
+                open_editor = None
+                if not editor_already_open:
+                    open_editor = self._exact_match_link(
+                        page,
+                        match_id=match_id,
+                        path_markers=("news_edit2",),
+                    )
+                if open_editor is None and not editor_already_open:
                     hidden_exact_editor = self._exact_match_link(
                         page,
                         match_id=match_id,
@@ -316,12 +336,20 @@ class BrowserFupaPublisher(FupaPublisher):
                         section_toggle = None
                     if section_toggle is not None:
                         section_toggle.click(timeout=timeout)
-                        open_editor = self._exact_match_link(
-                            page,
+                        page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                        self._detect_blocked_state(page)
+                        editor_already_open = _is_exact_match_destination(
+                            page.url,
                             match_id=match_id,
                             path_markers=("news_edit2",),
                         )
-                if open_editor is None and report_context_confirmed:
+                        if not editor_already_open:
+                            open_editor = self._exact_match_link(
+                                page,
+                                match_id=match_id,
+                                path_markers=("news_edit2",),
+                            )
+                if open_editor is None and not editor_already_open and report_context_confirmed:
                     # Some FuPa variants expose a JavaScript button without an
                     # href. It may be used only from the already attested game
                     # page; the destination is verified again before any input.
@@ -334,14 +362,15 @@ class BrowserFupaPublisher(FupaPublisher):
                             "button:has-text('Spielbericht bearbeiten')",
                         ),
                     )
-                if open_editor is None:
+                if open_editor is None and not editor_already_open:
                     raise FupaBrowserPublishError(
                         "match_association_missing",
                         "FuPa hat keinen eindeutig diesem Spiel zugeordneten Berichtseditor geöffnet. Es wurde nichts ausgefüllt oder gespeichert.",
                     )
-                open_editor.click(timeout=timeout)
-                page.wait_for_load_state("domcontentloaded", timeout=timeout)
-                self._detect_blocked_state(page)
+                if open_editor is not None:
+                    open_editor.click(timeout=timeout)
+                    page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                    self._detect_blocked_state(page)
 
                 prefill_text = page.locator("body").inner_text(timeout=5000)[:50000]
                 association_values = self._association_values(page)
@@ -492,4 +521,3 @@ class BrowserFupaPublisher(FupaPublisher):
                 "provider_error",
                 "Die FuPa-Browserübergabe ist technisch fehlgeschlagen. Es wurde keine erfolgreiche Übertragung bestätigt.",
             ) from exc
-
