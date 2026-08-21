@@ -38,6 +38,7 @@ from app.posts.service import (
     create_matchday_bundle_posts,
     create_post,
     feed_time,
+    rerender_post,
 )
 from app.prompts.service import ResolvedPrompt
 from app.publishing.presentation import operational_channels, publication_views
@@ -761,6 +762,75 @@ def test_selected_member_version_repairs_frozen_carousel_position(db, tmp_path):
     assert primary.status == PostStatus.REAPPROVAL
     assert primary.version == primary_version + 1
     assert cancelled_feed.status == JobStatus.CANCELLED
+
+
+@pytest.mark.parametrize("member_index", [0, 1])
+def test_targeted_bundle_rerender_replaces_only_its_carousel_position(
+    db,
+    tmp_path,
+    member_index,
+):
+    page = _page(db)
+    first = _team(db, page, number=1, mode="announcements")
+    second = _team(db, page, number=2, mode="announcements")
+    first_game = _game(db, first, hour=15, number=1)
+    second_game = _game(db, second, hour=13, number=2)
+    first_post = _feed_post(db, tmp_path, first, first_game, number=1)
+    second_post = _feed_post(db, tmp_path, second, second_game, number=2)
+    state = coordinate_club_matchday_feed(db, first_post, requested_by=None)
+    db.flush()
+
+    members_by_id = {first_post.id: first_post, second_post.id: second_post}
+    ordered_members = [members_by_id[member_id] for member_id in state.member_post_ids]
+    primary = db.get(Post, state.primary_post_id)
+    target = ordered_members[member_index]
+    target_slots = synchronize_post_versions(db, target, legacy_import=True)
+    slot = next(item for item in target_slots if item.media_kind == "feed")
+    carousel = db.query(PublicationJob).filter_by(
+        post_id=primary.id,
+        kind="carousel",
+    ).one()
+    before = {
+        item.position: item.media_path
+        for item in db.query(PublicationMediaItem)
+        .filter_by(publication_job_id=carousel.id)
+        .order_by(PublicationMediaItem.position)
+        .all()
+    }
+    target_position = member_index + 1
+    primary.status = PostStatus.APPROVED
+    primary.approved_version = primary.version
+    carousel.status = JobStatus.SCHEDULED
+    carousel.approval_status = "approved"
+    carousel.approved_post_version = primary.version
+    db.flush()
+
+    rerender_post(
+        db,
+        target,
+        LocalRenderer(tmp_path / f"rerender-{member_index}"),
+        rerender_feed=True,
+        feed_positions=[slot.output_position],
+        revision_mode="full_regenerate",
+        target_media_slot_id=slot.id,
+    )
+    db.flush()
+
+    after_items = (
+        db.query(PublicationMediaItem)
+        .filter_by(publication_job_id=carousel.id)
+        .order_by(PublicationMediaItem.position)
+        .all()
+    )
+    after = {item.position: item.media_path for item in after_items}
+    assert len(after_items) == 2
+    assert after[target_position] != before[target_position]
+    for position in before:
+        if position != target_position:
+            assert after[position] == before[position]
+    assert carousel.status == JobStatus.UNAPPROVED
+    assert carousel.approval_status == "reapproval_required"
+    assert primary.status == PostStatus.REAPPROVAL
 
 
 def test_default_order_prefers_first_team_even_when_second_team_plays_earlier(db):
