@@ -22,6 +22,7 @@ from app.match_reports.fupa_browser import (
     FupaBrowserPublishError,
     _admin_match_report_url,
     _context_match_id,
+    _is_exact_match_destination,
     _match_association_confirmed,
     _normalize_editor_content,
     _url_match_id,
@@ -143,6 +144,29 @@ def test_fupa_admin_match_report_url_and_parser_are_exact():
     assert url == "https://admin.fupa.net/fupa/admin/spielbericht.php?spiel=14917720"
     assert _url_match_id(url) == 14917720
     assert _url_match_id("https://admin.fupa.net/fupa/admin/index.php?spiel=invalid") is None
+
+
+def test_fupa_browser_recognizes_direct_exact_editor_navigation():
+    exact_editor = (
+        "https://admin.fupa.net/fupa/admin/index.php?page=news_edit2&aktion=edit"
+        "&news_id=3208495&kategorie=58&match_id=14916867"
+    )
+
+    assert _is_exact_match_destination(
+        exact_editor,
+        match_id=14916867,
+        path_markers=("news_edit2",),
+    )
+    assert not _is_exact_match_destination(
+        exact_editor,
+        match_id=14916868,
+        path_markers=("news_edit2",),
+    )
+    assert not _is_exact_match_destination(
+        "https://admin.fupa.net/fupa/admin/index.php?page=news_edit2",
+        match_id=14916867,
+        path_markers=("news_edit2",),
+    )
 
 
 class _FakeLink:
@@ -1060,4 +1084,3 @@ def test_delete_published_report_is_blocked(db):
 
     with pytest.raises(RuntimeError, match="kann nicht gelöscht werden"):
         delete_unpublished_report(db, report, user_id=user.id)
-
