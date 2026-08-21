@@ -536,7 +536,7 @@ def freeze_publication_versions(db: Session, post: Post, jobs: list[PublicationJ
             job.text_snapshot = selected_text.text
 
 
-def _invalidate_post_approval(post: Post) -> None:
+def invalidate_post_approval(post: Post) -> None:
     post.version += 1
     post.approved_version = None
     post.approved_by = None
@@ -565,7 +565,7 @@ def _copy_version_to_media_item(
     media.height = version.height
 
 
-def _synchronize_bundle_publication_version(
+def synchronize_bundle_publication_version(
     db: Session,
     post: Post,
     slot: GeneratedMediaSlot,
@@ -713,7 +713,7 @@ def select_media_version(
     selection_changed = not (
         slot.selected_version_id == version.id and slot.selection_mode == "manual"
     )
-    primary, bundle_changed = _synchronize_bundle_publication_version(
+    primary, bundle_changed = synchronize_bundle_publication_version(
         db,
         post,
         slot,
@@ -728,7 +728,7 @@ def select_media_version(
     if bundle_changed and primary is not None:
         posts_to_invalidate[primary.id] = primary
     for affected_post in posts_to_invalidate.values():
-        _invalidate_post_approval(affected_post)
+        invalidate_post_approval(affected_post)
     for job in db.scalars(
         select(PublicationJob).where(
             PublicationJob.club_id == post.club_id,
@@ -785,7 +785,7 @@ def select_latest_media_automatically(
     selection_changed = not (
         slot.selection_mode == "auto_latest" and slot.selected_version_id == latest.id
     )
-    primary, bundle_changed = _synchronize_bundle_publication_version(
+    primary, bundle_changed = synchronize_bundle_publication_version(
         db,
         post,
         slot,
@@ -800,7 +800,7 @@ def select_latest_media_automatically(
     if bundle_changed and primary is not None:
         posts_to_invalidate[primary.id] = primary
     for affected_post in posts_to_invalidate.values():
-        _invalidate_post_approval(affected_post)
+        invalidate_post_approval(affected_post)
     open_jobs = list(
         db.scalars(
             select(PublicationJob).where(

@@ -1577,6 +1577,19 @@ def rerender_post(
     )
     if target_media_slot_id and not targeted_slot:
         raise RerenderConflict("Die ausgewählte Medienausgabe gehört nicht zu diesem Beitrag")
+    targeted_bundle_feed = False
+    if targeted_slot and targeted_slot.media_kind == "feed":
+        bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
+        if bundle.get("primary_post_id") and bundle.get("member_post_ids"):
+            from app.posts.club_carousel import (
+                ClubCarouselConflict,
+                matchday_bundle_posts,
+            )
+
+            try:
+                targeted_bundle_feed = len(matchday_bundle_posts(db, post)) > 1
+            except ClubCarouselConflict as exc:
+                raise RerenderConflict(str(exc)) from exc
     if revision_mode == "targeted_edit":
         targeted_source = db.scalar(
             select(GeneratedMediaVersion).where(
@@ -1700,6 +1713,7 @@ def rerender_post(
     feed_design = old_snapshot.get("feed")
     feed_prompt = None
     feed_paths = []
+    targeted_feed_position: int | None = None
     if rerender_feed:
         feed_design = _design(db, team.feed_template, post.post_type, "feed")
         post.feed_version += 1
@@ -1745,17 +1759,21 @@ def rerender_post(
             position < 1 or position > feed_output_count for position in selected_feed_positions
         ):
             raise RerenderConflict("Ungültige Auswahl der Feed-Ausgaben")
-        if any(job.kind == "carousel" for job in jobs) and feed_output_count == 1:
+        if (
+            any(job.kind == "carousel" for job in jobs)
+            and feed_output_count == 1
+            and not targeted_bundle_feed
+        ):
             raise RerenderConflict(
                 "Ein gebündelter Vereins-Karussellbeitrag kann nicht über die normale Feed-Neugenerierung geändert werden"
             )
         if targeted_slot and targeted_slot.media_kind == "feed":
-            targeted_position = (
+            targeted_feed_position = (
                 targeted_slot.variant_number
                 if structured_feed_variants
                 else targeted_slot.output_position
             )
-            if selected_feed_positions != {targeted_position}:
+            if selected_feed_positions != {targeted_feed_position}:
                 raise RerenderConflict(
                     "Die gezielte Bearbeitung darf genau eine Feed-Ausgabe verändern"
                 )
@@ -1818,6 +1836,12 @@ def rerender_post(
         post.feed_path = feed_paths[0]
     for job in jobs:
         if job.kind in {"feed", "carousel"} and rerender_feed:
+            # The club carousel freezes one feed image from every member post.
+            # A targeted rerender is propagated to that exact position below;
+            # rebuilding this job from the current member's one-item feed list
+            # would otherwise delete every sibling image in the carousel.
+            if job.kind == "carousel" and targeted_bundle_feed:
+                continue
             job.media_path = post.feed_path
             job.version += 1
             job.idempotency_key = f"{post.id}:{job.kind}:v{post.feed_version}"
@@ -2088,6 +2112,42 @@ def rerender_post(
                 "Eigenes Mannschaftslogo fehlt; der Beitrag darf nicht freigegeben werden",
             }
         ]
+    bundle_primary: Post | None = None
+    bundle_publication_changed = False
+    if (
+        targeted_bundle_feed
+        and rerender_feed
+        and targeted_slot
+        and targeted_feed_position is not None
+    ):
+        from app.posts.media_versions import (
+            MediaVersionError,
+            register_media_version,
+            synchronize_bundle_publication_version,
+        )
+
+        try:
+            generated_version = register_media_version(
+                db,
+                post,
+                targeted_slot,
+                feed_paths[targeted_feed_position - 1],
+            )
+            selected_version = (
+                db.get(GeneratedMediaVersion, targeted_slot.selected_version_id)
+                if targeted_slot.selected_version_id
+                else None
+            ) or generated_version
+            bundle_primary, bundle_publication_changed = (
+                synchronize_bundle_publication_version(
+                    db,
+                    post,
+                    targeted_slot,
+                    selected_version,
+                )
+            )
+        except (IndexError, MediaVersionError) as exc:
+            raise RerenderConflict(str(exc)) from exc
     was_approved = post.status in {PostStatus.APPROVED, PostStatus.SCHEDULED, PostStatus.PARTIAL}
     post.version += 1
     if was_approved:
@@ -2099,6 +2159,10 @@ def rerender_post(
                 job.approval_status = "reapproval_required"
                 job.approved_post_version = None
                 job.error = "Grafiken wurden neu erzeugt; erneute Freigabe erforderlich"
+    if bundle_publication_changed and bundle_primary and bundle_primary.id != post.id:
+        from app.posts.media_versions import invalidate_post_approval
+
+        invalidate_post_approval(bundle_primary)
     from app.posts.media_versions import synchronize_post_versions
 
     synchronize_post_versions(db, post)
