@@ -207,6 +207,38 @@ class BrowserFupaPublisher(FupaPublisher):
             return locator.inner_text(timeout=5000)
         return locator.input_value(timeout=5000)
 
+    @staticmethod
+    def _exact_match_link(
+        page,
+        *,
+        match_id: int,
+        path_markers: tuple[str, ...],
+        visible_only: bool = True,
+    ):
+        """Return a link whose own URL proves the numeric FuPa match association.
+
+        FuPa sometimes redirects the direct ``spielbericht.php`` request back to
+        a team schedule or rewrites the surrounding page URL.  The match-specific
+        links rendered in that page remain the authoritative navigation target.
+        Inspecting their href keeps the fail-closed association guarantee without
+        requiring FuPa to preserve the originally requested URL verbatim.
+        """
+
+        links = page.locator("a[href]")
+        for index in range(min(links.count(), 300)):
+            candidate = links.nth(index)
+            href = candidate.get_attribute("href") or ""
+            parsed = urlparse(href)
+            destination = f"{parsed.path}?{parsed.query}".casefold()
+            if not any(marker.casefold() in destination for marker in path_markers):
+                continue
+            if _url_match_id(href) != match_id:
+                continue
+            if visible_only and not candidate.is_visible():
+                continue
+            return candidate
+        return None
+
     def publish(self, *, context, version, idempotency_key: str) -> FupaPublishResult:
         source_url = str(context.facts.get("source_url") or "")
         if not _is_fupa_url(source_url):
@@ -237,50 +269,75 @@ class BrowserFupaPublisher(FupaPublisher):
                 )
                 self._detect_blocked_state(page)
 
-                if _url_match_id(page.url) != match_id:
-                    raise FupaBrowserPublishError(
-                        "match_association_missing",
-                        "FuPa hat nicht den vorgesehenen spielbezogenen Verwaltungsbereich geöffnet. Es wurde nichts ausgefüllt oder gespeichert.",
+                report_context_confirmed = _url_match_id(page.url) == match_id
+                if not report_context_confirmed:
+                    # The legacy FuPa administration may redirect to the team
+                    # schedule. Follow only a link that carries the exact trusted
+                    # numeric match ID; never select a row by team name or order.
+                    exact_report_link = self._exact_match_link(
+                        page,
+                        match_id=match_id,
+                        path_markers=("spielbericht.php",),
                     )
+                    if exact_report_link is not None:
+                        exact_report_link.click(timeout=timeout)
+                        page.wait_for_load_state("domcontentloaded", timeout=timeout)
+                        self._detect_blocked_state(page)
+                        report_context_confirmed = _url_match_id(page.url) == match_id
 
-                open_editor = self._first_visible(
+                open_editor = self._exact_match_link(
                     page,
-                    (
-                        f"a[href*='news_edit2'][href*='match_id={match_id}']",
-                        "a:has-text('Neuen Spielbericht schreiben')",
-                        "a:has-text('Spielbericht bearbeiten')",
-                        "button:has-text('Neuen Spielbericht schreiben')",
-                        "button:has-text('Spielbericht bearbeiten')",
-                    ),
+                    match_id=match_id,
+                    path_markers=("news_edit2",),
                 )
                 if open_editor is None:
-                    section_toggle = self._first_visible(
+                    hidden_exact_editor = self._exact_match_link(
                         page,
-                        (
-                            "button:has-text('Spielbericht schreiben')",
-                            "a:has-text('Spielbericht schreiben')",
-                            "summary:has-text('Spielbericht schreiben')",
-                            "[role='button']:has-text('Spielbericht schreiben')",
-                            "[onclick]:has-text('Spielbericht schreiben')",
-                            "text=Spielbericht schreiben",
-                        ),
+                        match_id=match_id,
+                        path_markers=("news_edit2",),
+                        visible_only=False,
                     )
-                    if section_toggle is not None:
-                        section_toggle.click(timeout=timeout)
-                        open_editor = self._first_visible(
+                    # Text-only controls are safe only while the current page URL
+                    # itself still attests the exact game, or while the collapsed
+                    # section already contains an exact hidden editor link.
+                    if report_context_confirmed or hidden_exact_editor is not None:
+                        section_toggle = self._first_visible(
                             page,
                             (
-                                f"a[href*='news_edit2'][href*='match_id={match_id}']",
-                                "a:has-text('Neuen Spielbericht schreiben')",
-                                "a:has-text('Spielbericht bearbeiten')",
-                                "button:has-text('Neuen Spielbericht schreiben')",
-                                "button:has-text('Spielbericht bearbeiten')",
+                                "button:has-text('Spielbericht schreiben')",
+                                "a:has-text('Spielbericht schreiben')",
+                                "summary:has-text('Spielbericht schreiben')",
+                                "[role='button']:has-text('Spielbericht schreiben')",
+                                "[onclick]:has-text('Spielbericht schreiben')",
+                                "text=Spielbericht schreiben",
                             ),
                         )
+                    else:
+                        section_toggle = None
+                    if section_toggle is not None:
+                        section_toggle.click(timeout=timeout)
+                        open_editor = self._exact_match_link(
+                            page,
+                            match_id=match_id,
+                            path_markers=("news_edit2",),
+                        )
+                if open_editor is None and report_context_confirmed:
+                    # Some FuPa variants expose a JavaScript button without an
+                    # href. It may be used only from the already attested game
+                    # page; the destination is verified again before any input.
+                    open_editor = self._first_visible(
+                        page,
+                        (
+                            "a:has-text('Neuen Spielbericht schreiben')",
+                            "a:has-text('Spielbericht bearbeiten')",
+                            "button:has-text('Neuen Spielbericht schreiben')",
+                            "button:has-text('Spielbericht bearbeiten')",
+                        ),
+                    )
                 if open_editor is None:
                     raise FupaBrowserPublishError(
-                        "ui_changed",
-                        "FuPa zeigt im vorgesehenen Spiel keine bearbeitbare Spielberichtsfunktion an. Bitte Vereinsrecht und Spielzuordnung bei FuPa prüfen.",
+                        "match_association_missing",
+                        "FuPa hat keinen eindeutig diesem Spiel zugeordneten Berichtseditor geöffnet. Es wurde nichts ausgefüllt oder gespeichert.",
                     )
                 open_editor.click(timeout=timeout)
                 page.wait_for_load_state("domcontentloaded", timeout=timeout)
@@ -435,3 +492,4 @@ class BrowserFupaPublisher(FupaPublisher):
                 "provider_error",
                 "Die FuPa-Browserübergabe ist technisch fehlgeschlagen. Es wurde keine erfolgreiche Übertragung bestätigt.",
             ) from exc
+
