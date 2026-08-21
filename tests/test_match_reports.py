@@ -18,6 +18,7 @@ from app.match_reports.fupa import (
     validate_fupa_url,
 )
 from app.match_reports.fupa_browser import (
+    BrowserFupaPublisher,
     FupaBrowserPublishError,
     _admin_match_report_url,
     _context_match_id,
@@ -142,6 +143,78 @@ def test_fupa_admin_match_report_url_and_parser_are_exact():
     assert url == "https://admin.fupa.net/fupa/admin/spielbericht.php?spiel=14917720"
     assert _url_match_id(url) == 14917720
     assert _url_match_id("https://admin.fupa.net/fupa/admin/index.php?spiel=invalid") is None
+
+
+class _FakeLink:
+    def __init__(self, href: str, *, visible: bool = True):
+        self.href = href
+        self.visible = visible
+
+    def get_attribute(self, name: str):
+        return self.href if name == "href" else None
+
+    def is_visible(self) -> bool:
+        return self.visible
+
+
+class _FakeLinks:
+    def __init__(self, links: tuple[_FakeLink, ...]):
+        self.links = links
+
+    def count(self) -> int:
+        return len(self.links)
+
+    def nth(self, index: int) -> _FakeLink:
+        return self.links[index]
+
+
+class _FakePage:
+    def __init__(self, links: tuple[_FakeLink, ...]):
+        self.links = links
+
+    def locator(self, selector: str) -> _FakeLinks:
+        assert selector == "a[href]"
+        return _FakeLinks(self.links)
+
+
+def test_fupa_browser_follows_only_exact_match_link_after_redirect():
+    wrong = _FakeLink("spielbericht.php?spiel=14917719")
+    exact = _FakeLink("spielbericht.php?spiel=14917720")
+    page = _FakePage((wrong, exact))
+
+    selected = BrowserFupaPublisher._exact_match_link(
+        page,
+        match_id=14917720,
+        path_markers=("spielbericht.php",),
+    )
+
+    assert selected is exact
+
+
+def test_fupa_browser_does_not_treat_hidden_exact_link_as_visible():
+    exact = _FakeLink(
+        "index.php?page=news_edit2&aktion=edit&match_id=14917720",
+        visible=False,
+    )
+    page = _FakePage((exact,))
+
+    assert (
+        BrowserFupaPublisher._exact_match_link(
+            page,
+            match_id=14917720,
+            path_markers=("news_edit2",),
+        )
+        is None
+    )
+    assert (
+        BrowserFupaPublisher._exact_match_link(
+            page,
+            match_id=14917720,
+            path_markers=("news_edit2",),
+            visible_only=False,
+        )
+        is exact
+    )
 
 
 def test_fupa_context_match_id_reads_provenance_only():
@@ -987,3 +1060,4 @@ def test_delete_published_report_is_blocked(db):
 
     with pytest.raises(RuntimeError, match="kann nicht gelöscht werden"):
         delete_unpublished_report(db, report, user_id=user.id)
+
