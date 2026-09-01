@@ -258,12 +258,17 @@ Bestandsaufnahme vom 1. September 2026:
   grün und der Migrationscontainer war beim letzten Deployment mit Exit 0
   beendet; `/health` meldete dennoch `degraded` bei Web, Datenbank und Worker
   `ok`;
-- stärkste Ursache war der FUSSBALL.DE-Stalenesscheck: normale Mannschafts-
-  Synchronisierung kann alle 24 Stunden geplant sein, der Systemstatus wertet
-  bei globalen 1.800 Sekunden aber bereits mehr als 90 Minuten ohne Erfolg als
-  kritisch. Das Snapshot-Verzeichnis war rund 18 Stunden alt. Die exakte
-  Critical-Liste und eine möglicherweise zusätzlich ungesunde Social-Media-
-  Verbindung blieben ohne geschützte Systemstatus-/DB-Leseabfrage unbestätigt;
+- der lesende Produktionscheck bestätigte Alembic-Head `0034`, Worker-/
+  Scheduler-Gates, FUSSBALL.DE-Worker-Gates, Publishing-Gates und Proxygrenzen;
+- die Codeprüfung zeigte einen wahrscheinlichen systematischen Fehler im
+  FUSSBALL.DE-Stalenesscheck: normale Mannschaftssynchronisierung kann alle 24
+  Stunden geplant sein, der Systemstatus wertet bei globalen 1.800 Sekunden
+  aber bereits mehr als 90 Minuten ohne Erfolg als kritisch. Ein Zeitstempel
+  des Snapshot-Wurzelverzeichnisses beweist den letzten erfolgreichen Sync
+  nicht, weil automatische Snapshots in Mannschafts-Unterordnern liegen. Die
+  exakte Critical-Liste und eine möglicherweise zusätzlich ungesunde Social-
+  Media-Verbindung blieben ohne geschützte Systemstatus-/DB-Leseabfrage
+  unbestätigt;
 - Produktion hatte OpenAI-Text/Bild, FUSSBALL.DE-Sync, automatische
   Beitragserzeugung und Meta-Scheduler aktiviert; Multi-Tenancy, Billing und
   Selbstregistrierung waren deaktiviert;
