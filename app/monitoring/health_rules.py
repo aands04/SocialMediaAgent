@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
@@ -86,6 +87,13 @@ _HTTP_ERROR_PREFIXES = (
 
 
 class SocialHealthState(Protocol):
+    status: str
+    last_check_at: datetime | None
+    last_success_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class SocialHealthSnapshot:
     status: str
     last_check_at: datetime | None
     last_success_at: datetime | None

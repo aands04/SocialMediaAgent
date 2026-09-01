@@ -27,6 +27,7 @@ from app.monitoring.health_rules import (
     SOCIAL_CHANNEL_TYPES,
     SOCIAL_CONNECTION_STATUSES,
     SOCIAL_HEALTH_REASONS,
+    SocialHealthSnapshot,
     SocialHealthState,
     classify_fussball_provider_error,
     fussball_retry_scheduled,
@@ -35,6 +36,12 @@ from app.monitoring.health_rules import (
 )
 from app.monitoring.health_rules import (
     fussball_sync_stale_reason as _fussball_sync_stale_reason,
+)
+
+_MISSING_SOCIAL_HEALTH_STATE = SocialHealthSnapshot(
+    status="unknown",
+    last_check_at=None,
+    last_success_at=None,
 )
 
 
@@ -459,9 +466,9 @@ def system_status(db: Session, settings: Settings) -> dict:
         }
         instagram_rows = list(
             db.execute(
-                select(InstagramConnection, InstagramPage).join(
-                    InstagramPage,
-                    InstagramPage.id == InstagramConnection.instagram_page_id,
+                select(InstagramPage, InstagramConnection).outerjoin(
+                    InstagramConnection,
+                    InstagramConnection.instagram_page_id == InstagramPage.id,
                 )
             )
         )
@@ -477,10 +484,14 @@ def system_status(db: Session, settings: Settings) -> dict:
             seconds=max(3600, settings.meta_connection_check_interval_seconds * 2)
         )
         channel_health_ok = True
-        instagram_active = [connection for connection, page in instagram_rows if page.active]
+        instagram_active = [
+            connection if connection is not None else _MISSING_SOCIAL_HEALTH_STATE
+            for page, connection in instagram_rows
+            if page.active
+        ]
         instagram_enabled = [
-            connection
-            for connection, page in instagram_rows
+            connection if connection is not None else _MISSING_SOCIAL_HEALTH_STATE
+            for page, connection in instagram_rows
             if page.active and page.publishing_enabled
         ]
         channel_detail["instagram"], instagram_ok = _social_channel_health_detail(

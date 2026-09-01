@@ -401,6 +401,22 @@ def _persist_instagram_health_state(
     return connection, mirror
 
 
+def _persist_instagram_page_without_connection(db, *, publishing_enabled):
+    page = InstagramPage(
+        club_id=db.info["test_club_id"],
+        internal_name="instagram-without-connection",
+        display_name="Instagram Without Connection",
+        username="instagram-without-connection",
+        club="Monitoring Club",
+        active=True,
+        publishing_enabled=publishing_enabled,
+        connection_status="unconfigured",
+    )
+    db.add(page)
+    db.commit()
+    return page
+
+
 @pytest.mark.parametrize(
     ("enabled", "active", "archived"),
     [(False, True, False), (True, False, False), (True, True, True)],
@@ -563,6 +579,46 @@ def test_instagram_health_uses_fresh_authoritative_state_not_stale_mirror(db, tm
     ):
         assert forbidden not in serialized
     assert writes == []
+
+
+def test_instagram_health_fails_closed_for_enabled_page_without_connection(db, tmp_path):
+    _persist_instagram_page_without_connection(db, publishing_enabled=True)
+
+    with system_scope("Fehlende autoritative Instagram-Verbindung testen"):
+        payload = collect_health_details(db, _status_settings(tmp_path, enabled=False))
+
+    instagram = payload["checks"]["social_media_channels"]["detail"]["instagram"]
+    assert payload["checks"]["social_media_channels"]["ok"] is False
+    assert instagram == {
+        "enabled_connections": 1,
+        "unhealthy_connections": 1,
+        "non_connected_connections": 1,
+        "missing_last_success": 1,
+        "stale_last_success": 0,
+        "last_check_at": None,
+        "last_successful_check": None,
+        "status_counts": {"unknown": 1},
+    }
+
+
+def test_instagram_health_ignores_disabled_page_without_connection(db, tmp_path):
+    _persist_instagram_page_without_connection(db, publishing_enabled=False)
+
+    with system_scope("Deaktivierte Instagram-Seite ohne Verbindung testen"):
+        payload = collect_health_details(db, _status_settings(tmp_path, enabled=False))
+
+    instagram = payload["checks"]["social_media_channels"]["detail"]["instagram"]
+    assert payload["checks"]["social_media_channels"]["ok"] is True
+    assert instagram == {
+        "enabled_connections": 0,
+        "unhealthy_connections": 0,
+        "non_connected_connections": 0,
+        "missing_last_success": 0,
+        "stale_last_success": 0,
+        "last_check_at": None,
+        "last_successful_check": None,
+        "status_counts": {},
+    }
 
 
 def test_instagram_health_marks_stale_authoritative_connection(db, tmp_path):
