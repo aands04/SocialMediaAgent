@@ -52,6 +52,30 @@ def _unsafe_report():
                         "success_overdue": 1,
                         "team-id-with-private-data": 99,
                     },
+                    "unhealthy_teams": [
+                        {
+                            "display_name": "A-Jugend",
+                            "short_name": "U19",
+                            "status": "error",
+                            "stale_reason": "success_overdue",
+                            "sync_interval_hours": 24,
+                            "consecutive_failures": 7,
+                            "last_success_at": datetime(2026, 8, 30, 8, 0, tzinfo=timezone.utc),
+                            "last_completed_at": datetime(2026, 9, 1, 8, 25, tzinfo=timezone.utc),
+                            "next_poll_at": datetime(2026, 9, 1, 8, 55, tzinfo=timezone.utc),
+                            "retry_scheduled": True,
+                            "error_category": "upstream_http",
+                            "team_id": "private-team-id",
+                            "fussball_url": "https://example.invalid/team/private-team-id",
+                            "last_error": "token=provider-secret",
+                        },
+                        {
+                            "display_name": "Injected Team",
+                            "short_name": "BAD",
+                            "stale_reason": "private-stale-reason",
+                            "error_category": "private-error-category",
+                        },
+                    ],
                     "last_success": datetime(2026, 9, 1, tzinfo=timezone.utc),
                     "last_errors": {
                         "team-secret-id": "provider response contained private match data"
@@ -67,20 +91,39 @@ def _unsafe_report():
                         "active_connections": 4,
                         "enabled_connections": 2,
                         "unhealthy_connections": 1,
+                        "non_connected_connections": 1,
+                        "missing_last_success": 1,
+                        "stale_last_success": 0,
+                        "last_check_at": datetime(2026, 9, 1, 8, 30, tzinfo=timezone.utc),
                         "last_successful_check": datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc),
+                        "status_counts": {
+                            "connected": 1,
+                            "check_required": 1,
+                            "private-status": 99,
+                        },
                         "account_id": "instagram-account-id",
                         "access_token": "instagram-access-token",
                     },
                     "facebook": {
                         "enabled_connections": 1,
                         "unhealthy_connections": 0,
+                        "non_connected_connections": 0,
+                        "missing_last_success": 0,
+                        "stale_last_success": 0,
+                        "last_check_at": datetime(2026, 9, 1, 9, 30, tzinfo=timezone.utc),
                         "last_successful_check": datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc),
+                        "status_counts": {"connected": 1},
                         "connection_url": "https://example.invalid/?token=secret",
                     },
                     "whatsapp": {
                         "enabled_connections": 0,
                         "unhealthy_connections": 0,
+                        "non_connected_connections": 0,
+                        "missing_last_success": 0,
+                        "stale_last_success": 0,
+                        "last_check_at": None,
                         "last_successful_check": None,
+                        "status_counts": {},
                         "phone_number": "+49 000 000000",
                     },
                     "unexpected_provider": {
@@ -97,7 +140,7 @@ def _unsafe_report():
     }
 
 
-def test_health_details_uses_strict_allowlist_and_aggregates_channels():
+def test_health_details_uses_strict_allowlist_and_separates_channels():
     payload = sanitize_health_report(_unsafe_report())
 
     assert payload == {
@@ -125,6 +168,21 @@ def test_health_details_uses_strict_allowlist_and_aggregates_channels():
                         "poll_overdue": 1,
                         "success_overdue": 1,
                     },
+                    "unhealthy_teams": [
+                        {
+                            "display_name": "A-Jugend",
+                            "short_name": "U19",
+                            "status": "error",
+                            "stale_reason": "success_overdue",
+                            "sync_interval_hours": 24,
+                            "consecutive_failures": 7,
+                            "last_success_at": "2026-08-30T08:00:00+00:00",
+                            "last_completed_at": "2026-09-01T08:25:00+00:00",
+                            "next_poll_at": "2026-09-01T08:55:00+00:00",
+                            "retry_scheduled": True,
+                            "error_category": "upstream_http",
+                        }
+                    ],
                 },
             },
             "smb": {"ok": True},
@@ -132,9 +190,36 @@ def test_health_details_uses_strict_allowlist_and_aggregates_channels():
             "social_media_channels": {
                 "ok": False,
                 "detail": {
-                    "enabled_connections": 3,
-                    "unhealthy_connections": 1,
-                    "last_successful_check": "2026-09-01T09:00:00+00:00",
+                    "instagram": {
+                        "enabled_connections": 2,
+                        "unhealthy_connections": 1,
+                        "non_connected_connections": 1,
+                        "missing_last_success": 1,
+                        "stale_last_success": 0,
+                        "last_check_at": "2026-09-01T08:30:00+00:00",
+                        "last_successful_check": "2026-09-01T08:00:00+00:00",
+                        "status_counts": {"connected": 1, "check_required": 1},
+                    },
+                    "facebook": {
+                        "enabled_connections": 1,
+                        "unhealthy_connections": 0,
+                        "non_connected_connections": 0,
+                        "missing_last_success": 0,
+                        "stale_last_success": 0,
+                        "last_check_at": "2026-09-01T09:30:00+00:00",
+                        "last_successful_check": "2026-09-01T09:00:00+00:00",
+                        "status_counts": {"connected": 1},
+                    },
+                    "whatsapp": {
+                        "enabled_connections": 0,
+                        "unhealthy_connections": 0,
+                        "non_connected_connections": 0,
+                        "missing_last_success": 0,
+                        "stale_last_success": 0,
+                        "last_check_at": None,
+                        "last_successful_check": None,
+                        "status_counts": {},
+                    },
                 },
             },
         },
@@ -155,6 +240,13 @@ def test_health_details_uses_strict_allowlist_and_aggregates_channels():
         "diagnostic:password",
         "worker path",
         "private-team-id",
+        "fussball_url",
+        "example.invalid/team",
+        "provider-secret",
+        "private-stale-reason",
+        "private-error-category",
+        "Injected Team",
+        "private-status",
         "provider_token",
         "new_future_check",
         "global_generation_gate",
@@ -223,12 +315,47 @@ def test_health_details_tolerates_missing_optional_checks():
         "errors": None,
         "stale": None,
         "stale_reasons": {},
+        "unhealthy_teams": [],
     }
     assert payload["checks"]["social_media_channels"]["detail"] == {
-        "enabled_connections": None,
-        "unhealthy_connections": None,
-        "last_successful_check": None,
+        channel_type: {
+            "enabled_connections": None,
+            "unhealthy_connections": None,
+            "non_connected_connections": None,
+            "missing_last_success": None,
+            "stale_last_success": None,
+            "last_check_at": None,
+            "last_successful_check": None,
+            "status_counts": {},
+        }
+        for channel_type in ("instagram", "facebook", "whatsapp")
     }
+
+
+def test_unknown_connection_status_and_team_error_category_are_never_exposed():
+    report = _unsafe_report()
+    report["checks"]["social_media_channels"]["detail"]["facebook"]["status_counts"] = {
+        "connected": 1,
+        "token=private-status": 5,
+        "unknown": 2,
+    }
+    team = report["checks"]["fussball_automatic"]["detail"]["unhealthy_teams"][0]
+    team["error_category"] = "https://provider.invalid/?token=secret"
+    team["last_error"] = "access_token=secret team-id=private"
+
+    payload = sanitize_health_report(report)
+    serialized = json.dumps(payload)
+
+    assert payload["checks"]["social_media_channels"]["detail"]["facebook"]["status_counts"] == {
+        "connected": 1,
+        "unknown": 2,
+    }
+    assert (
+        payload["checks"]["fussball_automatic"]["detail"]["unhealthy_teams"][0]["error_category"]
+        == "unknown"
+    )
+    for forbidden in ("private-status", "provider.invalid", "access_token", "team-id"):
+        assert forbidden not in serialized
 
 
 def test_collect_health_details_executes_no_database_writes(db, tmp_path):

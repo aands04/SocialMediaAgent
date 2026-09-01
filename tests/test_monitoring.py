@@ -7,8 +7,15 @@ from fastapi.testclient import TestClient
 import app.main as main
 from app.config import Settings
 from app.db import get_db
-from app.models import FussballSyncState, Team
+from app.models import FussballSyncState, SocialChannelConnection, Team
+from app.monitoring.health_details import collect_health_details
+from app.monitoring.health_rules import (
+    classify_fussball_provider_error,
+    fussball_retry_scheduled,
+    social_connection_health_reasons,
+)
 from app.monitoring.service import _fussball_sync_stale_reason, system_status
+from app.tenancy.state import system_scope
 
 NOW = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
 
@@ -40,6 +47,9 @@ def _state(
     last_success_at=None,
     lease_expires_at=None,
     created_at=None,
+    last_completed_at=None,
+    consecutive_failures=0,
+    last_error=None,
 ):
     return FussballSyncState(
         team_id="team-monitoring",
@@ -49,6 +59,9 @@ def _state(
         last_success_at=last_success_at,
         lease_expires_at=lease_expires_at,
         created_at=created_at or NOW - timedelta(minutes=10),
+        last_completed_at=last_completed_at,
+        consecutive_failures=consecutive_failures,
+        last_error=last_error,
     )
 
 
@@ -190,6 +203,77 @@ def test_initial_state_without_success_gets_interval_and_grace():
     assert _reason(abandoned) == "success_overdue"
 
 
+def test_retry_scheduled_is_derived_only_from_future_next_poll():
+    assert fussball_retry_scheduled(
+        _state(next_poll_at=NOW + timedelta(seconds=1)),
+        now=NOW,
+    )
+    assert not fussball_retry_scheduled(_state(next_poll_at=NOW), now=NOW)
+    assert not fussball_retry_scheduled(
+        _state(next_poll_at=NOW - timedelta(seconds=1)),
+        now=NOW,
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "category"),
+    [
+        ("Nur öffentliche HTTPS-URLs von FUSSBALL.DE sind erlaubt", "invalid_source"),
+        (
+            "FUSSBALL.DE nicht erreichbar: Client error '503 Service Unavailable' "
+            "for url 'https://provider.invalid/?token=secret'",
+            "upstream_http",
+        ),
+        ("FUSSBALL.DE nicht erreichbar: ConnectError private-host", "upstream_network"),
+        ("Keine Spiele erkannt; HTML-Struktur oder Pflichtfelder prüfen", "parser_structure"),
+        (
+            "FUSSBALL.DE nicht erreichbar: FUSSBALL.DE-Antwort überschreitet das Größenlimit",
+            "response_limit",
+        ),
+        ("Ungültiger Snapshot-Pfad", "snapshot_storage"),
+        ("Unbekannte FUSSBALL.DE-AJAX-Ressource", "provider_error"),
+    ],
+)
+def test_known_fussball_provider_errors_use_fixed_categories(message, category):
+    assert classify_fussball_provider_error(message) == category
+
+
+def test_unknown_fussball_provider_error_is_not_copied():
+    raw = "token=secret https://provider.invalid/team/internal-id"
+    category = classify_fussball_provider_error(raw)
+
+    assert category == "unknown"
+    assert raw not in category
+
+
+def test_social_connection_health_reports_each_applicable_reason():
+    healthy = SocialChannelConnection(
+        status="connected",
+        last_success_at=NOW - timedelta(minutes=5),
+    )
+    multiple = SocialChannelConnection(status="disrupted", last_success_at=None)
+    stale = SocialChannelConnection(
+        status="connected",
+        last_success_at=NOW - timedelta(days=2),
+    )
+
+    assert (
+        social_connection_health_reasons(
+            healthy,
+            stale_before=NOW - timedelta(days=1),
+        )
+        == ()
+    )
+    assert social_connection_health_reasons(
+        multiple,
+        stale_before=NOW - timedelta(days=1),
+    ) == ("non_connected", "missing_last_success")
+    assert social_connection_health_reasons(
+        stale,
+        stale_before=NOW - timedelta(days=1),
+    ) == ("stale_last_success",)
+
+
 def _persist_sync(
     db,
     *,
@@ -198,20 +282,32 @@ def _persist_sync(
     enabled=True,
     active=True,
     archived=False,
+    team_id="team-persisted",
+    display_name="Persisted Team",
+    short_name="PST",
+    status="idle",
+    last_completed_at=None,
+    consecutive_failures=0,
+    last_error=None,
 ):
     team = _team(enabled=enabled, active=active, archived=archived)
-    team.id = "team-persisted"
+    team.id = team_id
     team.club_id = db.info["test_club_id"]
-    team.slug = "team-persisted"
+    team.slug = team_id
+    team.display_name = display_name
+    team.short_name = short_name
     db.add(team)
     db.flush()
     state = FussballSyncState(
         team_id=team.id,
         club_id=team.club_id,
-        status="idle",
+        status=status,
         next_poll_at=next_poll_at,
         last_success_at=last_success_at,
         created_at=last_success_at,
+        last_completed_at=last_completed_at,
+        consecutive_failures=consecutive_failures,
+        last_error=last_error,
     )
     db.add(state)
     db.commit()
@@ -276,6 +372,168 @@ def test_globally_disabled_sync_is_never_critical(db, tmp_path):
     report = system_status(db, _status_settings(tmp_path, enabled=False))
     assert report["checks"]["fussball_automatic"]["ok"] is True
     assert report["checks"]["fussball_automatic"]["detail"]["stale"] == 0
+
+
+def test_health_details_lists_only_unhealthy_teams_without_ids_urls_or_raw_errors(db, tmp_path):
+    now = datetime.now(timezone.utc)
+    _persist_sync(
+        db,
+        team_id="healthy-internal-id",
+        display_name="Gesunde Mannschaft",
+        short_name="OK",
+        next_poll_at=now + timedelta(hours=23),
+        last_success_at=now - timedelta(hours=1),
+    )
+    _persist_sync(
+        db,
+        team_id="unhealthy-internal-id",
+        display_name="A-Jugend",
+        short_name="U19",
+        status="error",
+        next_poll_at=now + timedelta(minutes=30),
+        last_success_at=now - timedelta(hours=25),
+        last_completed_at=now - timedelta(minutes=1),
+        consecutive_failures=9,
+        last_error=(
+            "FUSSBALL.DE nicht erreichbar: Client error '503 Service Unavailable' "
+            "for url 'https://provider.invalid/team/internal-id?token=secret'"
+        ),
+    )
+
+    with system_scope("Sanitizierte Teamursachen testen"):
+        payload = collect_health_details(db, _status_settings(tmp_path))
+
+    teams = payload["checks"]["fussball_automatic"]["detail"]["unhealthy_teams"]
+    assert teams == [
+        {
+            "display_name": "A-Jugend",
+            "short_name": "U19",
+            "status": "error",
+            "stale_reason": "success_overdue",
+            "sync_interval_hours": 24,
+            "consecutive_failures": 9,
+            "last_success_at": (now - timedelta(hours=25)).isoformat(),
+            "last_completed_at": (now - timedelta(minutes=1)).isoformat(),
+            "next_poll_at": (now + timedelta(minutes=30)).isoformat(),
+            "retry_scheduled": True,
+            "error_category": "upstream_http",
+        }
+    ]
+    serialized = json.dumps(payload)
+    for forbidden in (
+        "healthy-internal-id",
+        "unhealthy-internal-id",
+        "provider.invalid",
+        "token=secret",
+        "503 Service Unavailable",
+    ):
+        assert forbidden not in serialized
+
+
+def test_health_details_reports_no_future_retry_as_false(db, tmp_path):
+    now = datetime.now(timezone.utc)
+    _persist_sync(
+        db,
+        status="error",
+        next_poll_at=now - timedelta(minutes=10),
+        last_success_at=now - timedelta(hours=25),
+        consecutive_failures=2,
+        last_error="arbitrary private provider response token=secret",
+    )
+
+    with system_scope("Sanitisierten Retry-Status testen"):
+        payload = collect_health_details(db, _status_settings(tmp_path))
+
+    team = payload["checks"]["fussball_automatic"]["detail"]["unhealthy_teams"][0]
+    assert team["retry_scheduled"] is False
+    assert team["error_category"] == "unknown"
+    assert "arbitrary private provider response" not in json.dumps(payload)
+
+
+def test_social_health_details_are_separated_and_share_reason_criteria(db, tmp_path):
+    now = datetime.now(timezone.utc)
+    common = {
+        "club_id": db.info["test_club_id"],
+        "active": True,
+        "publishing_enabled": True,
+    }
+    db.add_all(
+        [
+            SocialChannelConnection(
+                **common,
+                channel_type="instagram",
+                internal_name="instagram",
+                display_name="Instagram",
+                status="connected",
+                last_check_at=now - timedelta(minutes=2),
+                last_success_at=now - timedelta(minutes=2),
+            ),
+            SocialChannelConnection(
+                **common,
+                channel_type="facebook",
+                internal_name="facebook",
+                display_name="Facebook",
+                status="disrupted",
+                last_check_at=now - timedelta(minutes=3),
+                last_success_at=None,
+            ),
+            SocialChannelConnection(
+                **common,
+                channel_type="whatsapp",
+                internal_name="whatsapp",
+                display_name="WhatsApp",
+                status="connected",
+                last_check_at=now - timedelta(days=2),
+                last_success_at=now - timedelta(days=2),
+            ),
+        ]
+    )
+    db.commit()
+
+    with system_scope("Sanitizierte Kanalursachen testen"):
+        payload = collect_health_details(db, _status_settings(tmp_path, enabled=False))
+
+    detail = payload["checks"]["social_media_channels"]["detail"]
+    assert set(detail) == {"instagram", "facebook", "whatsapp"}
+    assert detail["instagram"]["unhealthy_connections"] == 0
+    assert detail["instagram"]["status_counts"] == {"connected": 1}
+    assert detail["facebook"]["unhealthy_connections"] == 1
+    assert detail["facebook"]["non_connected_connections"] == 1
+    assert detail["facebook"]["missing_last_success"] == 1
+    assert detail["facebook"]["stale_last_success"] == 0
+    assert detail["facebook"]["status_counts"] == {"disrupted": 1}
+    assert detail["whatsapp"]["unhealthy_connections"] == 1
+    assert detail["whatsapp"]["non_connected_connections"] == 0
+    assert detail["whatsapp"]["missing_last_success"] == 0
+    assert detail["whatsapp"]["stale_last_success"] == 1
+    assert payload["checks"]["social_media_channels"]["ok"] is False
+
+
+def test_unknown_social_status_is_counted_without_exposing_raw_text(db, tmp_path):
+    now = datetime.now(timezone.utc)
+    db.add(
+        SocialChannelConnection(
+            club_id=db.info["test_club_id"],
+            channel_type="facebook",
+            internal_name="facebook-unknown",
+            display_name="Facebook",
+            status="token=private-status",
+            active=True,
+            publishing_enabled=True,
+            last_check_at=now,
+            last_success_at=now,
+        )
+    )
+    db.commit()
+
+    with system_scope("Unbekannten Kanalstatus sanitizen"):
+        payload = collect_health_details(db, _status_settings(tmp_path, enabled=False))
+
+    facebook = payload["checks"]["social_media_channels"]["detail"]["facebook"]
+    assert facebook["unhealthy_connections"] == 1
+    assert facebook["non_connected_connections"] == 1
+    assert facebook["status_counts"] == {"unknown": 1}
+    assert "private-status" not in json.dumps(payload)
 
 
 @pytest.mark.parametrize(

@@ -9,6 +9,13 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
+from app.monitoring.health_rules import (
+    FUSSBALL_ERROR_CATEGORIES,
+    FUSSBALL_STALE_REASONS,
+    FUSSBALL_SYNC_STATUSES,
+    SOCIAL_CHANNEL_TYPES,
+    SOCIAL_CONNECTION_STATUSES,
+)
 from app.monitoring.service import system_status
 from app.tenancy.state import system_scope
 
@@ -25,13 +32,6 @@ _ALLOWED_CRITICAL = frozenset(
         "Automatische FUSSBALL.DE-Synchronisation",
     }
 )
-_ALLOWED_STALE_REASONS = (
-    "lease_missing",
-    "lease_expired",
-    "poll_overdue",
-    "success_overdue",
-)
-_ALLOWED_CHANNEL_TYPES = ("instagram", "facebook", "whatsapp")
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -57,6 +57,20 @@ def _optional_timestamp(value: Any) -> str | None:
     return normalized.isoformat()
 
 
+def _optional_label(value: Any, *, maximum: int) -> str | None:
+    if type(value) is not str or not value or len(value) > maximum:
+        return None
+    if any(ord(character) < 32 for character in value) or "://" in value:
+        return None
+    return value
+
+
+def _optional_enum(value: Any, allowed: tuple[str, ...]) -> str | None:
+    if type(value) is not str:
+        return None
+    return value if value in allowed else "unknown"
+
+
 def _check_ok(checks: Mapping[str, Any], name: str) -> bool | None:
     return _optional_bool(_mapping(checks.get(name)).get("ok"))
 
@@ -79,44 +93,66 @@ def _safe_stale_reasons(detail: Mapping[str, Any]) -> dict[str, int]:
     source = _mapping(detail.get("stale_reasons"))
     return {
         reason: count
-        for reason in _ALLOWED_STALE_REASONS
+        for reason in FUSSBALL_STALE_REASONS
         if (count := _optional_count(source.get(reason))) is not None
     }
 
 
-def _aggregated_channel_detail(checks: Mapping[str, Any]) -> dict[str, int | str | None]:
-    detail = _mapping(_mapping(checks.get("social_media_channels")).get("detail"))
-    enabled_total = 0
-    enabled_seen = False
-    unhealthy_total = 0
-    unhealthy_seen = False
-    successful_checks: list[datetime] = []
-
-    for channel_type in _ALLOWED_CHANNEL_TYPES:
-        channel = _mapping(detail.get(channel_type))
-        if (enabled := _optional_count(channel.get("enabled_connections"))) is not None:
-            enabled_total += enabled
-            enabled_seen = True
-        if (unhealthy := _optional_count(channel.get("unhealthy_connections"))) is not None:
-            unhealthy_total += unhealthy
-            unhealthy_seen = True
-        last_success = channel.get("last_successful_check")
-        if isinstance(last_success, datetime):
-            successful_checks.append(last_success)
-
-    normalized_checks = [
-        value.replace(tzinfo=timezone.utc)
-        if value.tzinfo is None
-        else value.astimezone(timezone.utc)
-        for value in successful_checks
-    ]
+def _safe_status_counts(value: Any) -> dict[str, int]:
+    source = _mapping(value)
     return {
-        "enabled_connections": enabled_total if enabled_seen else None,
-        "unhealthy_connections": unhealthy_total if unhealthy_seen else None,
-        "last_successful_check": _optional_timestamp(
-            max(normalized_checks) if normalized_checks else None
-        ),
+        status: count
+        for status in (*SOCIAL_CONNECTION_STATUSES, "unknown")
+        if (count := _optional_count(source.get(status))) is not None
     }
+
+
+def _safe_channel_detail(checks: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    detail = _mapping(_mapping(checks.get("social_media_channels")).get("detail"))
+    return {
+        channel_type: {
+            "enabled_connections": _optional_count(channel.get("enabled_connections")),
+            "unhealthy_connections": _optional_count(channel.get("unhealthy_connections")),
+            "non_connected_connections": _optional_count(channel.get("non_connected_connections")),
+            "missing_last_success": _optional_count(channel.get("missing_last_success")),
+            "stale_last_success": _optional_count(channel.get("stale_last_success")),
+            "last_check_at": _optional_timestamp(channel.get("last_check_at")),
+            "last_successful_check": _optional_timestamp(channel.get("last_successful_check")),
+            "status_counts": _safe_status_counts(channel.get("status_counts")),
+        }
+        for channel_type in SOCIAL_CHANNEL_TYPES
+        for channel in (_mapping(detail.get(channel_type)),)
+    }
+
+
+def _safe_unhealthy_teams(detail: Mapping[str, Any]) -> list[dict[str, Any]]:
+    source = detail.get("unhealthy_teams")
+    if not isinstance(source, (list, tuple)):
+        return []
+    teams = []
+    for value in source:
+        team = _mapping(value)
+        stale_reason = team.get("stale_reason")
+        if stale_reason not in FUSSBALL_STALE_REASONS:
+            continue
+        teams.append(
+            {
+                "display_name": _optional_label(team.get("display_name"), maximum=120),
+                "short_name": _optional_label(team.get("short_name"), maximum=30),
+                "status": _optional_enum(team.get("status"), FUSSBALL_SYNC_STATUSES),
+                "stale_reason": stale_reason,
+                "sync_interval_hours": _optional_count(team.get("sync_interval_hours")),
+                "consecutive_failures": _optional_count(team.get("consecutive_failures")),
+                "last_success_at": _optional_timestamp(team.get("last_success_at")),
+                "last_completed_at": _optional_timestamp(team.get("last_completed_at")),
+                "next_poll_at": _optional_timestamp(team.get("next_poll_at")),
+                "retry_scheduled": _optional_bool(team.get("retry_scheduled")),
+                "error_category": _optional_enum(
+                    team.get("error_category"), FUSSBALL_ERROR_CATEGORIES
+                ),
+            }
+        )
+    return teams
 
 
 def sanitize_health_report(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -143,13 +179,14 @@ def sanitize_health_report(report: Mapping[str, Any]) -> dict[str, Any]:
                     "errors": _optional_count(fussball_detail.get("errors")),
                     "stale": _optional_count(fussball_detail.get("stale")),
                     "stale_reasons": _safe_stale_reasons(fussball_detail),
+                    "unhealthy_teams": _safe_unhealthy_teams(fussball_detail),
                 },
             },
             "smb": {"ok": _check_ok(checks, "smb")},
             "publishing": {"ok": _check_ok(checks, "publishing")},
             "social_media_channels": {
                 "ok": _check_ok(checks, "social_media_channels"),
-                "detail": _aggregated_channel_detail(checks),
+                "detail": _safe_channel_detail(checks),
             },
         },
     }

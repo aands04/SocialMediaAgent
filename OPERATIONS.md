@@ -37,6 +37,10 @@ Zusätzlich wird exakt dieser Befehl passwortlos erlaubt:
 andi ALL=(root) NOPASSWD: /usr/local/sbin/socialmedia-admin health-details
 ```
 
+Ist dieser Case bereits installiert, benötigen spätere Erweiterungen des
+repositoryseitigen Diagnose-Schemas keine weitere Änderung am Wrapper oder an
+sudoers.
+
 Danach lautet der ausschließlich lesende Aufruf:
 
 ```bash
@@ -60,16 +64,41 @@ checks.fussball_automatic.detail.running
 checks.fussball_automatic.detail.errors
 checks.fussball_automatic.detail.stale
 checks.fussball_automatic.detail.stale_reasons
+checks.fussball_automatic.detail.unhealthy_teams[]:
+  display_name
+  short_name
+  status
+  stale_reason
+  sync_interval_hours
+  consecutive_failures
+  last_success_at
+  last_completed_at
+  next_poll_at
+  retry_scheduled
+  error_category
 checks.smb.ok
 checks.publishing.ok
 checks.social_media_channels.ok
-checks.social_media_channels.detail.enabled_connections
-checks.social_media_channels.detail.unhealthy_connections
-checks.social_media_channels.detail.last_successful_check
+checks.social_media_channels.detail.{instagram,facebook,whatsapp}:
+  enabled_connections
+  unhealthy_connections
+  non_connected_connections
+  missing_last_success
+  stale_last_success
+  last_check_at
+  last_successful_check
+  status_counts
 ```
 
-Die Social-Media-Zahlen werden über die bekannten Kanaltypen Instagram,
-Facebook und WhatsApp summiert; `last_successful_check` ist ausschließlich der
-neueste aggregierte UTC-Zeitstempel. Unbekannte Critical-Bezeichnungen werden
-nur gezählt und niemals ausgegeben. Bei neuen Critical- oder Stale-Gründen muss
-die Allowlist bewusst per Review erweitert werden.
+Die Social-Media-Zahlen werden getrennt für die fest erlaubten Kanaltypen
+Instagram, Facebook und WhatsApp ausgegeben. Statuswerte haben ebenfalls eine
+feste Positivliste; alle anderen Werte werden nur unter `unknown` gezählt.
+Mehrere Gesundheitsgründe derselben Verbindung können gleichzeitig zählen.
+
+`unhealthy_teams` enthält ausschließlich aktivierte, tatsächlich ungesunde
+Mannschaften mit Anzeige-/Kurzname und aggregierten Betriebsdaten. Interne IDs,
+Quell-URLs und rohe Providerfehler werden nicht übernommen. Die Fehlerkategorie
+wird nur aus fest bekannten, anwendungseigenen Fehlertypen bestimmt; unbekannte
+Texte ergeben `unknown`. Unbekannte Critical-Bezeichnungen werden nur gezählt
+und niemals ausgegeben. Bei neuen Critical-, Stale-, Status- oder
+Fehlerkategorien muss die Allowlist bewusst per Review erweitert werden.

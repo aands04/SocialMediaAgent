@@ -23,52 +23,18 @@ from app.models import (
     SystemSetting,
     Team,
 )
-
-
-def _utc(value: datetime) -> datetime:
-    return (
-        value.replace(tzinfo=timezone.utc)
-        if value.tzinfo is None
-        else value.astimezone(timezone.utc)
-    )
-
-
-def _fussball_sync_interval(team: Team) -> timedelta:
-    try:
-        interval_hours = int((team.rules or {}).get("sync_interval_hours", 24))
-    except (TypeError, ValueError):
-        interval_hours = 24
-    return timedelta(seconds=max(3600, interval_hours * 3600))
-
-
-def _fussball_sync_stale_reason(
-    state: FussballSyncState,
-    team: Team,
-    settings: Settings,
-    *,
-    now: datetime,
-) -> str | None:
-    """Return why an enabled team's sync is stale, using its persisted schedule."""
-
-    now = _utc(now)
-    if state.status == "running":
-        if state.lease_expires_at is None:
-            return "lease_missing"
-        if _utc(state.lease_expires_at) <= now:
-            return "lease_expired"
-        return None
-
-    grace = timedelta(seconds=max(60, settings.fussball_sync_error_backoff_seconds))
-    if state.next_poll_at is None or _utc(state.next_poll_at) + grace < now:
-        return "poll_overdue"
-
-    success_anchor = state.last_success_at or state.created_at
-    if (
-        success_anchor is not None
-        and _utc(success_anchor) + _fussball_sync_interval(team) + grace < now
-    ):
-        return "success_overdue"
-    return None
+from app.monitoring.health_rules import (
+    SOCIAL_CHANNEL_TYPES,
+    SOCIAL_CONNECTION_STATUSES,
+    SOCIAL_HEALTH_REASONS,
+    classify_fussball_provider_error,
+    fussball_retry_scheduled,
+    fussball_sync_interval_hours,
+    social_connection_health_reasons,
+)
+from app.monitoring.health_rules import (
+    fussball_sync_stale_reason as _fussball_sync_stale_reason,
+)
 
 
 def system_status(db: Session, settings: Settings) -> dict:
@@ -445,33 +411,54 @@ def system_status(db: Session, settings: Settings) -> dict:
             seconds=max(3600, settings.meta_connection_check_interval_seconds * 2)
         )
         channel_health_ok = True
-        for channel_type in ("instagram", "facebook", "whatsapp"):
+        for channel_type in SOCIAL_CHANNEL_TYPES:
             channel_items = [
                 item
                 for item in channel_connections
                 if item.channel_type == channel_type and item.active
             ]
             enabled_items = [item for item in channel_items if item.publishing_enabled]
-            unhealthy = [
-                item
-                for item in enabled_items
-                if item.status != "connected"
-                or not item.last_success_at
-                or (
-                    item.last_success_at
-                    if item.last_success_at.tzinfo
-                    else item.last_success_at.replace(tzinfo=timezone.utc)
+            assessments = [
+                (
+                    item,
+                    social_connection_health_reasons(
+                        item,
+                        stale_before=stale_connection_before,
+                    ),
                 )
-                < stale_connection_before
+                for item in enabled_items
             ]
+            unhealthy = [item for item, reasons in assessments if reasons]
+            health_reason_counts = {
+                reason: sum(reason in reasons for _, reasons in assessments)
+                for reason in SOCIAL_HEALTH_REASONS
+            }
+            status_counts = {
+                status: sum(item.status == status for item in enabled_items)
+                for status in SOCIAL_CONNECTION_STATUSES
+            }
+            unknown_statuses = sum(
+                item.status not in SOCIAL_CONNECTION_STATUSES for item in enabled_items
+            )
+            status_counts = {status: count for status, count in status_counts.items() if count}
+            if unknown_statuses:
+                status_counts["unknown"] = unknown_statuses
             channel_detail[channel_type] = {
                 "active_connections": len(channel_items),
                 "enabled_connections": len(enabled_items),
                 "unhealthy_connections": len(unhealthy),
-                "last_successful_check": max(
-                    (item.last_success_at for item in channel_items if item.last_success_at),
+                "non_connected_connections": health_reason_counts["non_connected"],
+                "missing_last_success": health_reason_counts["missing_last_success"],
+                "stale_last_success": health_reason_counts["stale_last_success"],
+                "last_check_at": max(
+                    (item.last_check_at for item in enabled_items if item.last_check_at),
                     default=None,
                 ),
+                "last_successful_check": max(
+                    (item.last_success_at for item in enabled_items if item.last_success_at),
+                    default=None,
+                ),
+                "status_counts": status_counts,
             }
             channel_health_ok = channel_health_ok and not unhealthy
         checks["social_media_channels"] = {
@@ -495,18 +482,38 @@ def system_status(db: Session, settings: Settings) -> dict:
         stale = []
         if settings.fussball_automatic_sync_enabled:
             for state in enabled_states:
+                team = enabled_teams[state.team_id]
                 reason = _fussball_sync_stale_reason(
                     state,
-                    enabled_teams[state.team_id],
+                    team,
                     settings,
                     now=now,
                 )
                 if reason:
-                    stale.append((state, reason))
+                    stale.append((state, team, reason))
         stale_reasons = {
-            reason: sum(stale_reason == reason for _, stale_reason in stale)
-            for reason in sorted({stale_reason for _, stale_reason in stale})
+            reason: sum(stale_reason == reason for _, _, stale_reason in stale)
+            for reason in sorted({stale_reason for _, _, stale_reason in stale})
         }
+        unhealthy_teams = [
+            {
+                "display_name": team.display_name,
+                "short_name": team.short_name,
+                "status": state.status,
+                "stale_reason": reason,
+                "sync_interval_hours": fussball_sync_interval_hours(team),
+                "consecutive_failures": max(0, state.consecutive_failures),
+                "last_success_at": state.last_success_at,
+                "last_completed_at": state.last_completed_at,
+                "next_poll_at": state.next_poll_at,
+                "retry_scheduled": fussball_retry_scheduled(state, now=now),
+                "error_category": classify_fussball_provider_error(state.last_error),
+            }
+            for state, team, reason in sorted(
+                stale,
+                key=lambda item: (item[1].display_name, item[1].short_name),
+            )
+        ]
         checks["fussball_automatic"] = {
             "ok": not settings.fussball_automatic_sync_enabled or not stale,
             "detail": {
@@ -517,6 +524,7 @@ def system_status(db: Session, settings: Settings) -> dict:
                 "errors": sum(state.status == "error" for state in enabled_states),
                 "stale": len(stale),
                 "stale_reasons": stale_reasons,
+                "unhealthy_teams": unhealthy_teams,
                 "last_success": max(
                     (state.last_success_at for state in enabled_states if state.last_success_at),
                     default=None,
