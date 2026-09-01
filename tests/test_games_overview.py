@@ -142,6 +142,21 @@ def test_overview_marks_created_overdue_and_disabled_states(db):
     assert disabled.automation_enabled is False
 
 
+def test_overview_exposes_persisted_identity_manual_review(db):
+    _, team, game = _game_setup(db)
+    game.overrides = {
+        "generation_identity_review_required": True,
+        "generation_identity_review_notified_at": "2026-08-10T12:00:00+00:00",
+    }
+
+    summary = _summary(db, [game], [team])
+
+    assert summary.generation_schedule_state == "failed"
+    assert summary.next_generation_label == "Mannschaftszuordnung prüfen"
+    assert summary.contribution_status == "problem"
+    assert summary.action_required is True
+
+
 def test_overview_marks_missing_contribution_rule_as_manual(db):
     _, team, game = _game_setup(
         db,

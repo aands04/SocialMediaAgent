@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from bs4 import BeautifulSoup
 
+import app.games.automatic as automatic_module
 from app.config import Settings
 from app.games.automatic import (
     _next_interval,
@@ -11,14 +12,17 @@ from app.games.automatic import (
     automatic_generation_due_at,
     claim_due_team,
     plan_generation_jobs,
+    process_claimed_team,
     run_due_generation_cycle,
 )
 from app.games.provider import FussballDeProvider, ProviderError, _validated_digit_cmap
 from app.models import (
+    AuditLog,
     FussballSyncState,
     Game,
     GenerationJob,
     InstagramPage,
+    Notification,
     ProviderSnapshot,
     Role,
     StoryRule,
@@ -217,6 +221,168 @@ def test_due_generation_cycle_does_not_wait_for_next_provider_poll(db):
     repeated = run_due_generation_cycle(db, settings, now=now + timedelta(minutes=1))
     assert repeated.generation_jobs == 0
     assert db.query(GenerationJob).count() == 1
+
+
+def test_identity_error_skips_only_affected_game_and_notifies_once(db):
+    now = datetime.now(timezone.utc)
+    team, bad_game = _base(db, now)
+    bad_game.home_team = "Unbekannte Heimelf"
+    bad_game.away_team = "Unbekannte Gastelf"
+    good_game = Game(
+        team_id=team.id,
+        provider="fussball.de",
+        external_id="MATCH2",
+        home_team="SV Ehlen",
+        away_team="Gast Zwei",
+        kickoff=now + timedelta(hours=26),
+        competition="Liga",
+        status="scheduled",
+        source_url="https://www.fussball.de/spiel/x/-/spiel/MATCH2",
+        checked_at=now,
+        overrides={},
+    )
+    db.add(good_game)
+    db.commit()
+
+    settings = Settings(automatic_post_generation_enabled=True)
+    assert plan_generation_jobs(db, team, settings, now=now) == 1
+    assert db.query(GenerationJob).one().game_id == good_game.id
+    assert db.query(GenerationJob).filter_by(game_id=bad_game.id).count() == 0
+    assert (
+        db.query(Notification)
+        .filter_by(kind="automatic_generation_identity_manual_review", team_id=team.id)
+        .count()
+        == 1
+    )
+    db.refresh(bad_game)
+    assert bad_game.overrides["generation_identity_review_required"] is True
+
+    assert plan_generation_jobs(db, team, settings, now=now + timedelta(minutes=1)) == 0
+    assert (
+        db.query(Notification)
+        .filter_by(kind="automatic_generation_identity_manual_review", team_id=team.id)
+        .count()
+        == 1
+    )
+
+
+def test_explicit_identity_alias_unblocks_generation_without_fuzzy_matching(db):
+    now = datetime.now(timezone.utc)
+    team, game = _base(db, now)
+    game.home_team = "JSG Ehlen/Hoof C-Junioren"
+    game.away_team = "JSG Gegner C-Junioren"
+    db.commit()
+    settings = Settings(automatic_post_generation_enabled=True)
+
+    assert plan_generation_jobs(db, team, settings, now=now) == 0
+    assert db.query(GenerationJob).count() == 0
+
+    team.rules = {
+        **team.rules,
+        "identity_aliases": ["JSG Ehlen/Hoof C-Junioren"],
+    }
+    db.commit()
+    assert plan_generation_jobs(db, team, settings, now=now + timedelta(minutes=1)) == 1
+    db.refresh(game)
+    assert "generation_identity_review_required" not in game.overrides
+
+
+@pytest.mark.parametrize(
+    ("home_team", "away_team"),
+    [
+        ("JSG Ehlen/Hoof C-Junioren", "JSG Ehlen/Hoof C-Junioren"),
+        ("Unbekannte Heimelf", "Unbekannte Gastelf"),
+    ],
+)
+def test_ambiguous_or_unknown_identity_never_queues_job(db, home_team, away_team):
+    now = datetime.now(timezone.utc)
+    team, game = _base(db, now)
+    team.rules = {
+        **team.rules,
+        "identity_aliases": ["JSG Ehlen/Hoof C-Junioren"],
+    }
+    game.home_team = home_team
+    game.away_team = away_team
+    db.commit()
+
+    assert (
+        plan_generation_jobs(
+            db,
+            team,
+            Settings(automatic_post_generation_enabled=True),
+            now=now,
+        )
+        == 0
+    )
+    assert db.query(GenerationJob).count() == 0
+
+
+def test_provider_sync_succeeds_before_identity_review_in_separate_planner(db, monkeypatch):
+    now = datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc)
+    team, game = _base(db, now)
+    game.home_team = "Unbekannte Heimelf"
+    game.away_team = "Unbekannte Gastelf"
+    game.kickoff = now + timedelta(days=10)
+    snapshot = ProviderSnapshot(
+        team_id=team.id,
+        source_url=team.fussball_url,
+        fetched_at=now,
+        status_code=200,
+        checksum="b" * 64,
+        relative_path="automatic-success.html",
+        parser_result={"games": []},
+    )
+    state = FussballSyncState(
+        team_id=team.id,
+        status="running",
+        next_poll_at=now,
+        lease_owner="worker",
+        lease_expires_at=now + timedelta(minutes=5),
+        consecutive_failures=13,
+        last_error="vorheriger Fehler",
+    )
+    db.add_all([snapshot, state])
+    db.commit()
+
+    monkeypatch.setattr(automatic_module, "_now", lambda: now)
+    monkeypatch.setattr(
+        automatic_module,
+        "_capture_automatic_snapshot",
+        lambda _db, _team, _settings: snapshot,
+    )
+    monkeypatch.setattr(
+        automatic_module,
+        "import_snapshot",
+        lambda _db, _snapshot, _user: {"created": 1, "updated": 2},
+    )
+    monkeypatch.setattr(
+        automatic_module,
+        "_observe_results",
+        lambda _db, _team, _snapshot, _settings: 3,
+    )
+    settings = Settings(automatic_post_generation_enabled=True)
+
+    sync_result = process_claimed_team(db, team.id, settings)
+    assert sync_result == {"created": 1, "updated": 2, "confirmed": 3, "generated": 0}
+    db.refresh(state)
+    db.refresh(team)
+    assert state.status == "idle"
+    assert state.consecutive_failures == 0
+    assert state.last_error is None
+    assert state.last_success_at.replace(tzinfo=timezone.utc) == now
+    assert state.last_completed_at.replace(tzinfo=timezone.utc) == now
+    assert state.last_snapshot_id == snapshot.id
+    assert state.next_poll_at.replace(tzinfo=timezone.utc) == now + timedelta(hours=24)
+    assert team.last_sync_at.replace(tzinfo=timezone.utc) == now
+    assert team.last_error is None
+    assert db.query(AuditLog).filter_by(action="provider_sync.failed").count() == 0
+
+    planning_result = run_due_generation_cycle(db, settings, now=now)
+    assert planning_result.failed == 0
+    assert planning_result.generation_jobs == 0
+    db.refresh(state)
+    assert state.status == "idle"
+    assert state.last_success_at.replace(tzinfo=timezone.utc) == now
 
 
 def test_automatic_planner_queues_one_complete_matchday_bundle(db):

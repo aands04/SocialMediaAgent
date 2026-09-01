@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.games.bundles import generation_bundle_games
+from app.games.identity import TeamIdentityError, resolve_team_side, team_aliases
 from app.games.importer import import_snapshot
 from app.games.live_test import serialize
 from app.games.provider import FussballDeProvider, ProviderError
@@ -506,6 +507,8 @@ def plan_generation_jobs(
             settings,
             story_rules=story_rules,
         )
+        if candidates and not _generation_identity_is_valid(db, game, team, now=now):
+            continue
         for candidate in candidates:
             post_type = candidate.post_type
             if post_type in {"announcement", "reminder"} and (
@@ -521,6 +524,16 @@ def plan_generation_jobs(
             bundle_games, bundle_teams, bundle_key = generation_bundle_games(
                 db, game, team, post_type
             )
+            if not all(
+                _generation_identity_is_valid(
+                    db,
+                    item,
+                    bundle_teams[item.team_id],
+                    now=now,
+                )
+                for item in bundle_games
+            ):
+                continue
             if post_type == "result" and any(not item.result_confirmed for item in bundle_games):
                 continue
             if bundle_key and len(bundle_games) >= 2:
@@ -569,6 +582,46 @@ def plan_generation_jobs(
                 db.commit()
                 queued += 1
     return queued
+
+
+def _generation_identity_is_valid(
+    db: Session,
+    game: Game,
+    team: Team,
+    *,
+    now: datetime,
+) -> bool:
+    overrides = dict(game.overrides or {})
+    try:
+        resolve_team_side(game.home_team, game.away_team, team_aliases(team))
+    except TeamIdentityError:
+        if overrides.get("generation_identity_review_notified_at"):
+            return False
+        overrides["generation_identity_review_required"] = True
+        overrides["generation_identity_review_notified_at"] = now.isoformat()
+        game.overrides = overrides
+        db.add(
+            Notification(
+                team_id=team.id,
+                kind="automatic_generation_identity_manual_review",
+                message=(
+                    "Automatische Beitragserstellung benötigt eine eindeutige "
+                    "Mannschaftszuordnung. Bitte die Mannschafts-Aliase prüfen."
+                ),
+            )
+        )
+        db.commit()
+        log.warning(
+            "automatic_generation_planning_identity_manual_review",
+            error_type="TeamIdentityError",
+        )
+        return False
+
+    if overrides.pop("generation_identity_review_required", None) is not None:
+        overrides.pop("generation_identity_review_notified_at", None)
+        game.overrides = overrides
+        db.commit()
+    return True
 
 
 def run_due_generation_cycle(
@@ -669,7 +722,6 @@ def process_claimed_team(db: Session, team_id: str, settings: Settings) -> dict[
         snapshot = _capture_automatic_snapshot(db, team, settings)
         imported = import_snapshot(db, snapshot, None)
         confirmed = _observe_results(db, team, snapshot, settings)
-        generated = plan_generation_jobs(db, team, settings)
         now = _now()
         state = db.get(FussballSyncState, team_id)
         state.status = "idle"
@@ -689,7 +741,9 @@ def process_claimed_team(db: Session, team_id: str, settings: Settings) -> dict[
             "created": imported["created"],
             "updated": imported["updated"],
             "confirmed": confirmed,
-            "generated": generated,
+            # Generation is deliberately planned by run_due_generation_cycle().
+            # Keep the key for compatibility with existing result aggregation.
+            "generated": 0,
         }
     except Exception as exc:
         db.rollback()
