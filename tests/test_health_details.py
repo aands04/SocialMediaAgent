@@ -21,8 +21,23 @@ def _unsafe_report():
         ],
         "database_url": "postgresql://admin:secret@db/production",
         "checks": {
+            "postgresql": {
+                "ok": True,
+                "detail": "postgresql://diagnostic:password@db/production",
+            },
+            "worker": {
+                "ok": True,
+                "detail": "worker path /private/tenant and token=worker-secret",
+            },
             "scheduler": {"ok": True, "detail": "secret scheduler detail"},
             "automatic_scheduler": {"ok": True, "token": "scheduler-token"},
+            "automatic_fussball_sync": {
+                "ok": False,
+                "detail": {
+                    "last_cycle": {"team_id": "private-team-id"},
+                    "provider_token": "fussball-provider-token",
+                },
+            },
             "fussball_automatic": {
                 "ok": False,
                 "detail": {
@@ -91,9 +106,13 @@ def test_health_details_uses_strict_allowlist_and_aggregates_channels():
             "Social-Media-Kanalverbindung",
             "Automatische FUSSBALL.DE-Synchronisation",
         ],
+        "unknown_critical_count": 1,
         "checks": {
+            "postgresql": {"ok": True},
+            "worker": {"ok": True},
             "scheduler": {"ok": True},
             "automatic_scheduler": {"ok": True},
+            "automatic_fussball_sync": {"ok": False},
             "fussball_automatic": {
                 "ok": False,
                 "detail": {
@@ -133,6 +152,10 @@ def test_health_details_uses_strict_allowlist_and_aggregates_channels():
         "+49",
         "connection_url",
         "postgresql://",
+        "diagnostic:password",
+        "worker path",
+        "private-team-id",
+        "provider_token",
         "new_future_check",
         "global_generation_gate",
         "last_errors",
@@ -140,11 +163,58 @@ def test_health_details_uses_strict_allowlist_and_aggregates_channels():
         assert forbidden not in serialized
 
 
+def test_all_critical_checks_expose_only_allowed_health_fields():
+    checks = sanitize_health_report(_unsafe_report())["checks"]
+    critical_checks = {
+        "postgresql",
+        "worker",
+        "scheduler",
+        "automatic_scheduler",
+        "automatic_fussball_sync",
+        "smb",
+        "publishing",
+        "social_media_channels",
+        "fussball_automatic",
+    }
+
+    assert set(checks) == critical_checks
+    assert checks["automatic_fussball_sync"] == {"ok": False}
+    for name in critical_checks:
+        assert set(checks[name]) - {"detail"} == {"ok"}
+    assert set(checks["social_media_channels"]) == {"ok", "detail"}
+    assert set(checks["fussball_automatic"]) == {"ok", "detail"}
+    for name in critical_checks - {"social_media_channels", "fussball_automatic"}:
+        assert set(checks[name]) == {"ok"}
+
+
+def test_known_critical_entries_do_not_increase_unknown_count():
+    report = {
+        "ok": False,
+        "critical": [
+            "PostgreSQL",
+            "Worker",
+            "Scheduler",
+            "Automatischer Instagram-Scheduler",
+            "Automatischer FUSSBALL.DE-Abruf",
+            "SMB",
+            "Publishing",
+            "Social-Media-Kanalverbindung",
+            "Automatische FUSSBALL.DE-Synchronisation",
+        ],
+    }
+
+    assert sanitize_health_report(report)["unknown_critical_count"] == 0
+
+
 def test_health_details_tolerates_missing_optional_checks():
     payload = sanitize_health_report({"ok": True})
 
     assert payload["status"] == "ok"
     assert payload["critical"] == []
+    assert payload["unknown_critical_count"] == 0
+    assert payload["checks"]["postgresql"] == {"ok": None}
+    assert payload["checks"]["worker"] == {"ok": None}
+    assert payload["checks"]["automatic_fussball_sync"] == {"ok": None}
     assert payload["checks"]["scheduler"] == {"ok": None}
     assert payload["checks"]["fussball_automatic"]["detail"] == {
         "global_sync_gate": None,

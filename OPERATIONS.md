@@ -43,12 +43,16 @@ Danach lautet der ausschließlich lesende Aufruf:
 sudo -n /usr/local/sbin/socialmedia-admin health-details
 ```
 
-Die Ausgabe enthält nur `status`, die bekannten festen `critical`-Bezeichnungen
-und folgende Checkfelder:
+Die Ausgabe enthält nur `status`, die bekannten festen `critical`-Bezeichnungen,
+`unknown_critical_count` als Anzahl nicht freigegebener Critical-Strings und
+folgende Checkfelder:
 
 ```text
+checks.postgresql.ok
+checks.worker.ok
 checks.scheduler.ok
 checks.automatic_scheduler.ok
+checks.automatic_fussball_sync.ok
 checks.fussball_automatic.ok
 checks.fussball_automatic.detail.global_sync_gate
 checks.fussball_automatic.detail.enabled_teams
@@ -66,5 +70,6 @@ checks.social_media_channels.detail.last_successful_check
 
 Die Social-Media-Zahlen werden über die bekannten Kanaltypen Instagram,
 Facebook und WhatsApp summiert; `last_successful_check` ist ausschließlich der
-neueste aggregierte UTC-Zeitstempel. Bei neuen Critical- oder Stale-Gründen muss
+neueste aggregierte UTC-Zeitstempel. Unbekannte Critical-Bezeichnungen werden
+nur gezählt und niemals ausgegeben. Bei neuen Critical- oder Stale-Gründen muss
 die Allowlist bewusst per Review erweitert werden.

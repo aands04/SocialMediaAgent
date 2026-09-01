@@ -68,6 +68,13 @@ def _safe_critical(report: Mapping[str, Any]) -> list[str]:
     return [value for value in values if type(value) is str and value in _ALLOWED_CRITICAL]
 
 
+def _unknown_critical_count(report: Mapping[str, Any]) -> int:
+    values = report.get("critical")
+    if not isinstance(values, (list, tuple)):
+        return 0
+    return sum(isinstance(value, str) and value not in _ALLOWED_CRITICAL for value in values)
+
+
 def _safe_stale_reasons(detail: Mapping[str, Any]) -> dict[str, int]:
     source = _mapping(detail.get("stale_reasons"))
     return {
@@ -120,9 +127,13 @@ def sanitize_health_report(report: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "status": "ok" if report.get("ok") is True else "degraded",
         "critical": _safe_critical(report),
+        "unknown_critical_count": _unknown_critical_count(report),
         "checks": {
+            "postgresql": {"ok": _check_ok(checks, "postgresql")},
+            "worker": {"ok": _check_ok(checks, "worker")},
             "scheduler": {"ok": _check_ok(checks, "scheduler")},
             "automatic_scheduler": {"ok": _check_ok(checks, "automatic_scheduler")},
+            "automatic_fussball_sync": {"ok": _check_ok(checks, "automatic_fussball_sync")},
             "fussball_automatic": {
                 "ok": _check_ok(checks, "fussball_automatic"),
                 "detail": {
