@@ -3,11 +3,18 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
 import app.main as main
 from app.config import Settings
 from app.db import get_db
-from app.models import FussballSyncState, SocialChannelConnection, Team
+from app.models import (
+    FussballSyncState,
+    InstagramConnection,
+    InstagramPage,
+    SocialChannelConnection,
+    Team,
+)
 from app.monitoring.health_details import collect_health_details
 from app.monitoring.health_rules import (
     classify_fussball_provider_error,
@@ -345,6 +352,55 @@ def _status_settings(tmp_path, *, enabled=True):
     )
 
 
+def _persist_instagram_health_state(
+    db,
+    *,
+    status="connected",
+    last_check_at=None,
+    last_success_at=None,
+    mirror_status="connected",
+    mirror_last_check_at=None,
+    mirror_last_success_at=None,
+):
+    page = InstagramPage(
+        club_id=db.info["test_club_id"],
+        internal_name="instagram-health",
+        display_name="Instagram Health",
+        username="instagram-health",
+        club="Monitoring Club",
+        active=True,
+        publishing_enabled=True,
+        connection_status=status,
+    )
+    db.add(page)
+    db.flush()
+    connection = InstagramConnection(
+        club_id=page.club_id,
+        instagram_page_id=page.id,
+        status=status,
+        encrypted_token="encrypted-authoritative-token",
+        last_check_at=last_check_at,
+        last_success_at=last_success_at,
+        last_error="https://provider.invalid/?token=authoritative-secret",
+    )
+    mirror = SocialChannelConnection(
+        club_id=page.club_id,
+        channel_type="instagram",
+        internal_name="instagram-mirror",
+        display_name="Instagram Mirror",
+        legacy_instagram_page_id=page.id,
+        status=mirror_status,
+        active=True,
+        publishing_enabled=True,
+        last_check_at=mirror_last_check_at,
+        last_success_at=mirror_last_success_at,
+        last_error="https://mirror.invalid/?token=mirror-secret",
+    )
+    db.add_all([connection, mirror])
+    db.commit()
+    return connection, mirror
+
+
 @pytest.mark.parametrize(
     ("enabled", "active", "archived"),
     [(False, True, False), (True, False, False), (True, True, True)],
@@ -450,8 +506,128 @@ def test_health_details_reports_no_future_retry_as_false(db, tmp_path):
     assert "arbitrary private provider response" not in json.dumps(payload)
 
 
+def test_instagram_health_uses_fresh_authoritative_state_not_stale_mirror(db, tmp_path):
+    now = datetime.now(timezone.utc)
+    authoritative, mirror = _persist_instagram_health_state(
+        db,
+        status="connected",
+        last_check_at=now - timedelta(minutes=2),
+        last_success_at=now - timedelta(minutes=2),
+        mirror_status="disrupted",
+        mirror_last_check_at=now - timedelta(days=2),
+        mirror_last_success_at=now - timedelta(days=2),
+    )
+
+    writes = []
+
+    def capture_statement(_connection, _cursor, statement, _parameters, _context, _many):
+        if statement.lstrip().split(None, 1)[0].upper() in {
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "MERGE",
+            "CREATE",
+            "ALTER",
+            "DROP",
+            "TRUNCATE",
+        }:
+            writes.append(statement)
+
+    event.listen(db.bind, "before_cursor_execute", capture_statement)
+    try:
+        with system_scope("Autoritativen Instagram-Health testen"):
+            payload = collect_health_details(db, _status_settings(tmp_path, enabled=False))
+    finally:
+        event.remove(db.bind, "before_cursor_execute", capture_statement)
+
+    instagram = payload["checks"]["social_media_channels"]["detail"]["instagram"]
+    assert instagram == {
+        "enabled_connections": 1,
+        "unhealthy_connections": 0,
+        "non_connected_connections": 0,
+        "missing_last_success": 0,
+        "stale_last_success": 0,
+        "last_check_at": authoritative.last_check_at.isoformat(),
+        "last_successful_check": authoritative.last_success_at.isoformat(),
+        "status_counts": {"connected": 1},
+    }
+    serialized = json.dumps(payload)
+    for forbidden in (
+        authoritative.id,
+        mirror.id,
+        "provider.invalid",
+        "mirror.invalid",
+        "authoritative-secret",
+        "mirror-secret",
+        "encrypted-authoritative-token",
+    ):
+        assert forbidden not in serialized
+    assert writes == []
+
+
+def test_instagram_health_marks_stale_authoritative_connection(db, tmp_path):
+    now = datetime.now(timezone.utc)
+    _persist_instagram_health_state(
+        db,
+        last_check_at=now - timedelta(days=2),
+        last_success_at=now - timedelta(days=2),
+        mirror_last_check_at=now,
+        mirror_last_success_at=now,
+    )
+
+    report = system_status(db, _status_settings(tmp_path, enabled=False))
+    instagram = report["checks"]["social_media_channels"]["detail"]["instagram"]
+
+    assert report["checks"]["social_media_channels"]["ok"] is False
+    assert instagram["unhealthy_connections"] == 1
+    assert instagram["stale_last_success"] == 1
+
+
+def test_instagram_health_marks_non_connected_authoritative_status(db, tmp_path):
+    now = datetime.now(timezone.utc)
+    _persist_instagram_health_state(
+        db,
+        status="error",
+        last_check_at=now,
+        last_success_at=now,
+    )
+
+    report = system_status(db, _status_settings(tmp_path, enabled=False))
+    instagram = report["checks"]["social_media_channels"]["detail"]["instagram"]
+
+    assert report["checks"]["social_media_channels"]["ok"] is False
+    assert instagram["non_connected_connections"] == 1
+    assert instagram["status_counts"] == {"error": 1}
+
+
+def test_instagram_health_marks_missing_authoritative_success(db, tmp_path):
+    now = datetime.now(timezone.utc)
+    _persist_instagram_health_state(
+        db,
+        last_check_at=now,
+        last_success_at=None,
+        mirror_last_check_at=now,
+        mirror_last_success_at=now,
+    )
+
+    report = system_status(db, _status_settings(tmp_path, enabled=False))
+    instagram = report["checks"]["social_media_channels"]["detail"]["instagram"]
+
+    assert report["checks"]["social_media_channels"]["ok"] is False
+    assert instagram["missing_last_success"] == 1
+    assert instagram["stale_last_success"] == 0
+
+
 def test_social_health_details_are_separated_and_share_reason_criteria(db, tmp_path):
     now = datetime.now(timezone.utc)
+    _persist_instagram_health_state(
+        db,
+        last_check_at=now - timedelta(minutes=2),
+        last_success_at=now - timedelta(minutes=2),
+        mirror_status="disrupted",
+        mirror_last_check_at=now - timedelta(days=2),
+        mirror_last_success_at=now - timedelta(days=2),
+    )
     common = {
         "club_id": db.info["test_club_id"],
         "active": True,
@@ -459,15 +635,6 @@ def test_social_health_details_are_separated_and_share_reason_criteria(db, tmp_p
     }
     db.add_all(
         [
-            SocialChannelConnection(
-                **common,
-                channel_type="instagram",
-                internal_name="instagram",
-                display_name="Instagram",
-                status="connected",
-                last_check_at=now - timedelta(minutes=2),
-                last_success_at=now - timedelta(minutes=2),
-            ),
             SocialChannelConnection(
                 **common,
                 channel_type="facebook",

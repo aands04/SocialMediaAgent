@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Protocol
 
 from app.config import Settings
-from app.models import FussballSyncState, SocialChannelConnection, Team
+from app.models import FussballSyncState, Team
 
 FUSSBALL_STALE_REASONS = (
     "lease_missing",
@@ -84,6 +85,12 @@ _HTTP_ERROR_PREFIXES = (
 )
 
 
+class SocialHealthState(Protocol):
+    status: str
+    last_check_at: datetime | None
+    last_success_at: datetime | None
+
+
 def utc_datetime(value: datetime) -> datetime:
     return (
         value.replace(tzinfo=timezone.utc)
@@ -158,7 +165,7 @@ def classify_fussball_provider_error(value: object) -> str:
 
 
 def social_connection_health_reasons(
-    connection: SocialChannelConnection,
+    connection: SocialHealthState,
     *,
     stale_before: datetime,
 ) -> tuple[str, ...]:
