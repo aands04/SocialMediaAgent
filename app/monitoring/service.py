@@ -27,6 +27,8 @@ from app.monitoring.health_rules import (
     SOCIAL_CHANNEL_TYPES,
     SOCIAL_CONNECTION_STATUSES,
     SOCIAL_HEALTH_REASONS,
+    SocialHealthSnapshot,
+    SocialHealthState,
     classify_fussball_provider_error,
     fussball_retry_scheduled,
     fussball_sync_interval_hours,
@@ -35,6 +37,63 @@ from app.monitoring.health_rules import (
 from app.monitoring.health_rules import (
     fussball_sync_stale_reason as _fussball_sync_stale_reason,
 )
+
+_MISSING_SOCIAL_HEALTH_STATE = SocialHealthSnapshot(
+    status="unknown",
+    last_check_at=None,
+    last_success_at=None,
+)
+
+
+def _social_channel_health_detail(
+    active_items: list[SocialHealthState],
+    enabled_items: list[SocialHealthState],
+    *,
+    stale_before: datetime,
+) -> tuple[dict, bool]:
+    assessments = [
+        (
+            item,
+            social_connection_health_reasons(
+                item,
+                stale_before=stale_before,
+            ),
+        )
+        for item in enabled_items
+    ]
+    unhealthy = [item for item, reasons in assessments if reasons]
+    health_reason_counts = {
+        reason: sum(reason in reasons for _, reasons in assessments)
+        for reason in SOCIAL_HEALTH_REASONS
+    }
+    status_counts = {
+        status: sum(item.status == status for item in enabled_items)
+        for status in SOCIAL_CONNECTION_STATUSES
+    }
+    unknown_statuses = sum(item.status not in SOCIAL_CONNECTION_STATUSES for item in enabled_items)
+    status_counts = {status: count for status, count in status_counts.items() if count}
+    if unknown_statuses:
+        status_counts["unknown"] = unknown_statuses
+    return (
+        {
+            "active_connections": len(active_items),
+            "enabled_connections": len(enabled_items),
+            "unhealthy_connections": len(unhealthy),
+            "non_connected_connections": health_reason_counts["non_connected"],
+            "missing_last_success": health_reason_counts["missing_last_success"],
+            "stale_last_success": health_reason_counts["stale_last_success"],
+            "last_check_at": max(
+                (item.last_check_at for item in enabled_items if item.last_check_at),
+                default=None,
+            ),
+            "last_successful_check": max(
+                (item.last_success_at for item in enabled_items if item.last_success_at),
+                default=None,
+            ),
+            "status_counts": status_counts,
+        },
+        not unhealthy,
+    )
 
 
 def system_status(db: Session, settings: Settings) -> dict:
@@ -405,62 +464,57 @@ def system_status(db: Session, settings: Settings) -> dict:
             ),
             "detail": meta_counts,
         }
-        channel_connections = list(db.scalars(select(SocialChannelConnection)))
+        instagram_rows = list(
+            db.execute(
+                select(InstagramPage, InstagramConnection).outerjoin(
+                    InstagramConnection,
+                    InstagramConnection.instagram_page_id == InstagramPage.id,
+                )
+            )
+        )
+        channel_connections = list(
+            db.scalars(
+                select(SocialChannelConnection).where(
+                    SocialChannelConnection.channel_type.in_(("facebook", "whatsapp"))
+                )
+            )
+        )
         channel_detail = {}
         stale_connection_before = now - timedelta(
             seconds=max(3600, settings.meta_connection_check_interval_seconds * 2)
         )
         channel_health_ok = True
+        instagram_active = [
+            connection if connection is not None else _MISSING_SOCIAL_HEALTH_STATE
+            for page, connection in instagram_rows
+            if page.active
+        ]
+        instagram_enabled = [
+            connection if connection is not None else _MISSING_SOCIAL_HEALTH_STATE
+            for page, connection in instagram_rows
+            if page.active and page.publishing_enabled
+        ]
+        channel_detail["instagram"], instagram_ok = _social_channel_health_detail(
+            instagram_active,
+            instagram_enabled,
+            stale_before=stale_connection_before,
+        )
+        channel_health_ok = channel_health_ok and instagram_ok
         for channel_type in SOCIAL_CHANNEL_TYPES:
+            if channel_type == "instagram":
+                continue
             channel_items = [
                 item
                 for item in channel_connections
                 if item.channel_type == channel_type and item.active
             ]
             enabled_items = [item for item in channel_items if item.publishing_enabled]
-            assessments = [
-                (
-                    item,
-                    social_connection_health_reasons(
-                        item,
-                        stale_before=stale_connection_before,
-                    ),
-                )
-                for item in enabled_items
-            ]
-            unhealthy = [item for item, reasons in assessments if reasons]
-            health_reason_counts = {
-                reason: sum(reason in reasons for _, reasons in assessments)
-                for reason in SOCIAL_HEALTH_REASONS
-            }
-            status_counts = {
-                status: sum(item.status == status for item in enabled_items)
-                for status in SOCIAL_CONNECTION_STATUSES
-            }
-            unknown_statuses = sum(
-                item.status not in SOCIAL_CONNECTION_STATUSES for item in enabled_items
+            channel_detail[channel_type], channel_ok = _social_channel_health_detail(
+                channel_items,
+                enabled_items,
+                stale_before=stale_connection_before,
             )
-            status_counts = {status: count for status, count in status_counts.items() if count}
-            if unknown_statuses:
-                status_counts["unknown"] = unknown_statuses
-            channel_detail[channel_type] = {
-                "active_connections": len(channel_items),
-                "enabled_connections": len(enabled_items),
-                "unhealthy_connections": len(unhealthy),
-                "non_connected_connections": health_reason_counts["non_connected"],
-                "missing_last_success": health_reason_counts["missing_last_success"],
-                "stale_last_success": health_reason_counts["stale_last_success"],
-                "last_check_at": max(
-                    (item.last_check_at for item in enabled_items if item.last_check_at),
-                    default=None,
-                ),
-                "last_successful_check": max(
-                    (item.last_success_at for item in enabled_items if item.last_success_at),
-                    default=None,
-                ),
-                "status_counts": status_counts,
-            }
-            channel_health_ok = channel_health_ok and not unhealthy
+            channel_health_ok = channel_health_ok and channel_ok
         checks["social_media_channels"] = {
             "ok": channel_health_ok,
             "detail": channel_detail,
