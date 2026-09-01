@@ -25,6 +25,52 @@ from app.models import (
 )
 
 
+def _utc(value: datetime) -> datetime:
+    return (
+        value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(timezone.utc)
+    )
+
+
+def _fussball_sync_interval(team: Team) -> timedelta:
+    try:
+        interval_hours = int((team.rules or {}).get("sync_interval_hours", 24))
+    except (TypeError, ValueError):
+        interval_hours = 24
+    return timedelta(seconds=max(3600, interval_hours * 3600))
+
+
+def _fussball_sync_stale_reason(
+    state: FussballSyncState,
+    team: Team,
+    settings: Settings,
+    *,
+    now: datetime,
+) -> str | None:
+    """Return why an enabled team's sync is stale, using its persisted schedule."""
+
+    now = _utc(now)
+    if state.status == "running":
+        if state.lease_expires_at is None:
+            return "lease_missing"
+        if _utc(state.lease_expires_at) <= now:
+            return "lease_expired"
+        return None
+
+    grace = timedelta(seconds=max(60, settings.fussball_sync_error_backoff_seconds))
+    if state.next_poll_at is None or _utc(state.next_poll_at) + grace < now:
+        return "poll_overdue"
+
+    success_anchor = state.last_success_at or state.created_at
+    if (
+        success_anchor is not None
+        and _utc(success_anchor) + _fussball_sync_interval(team) + grace < now
+    ):
+        return "success_overdue"
+    return None
+
+
 def system_status(db: Session, settings: Settings) -> dict:
     checks = {}
     critical = []
@@ -423,11 +469,7 @@ def system_status(db: Session, settings: Settings) -> dict:
                 "enabled_connections": len(enabled_items),
                 "unhealthy_connections": len(unhealthy),
                 "last_successful_check": max(
-                    (
-                        item.last_success_at
-                        for item in channel_items
-                        if item.last_success_at
-                    ),
+                    (item.last_success_at for item in channel_items if item.last_success_at),
                     default=None,
                 ),
             }
@@ -438,36 +480,43 @@ def system_status(db: Session, settings: Settings) -> dict:
         }
         if not channel_health_ok:
             critical.append("Social-Media-Kanalverbindung")
-        sync_states = db.scalars(select(FussballSyncState)).all()
-        enabled_team_ids = {
-            team.id
-            for team in db.scalars(select(Team).where(Team.active.is_(True)))
-            if (team.rules or {}).get("automatic_sync_enabled")
-        }
-        enabled_states = [state for state in sync_states if state.team_id in enabled_team_ids]
-        stale_before = now - timedelta(
-            seconds=max(3600, settings.fussball_sync_interval_seconds * 3)
-        )
-        stale = [
-            state
-            for state in enabled_states
-            if not state.last_success_at
-            or (
-                state.last_success_at
-                if state.last_success_at.tzinfo
-                else state.last_success_at.replace(tzinfo=timezone.utc)
+        sync_states = list(db.scalars(select(FussballSyncState)))
+        enabled_teams = {
+            team.id: team
+            for team in db.scalars(
+                select(Team).where(
+                    Team.active.is_(True),
+                    Team.archived_at.is_(None),
+                )
             )
-            < stale_before
-        ]
+            if team.fussball_url and (team.rules or {}).get("automatic_sync_enabled")
+        }
+        enabled_states = [state for state in sync_states if state.team_id in enabled_teams]
+        stale = []
+        if settings.fussball_automatic_sync_enabled:
+            for state in enabled_states:
+                reason = _fussball_sync_stale_reason(
+                    state,
+                    enabled_teams[state.team_id],
+                    settings,
+                    now=now,
+                )
+                if reason:
+                    stale.append((state, reason))
+        stale_reasons = {
+            reason: sum(stale_reason == reason for _, stale_reason in stale)
+            for reason in sorted({stale_reason for _, stale_reason in stale})
+        }
         checks["fussball_automatic"] = {
             "ok": not settings.fussball_automatic_sync_enabled or not stale,
             "detail": {
                 "global_sync_gate": settings.fussball_automatic_sync_enabled,
                 "global_generation_gate": settings.automatic_post_generation_enabled,
-                "enabled_teams": len(enabled_team_ids),
+                "enabled_teams": len(enabled_teams),
                 "running": sum(state.status == "running" for state in enabled_states),
                 "errors": sum(state.status == "error" for state in enabled_states),
                 "stale": len(stale),
+                "stale_reasons": stale_reasons,
                 "last_success": max(
                     (state.last_success_at for state in enabled_states if state.last_success_at),
                     default=None,
