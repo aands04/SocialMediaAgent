@@ -27,8 +27,7 @@ Case in den bestehenden Wrapper aufnehmen:
             --env-file "$ENV_FILE" \
             -f docker-compose.yml \
             -f docker-compose.production.yml \
-            exec -T web /app/scripts/entrypoint.sh \
-            python -m app.monitoring.health_details
+            exec -T web sh /app/scripts/health-details.sh
         ;;
 ```
 

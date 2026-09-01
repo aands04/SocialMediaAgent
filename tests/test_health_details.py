@@ -1,6 +1,7 @@
 import json
 from contextlib import nullcontext
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sqlalchemy import event
 
@@ -234,3 +235,11 @@ def test_cli_prints_only_the_sanitized_payload(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert json.loads(captured.out) == expected
     assert captured.err == ""
+
+
+def test_container_entrypoint_for_health_details_has_no_file_mutations():
+    script = Path("scripts/health-details.sh").read_text()
+
+    assert "python -m app.monitoring.health_details" in script
+    for mutating_command in ("mkdir", "touch", "rm ", "mv ", "cp ", "chmod", "chown"):
+        assert mutating_command not in script
