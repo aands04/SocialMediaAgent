@@ -2154,6 +2154,54 @@ def test_games_page_uses_productive_labels_and_orders_dates_and_kickoffs(browser
     assert "Gegnerlogo fehlt" in all_games
 
 
+def test_games_page_shows_manual_review_for_unresolved_team_identity(browser):
+    client, factory = browser
+    team_id = create_automation_team(
+        factory,
+        suffix="identity-review",
+        rules={
+            "automatic_generation_enabled": True,
+            "announcement_enabled": True,
+            "generation_lead_days": 4,
+        },
+    )
+    with factory() as db:
+        team = db.get(Team, team_id)
+        kickoff = datetime.now(timezone.utc) + timedelta(days=3)
+        unresolved = Game(
+            team_id=team.id,
+            provider="fussball.de",
+            external_id="dashboard-unresolved-identity",
+            home_team="Unbekannte Heimelf",
+            away_team="Unbekannte Gastelf",
+            kickoff=kickoff,
+            source_url="https://example.invalid/unresolved-identity",
+            overrides={"generation_identity_review_required": True},
+        )
+        resolved = Game(
+            team_id=team.id,
+            provider="fussball.de",
+            external_id="dashboard-resolved-identity",
+            home_team=team.display_name,
+            away_team="FC Sichtbarer Gegner",
+            kickoff=kickoff + timedelta(hours=2),
+            source_url="https://example.invalid/resolved-identity",
+        )
+        db.add_all([unresolved, resolved])
+        db.commit()
+        unresolved_id = unresolved.id
+        resolved_id = resolved.id
+
+    response = client.get("/games")
+
+    assert response.status_code == 200
+    assert "Mannschaftszuordnung prüfen" in response.text
+    assert "Gegnerlogo erst nach eindeutiger Zuordnung verfügbar" in response.text
+    assert f"/games/{unresolved_id}/opponent-logo" not in response.text
+    assert "FC Sichtbarer Gegner" in response.text
+    assert f"/games/{resolved_id}/opponent-logo" in response.text
+
+
 def test_games_filters_reject_invisible_team(browser):
     client, _ = browser
     assert client.get("/games?team_id=not-visible-to-this-user").status_code == 403
