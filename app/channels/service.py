@@ -10,10 +10,59 @@ from app.models import (
     InstagramConnection,
     InstagramPage,
     SocialChannelConnection,
+    Team,
     TeamChannelAssignment,
     WhatsAppMessageTemplate,
     WhatsAppRecipient,
 )
+
+
+class InstagramAssignmentConflict(ValueError):
+    pass
+
+
+def instagram_page_for_team(db: Session, team: Team) -> InstagramPage | None:
+    """Resolve the one Instagram target assigned to a team without mutating state.
+
+    TeamChannelAssignment is authoritative once an Instagram assignment row
+    exists.  The legacy Team.instagram_page_id remains a compatibility fallback
+    only for teams which have never been migrated to channel assignments.
+    """
+
+    rows = list(
+        db.execute(
+            select(TeamChannelAssignment, SocialChannelConnection)
+            .join(
+                SocialChannelConnection,
+                SocialChannelConnection.id == TeamChannelAssignment.channel_connection_id,
+            )
+            .where(
+                TeamChannelAssignment.club_id == team.club_id,
+                TeamChannelAssignment.team_id == team.id,
+                SocialChannelConnection.club_id == team.club_id,
+                SocialChannelConnection.channel_type == "instagram",
+            )
+        )
+    )
+    enabled = [connection for assignment, connection in rows if assignment.enabled]
+    if len(enabled) > 1:
+        raise InstagramAssignmentConflict(
+            "Der Mannschaft sind mehrere aktive Instagram-Kanäle zugeordnet"
+        )
+    if enabled:
+        page_id = enabled[0].legacy_instagram_page_id
+        if not page_id:
+            raise InstagramAssignmentConflict("Die Instagram-Zuordnung ist unvollständig")
+        page = db.get(InstagramPage, page_id)
+        if page is None or page.club_id != team.club_id or page.archived_at is not None:
+            raise InstagramAssignmentConflict("Die Instagram-Zuordnung ist nicht verfügbar")
+        return page
+    if rows or not team.instagram_page_id:
+        return None
+    page = db.get(InstagramPage, team.instagram_page_id)
+    if page is not None and page.club_id == team.club_id and page.archived_at is None:
+        return page
+    return None
 
 
 def sync_instagram_channel(db: Session, page: InstagramPage) -> SocialChannelConnection:
@@ -80,8 +129,7 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
         )
     )
     instagram_connections = {
-        item.instagram_page_id: item
-        for item in db.scalars(select(InstagramConnection))
+        item.instagram_page_id: item for item in db.scalars(select(InstagramConnection))
     }
     result: dict[str, list[dict]] = {
         "instagram": [],

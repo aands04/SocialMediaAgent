@@ -13,11 +13,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.channels.service import instagram_page_for_team
 from app.config import Settings
 from app.meta.user_tags import UserTagValidationError, parse_user_tag_specs
 from app.models import (
     AuditLog,
-    InstagramPage,
     JobStatus,
     Post,
     PostStatus,
@@ -299,7 +299,7 @@ def create_manual_post(
     existing = db.scalar(select(Post).where(Post.manual_submission_id == submission_id))
     if existing:
         return existing, False
-    page = db.get(InstagramPage, team.instagram_page_id)
+    page = instagram_page_for_team(db, team)
     if not team.active or team.archived_at:
         raise ManualPostError("Mannschaft ist nicht aktiv")
     if not page or page.archived_at:
