@@ -185,8 +185,8 @@ Prüfergebnisse besonders wichtig.
   Status-Check-Constraints ausdrücklich testen.
 - Produktive Downgrades nie als improvisierten Rollback verwenden; Restore aus
   einem geprüften Backup ist der sichere Rückweg.
-- Stand 1. September 2026 ist die Dateikette linear bis Revision `0034`
-  (`fupa_browser_sessions`). Vor jeder Aussage zum aktuellen Head erneut
+- Stand 2. September 2026 ist die Dateikette linear bis Revision `0035`
+  (`optional_post_instagram`). Vor jeder Aussage zum aktuellen Head erneut
   `alembic heads` und auf dem Zielsystem `alembic current` prüfen.
 
 ## Umgebungsdateien und Secrets

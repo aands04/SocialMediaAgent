@@ -698,9 +698,10 @@ def create_post(
     resuming = bool(existing and existing.status == PostStatus.INCOMPLETE)
     if existing and not resuming:
         return existing
-    page = db.get(InstagramPage, team.instagram_page_id)
-    if not page or page.club_id != team.club_id:
+    page = db.get(InstagramPage, team.instagram_page_id) if team.instagram_page_id else None
+    if page and page.club_id != team.club_id:
         raise ValueError("Die Instagram-Seite gehört nicht zu diesem Verein")
+    default_page_id = page.id if page else None
     warnings = [
         warning
         for warning in ((existing.critical_warnings or []) if existing else [])
@@ -786,7 +787,7 @@ def create_post(
             db.delete(publication)
         post.status = PostStatus.CREATING
         post.critical_warnings = warnings
-        post.instagram_page_id = page.id
+        post.instagram_page_id = default_page_id
         post.media_asset_id = asset.id if asset else None
         post.design_snapshot = {
             **(post.design_snapshot or {}),
@@ -802,7 +803,7 @@ def create_post(
         post = Post(
             game_id=game.id,
             team_id=team.id,
-            instagram_page_id=page.id,
+            instagram_page_id=default_page_id,
             post_type=post_type,
             status=PostStatus.CREATING,
             media_asset_id=asset.id if asset else None,
@@ -987,7 +988,7 @@ def create_post(
             selected_page_id = (
                 publication_slot.instagram_page_id
                 if publication_slot and publication_slot.instagram_page_id
-                else page.id
+                else default_page_id
             )
             feed_job = PublicationJob(
                 post_id=post.id,
@@ -1017,7 +1018,7 @@ def create_post(
             post_id=post.id,
             game_id=game.id,
             team_id=team.id,
-            instagram_page_id=page.id,
+            instagram_page_id=default_page_id,
             kind="carousel" if len(published_feed_paths) > 1 else "feed",
             media_path=published_feed_paths[0],
             text_snapshot=post.text,
@@ -1076,7 +1077,7 @@ def create_post(
         and not planned_rules
         and story_output_count > 0
     ):
-        planned_rules = [(_SyntheticResultStoryRule(instagram_page_id=page.id), 1)]
+        planned_rules = [(_SyntheticResultStoryRule(instagram_page_id=default_page_id), 1)]
     seen = set()
     rendered_slots = {}
     story_snapshots = []
@@ -1148,7 +1149,7 @@ def create_post(
                 post_id=post.id,
                 game_id=game.id,
                 team_id=team.id,
-                instagram_page_id=rule.instagram_page_id or page.id,
+                instagram_page_id=rule.instagram_page_id or default_page_id,
                 story_rule_id=None if isinstance(rule, _SyntheticResultStoryRule) else rule.id,
                 kind="story",
                 media_path=path,
@@ -1300,7 +1301,7 @@ def create_post(
                     instagram_page_id=(
                         publication_slot.instagram_page_id
                         if publication_slot and publication_slot.instagram_page_id
-                        else page.id
+                        else default_page_id
                     ),
                     story_rule_id=legacy_rule_id,
                     kind="story",

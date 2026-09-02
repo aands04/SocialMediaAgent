@@ -46,7 +46,7 @@ def approve(
 ) -> Post:
     if not allowed(db, user, "approve", post.team_id):
         raise ApprovalError("Keine Freigabeberechtigung")
-    page = db.get(InstagramPage, post.instagram_page_id)
+    page = db.get(InstagramPage, post.instagram_page_id) if post.instagram_page_id else None
     team = db.get(Team, post.team_id)
     jobs = list(db.scalars(select(PublicationJob).where(PublicationJob.post_id == post.id)))
     selected = [j for j in jobs if selected_jobs is None or j.id in selected_jobs]
