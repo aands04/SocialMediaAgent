@@ -49,7 +49,7 @@
       {% set connection = card.connection %}
       <article class="connection-summary">
         <h3>{{ connection.display_name }}</h3>
-        {% if connection.username %}<p>@{{ connection.username }}</p>{% elif connection.display_phone_number %}<p>{{ connection.display_phone_number }}</p>{% endif %}
+        {% if connection.username and not card.instagram_setup_pending %}<p>@{{ connection.username }}</p>{% elif connection.display_phone_number %}<p>{{ connection.display_phone_number }}</p>{% endif %}
         <p><span class="channel-status channel-status-{{ card.display_status }}">{{ '✓ ' if card.display_status == 'connected' else '' }}{{ card.status_label }}</span></p>
         <dl class="channel-summary-list">
           <dt>{{ 'Spielbericht-Rückfragen' if channel_type == 'telegram' else ('Automatische Nachrichten' if channel_type == 'whatsapp' else 'Automatische Veröffentlichung') }}</dt><dd>{{ 'Aktiv' if channel_type == 'telegram' and connection.status == 'connected' else ('Aktiv' if connection.automatic_delivery_enabled else 'Pausiert') }}</dd>
@@ -59,7 +59,18 @@
         {% if card.progress and card.progress.completed < card.progress.total %}
         <p class="setup-progress">Einrichtung {{ card.progress.completed }} von {{ card.progress.total }} Schritten</p>
         {% endif %}
-        {% if channel_type == 'whatsapp' and card.reconnect_required %}
+        {% if channel_type == 'instagram' and card.instagram_setup_pending %}
+        <div class="warning">
+          <strong>Instagram-Einrichtung noch nicht abgeschlossen</strong>
+          <p>Melde dich bei Meta an und bestätige das professionelle Instagram-Konto. Die Verbindung startet weiterhin ohne automatische Veröffentlichung.</p>
+          {% if is_admin %}
+          <form method="post" action="/instagram/{{ connection.legacy_instagram_page_id }}/meta/connect">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <button>Einrichtung fortsetzen</button>
+          </form>
+          {% endif %}
+        </div>
+        {% elif channel_type == 'whatsapp' and card.reconnect_required %}
         <div class="warning">
           <strong>WhatsApp muss neu verbunden werden</strong>
           <p>Die bisherige Verbindung enthält keinen verwendbaren Zugriff mehr. Empfänger, Vorlagen, Einstellungen und die Historie bleiben erhalten.</p>
@@ -85,7 +96,9 @@
         {% if is_admin %}
         <details class="channel-manage">
           <summary>Verwalten</summary>
-          {% if channel_type != 'telegram' %}
+          {% if card.instagram_setup_pending %}
+          <p>Schließe zuerst die Anmeldung bei Meta ab. Anschließend kannst du den Kanal prüfen und gezielt aktivieren.</p>
+          {% elif channel_type != 'telegram' %}
           <form method="post" action="/channels/{{ connection.id }}/settings" class="channel-settings-form">
             <input type="hidden" name="csrf_token" value="{{ csrf }}">
             <label><input type="checkbox" name="publishing_enabled" {% if connection.publishing_enabled %}checked{% endif %}> Kanal verwenden</label>
@@ -103,11 +116,13 @@
           {% else %}
           <p>Kontakte, Anbieterpriorität und Rückfragen verwaltest du direkt beim jeweiligen FuPa-Spielbericht. Der Bot dient nicht als Veröffentlichungsziel.</p>
           {% endif %}
+          {% if not card.instagram_setup_pending %}
           <div class="button-row">
             <form method="post" action="/channels/{{ connection.id }}/check"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>{{ 'Verbindung und Webhook prüfen' if channel_type in ['whatsapp', 'telegram'] else 'Verbindung prüfen' }}</button></form>
             {% if channel_type == 'instagram' and connection.legacy_instagram_page_id %}<form method="post" action="/instagram/{{ connection.legacy_instagram_page_id }}/meta/refresh"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Verbindung erneuern</button></form>
             {% elif channel_type in ['facebook', 'whatsapp', 'telegram'] %}<a class="button secondary" href="/channels/{{ channel_type }}/setup">{{ 'Neu verbinden' if channel_type == 'telegram' else ('WhatsApp neu verbinden' if channel_type == 'whatsapp' else 'Verbindung erneuern') }}</a>{% endif %}
           </div>
+          {% endif %}
           {% if channel_type == 'whatsapp' %}
           <p class="field-help">Die Prüfung kontrolliert Telefonnummer und Webhook-Abonnement. Fehlt der Zugriff, verbinde WhatsApp erneut; gespeicherte Empfänger, Vorlagen und Einstellungen bleiben bestehen.</p>
           {% if card.reregistration_available %}
@@ -129,6 +144,7 @@
           {% else %}
           <p class="field-help">Telegram-Rückfragen laufen ausschließlich über den sicheren Bot-Webhook. Bot-Token werden nie angezeigt.</p>
           {% endif %}
+          {% if not card.instagram_setup_pending %}
           <details>
             <summary>Verbindung trennen</summary>
             <p>Neue Vorgänge über diesen Kanal werden gestoppt. Historische Veröffentlichungen und Auditdaten bleiben erhalten.</p>
@@ -138,6 +154,7 @@
               <button class="danger">Verbindung trennen</button>
             </form>
           </details>
+          {% endif %}
         </details>
         {% endif %}
         {% if is_admin %}

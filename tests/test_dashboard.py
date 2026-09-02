@@ -952,6 +952,33 @@ def test_instagram_meta_test_dashboard_is_explicit_and_blocks_mock_connect(brows
     assert blocked.status_code == 422
 
 
+def test_pending_instagram_setup_can_be_resumed_from_channel_dashboard(browser):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="guided-instagram",
+            display_name="Instagram Hauptseite",
+            username="auswahl-placeholder",
+            club="Dashboard Testverein",
+            active=False,
+            publishing_enabled=False,
+            connection_status="unconfigured",
+            defaults={"guided_setup": True},
+        )
+        db.add(page)
+        db.commit()
+        page_id = page.id
+
+    response = client.get("/channels")
+
+    assert response.status_code == 200
+    assert "Instagram-Einrichtung noch nicht abgeschlossen" in response.text
+    assert "Einrichtung fortsetzen" in response.text
+    assert f'action="/instagram/{page_id}/meta/connect"' in response.text
+    assert f'action="/instagram/{page_id}/meta/refresh"' not in response.text
+    assert "@auswahl-placeholder" not in response.text
+
+
 def test_channel_specific_text_requires_reapproval_and_stays_tenant_bound(browser):
     client, factory = browser
     with factory() as db:

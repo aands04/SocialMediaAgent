@@ -41,6 +41,12 @@ zusätzliche Einschränkungen und Publishing-Limits; diese dürfen nicht durch p
 inoffizielle Logins umgangen werden. Die Verbindung wird standardmäßig alle zwölf Stunden
 lesend geprüft. Ein unklarer Schreibaufruf wird nicht automatisch wiederholt.
 
+Wird der Meta-Dialog bei der Ersteinrichtung abgebrochen oder nicht vollständig beendet,
+bleibt der sicher deaktivierte Platzhalter in der Kanalübersicht erhalten. Mit
+**Einrichtung fortsetzen** kann ein Vereinsadministrator den offiziellen OAuth-Dialog für
+genau diesen Platzhalter erneut starten. Erst ein erfolgreicher OAuth-Abschluss beendet den
+Einrichtungszustand; Publishing und automatische Veröffentlichung bleiben dabei deaktiviert.
+
 ## Facebook-Seiten
 
 Die Kontoauswahl erfolgt über den offiziellen Meta-OAuth-Dialog. Die Anwendung liest die vom

@@ -43,6 +43,7 @@ from app.meta.security import TokenCipher
 from app.models import (
     AuditLog,
     ChannelDeliveryAttempt,
+    InstagramConnection,
     InstagramPage,
     JobStatus,
     Post,
@@ -275,6 +276,41 @@ def test_facebook_and_whatsapp_are_available_by_default():
     assert settings.whatsapp_channel_enabled is True
     assert_channel_enabled(settings, "facebook")
     assert_channel_enabled(settings, "whatsapp")
+
+
+def test_instagram_card_distinguishes_pending_guided_setup(db):
+    page = InstagramPage(
+        internal_name="guided-instagram",
+        display_name="Instagram Hauptseite",
+        username="auswahl-placeholder",
+        club="Testverein",
+        active=False,
+        publishing_enabled=False,
+        connection_status="unconfigured",
+        defaults={"guided_setup": True},
+    )
+    db.add(page)
+    db.flush()
+
+    pending_card = channel_cards(db)["instagram"][0]
+
+    assert pending_card["instagram_setup_pending"] is True
+
+    db.add(
+        InstagramConnection(
+            instagram_page_id=page.id,
+            instagram_user_id="instagram-account",
+            confirmed_username="testverein",
+            account_type="BUSINESS",
+            status="connected",
+            encrypted_token="encrypted-token-placeholder",
+        )
+    )
+    db.flush()
+
+    connected_card = channel_cards(db)["instagram"][0]
+
+    assert connected_card["instagram_setup_pending"] is False
 
 
 @pytest.mark.parametrize("channel_type", ["facebook", "whatsapp"])
