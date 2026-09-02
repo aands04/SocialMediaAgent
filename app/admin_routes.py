@@ -3399,6 +3399,9 @@ def save_rules(
     result_feed_publish_count: int | None = Form(default=None),
     result_story_generation_count: int | None = Form(default=None),
     result_story_publish_count: int | None = Form(default=None),
+    text_generation_mode_announcement: str = Form(default="ai"),
+    text_generation_mode_reminder: str = Form(default="ai"),
+    text_generation_mode_result: str = Form(default="ai"),
     image_prompt_feed: str = Form(default="default-image-feed"),
     image_prompt_story: str = Form(default="default-image-story"),
     text_prompt: str = Form(default="default-text-announcement"),
@@ -3452,6 +3455,13 @@ def save_rules(
         raise HTTPException(422, "Ungueltiger Zeitpunkt fuer Ergebnisse")
     if reminder_timing_mode not in {"relative", "weekday_fixed"}:
         raise HTTPException(422, "Ungültiger Zeitpunkt für Erinnerungsbeiträge")
+    text_generation_modes = {
+        "text_generation_mode_announcement": text_generation_mode_announcement,
+        "text_generation_mode_reminder": text_generation_mode_reminder,
+        "text_generation_mode_result": text_generation_mode_result,
+    }
+    if any(value not in {"ai", "schema"} for value in text_generation_modes.values()):
+        raise HTTPException(422, "Ungültige Auswahl für die Texterstellung")
     if club_matchday_feed_mode not in {
         "separate",
         "announcements",
@@ -3794,6 +3804,7 @@ def save_rules(
         "club_matchday_feed_mode": club_matchday_feed_mode,
         "club_matchday_primary_team_id": club_matchday_primary_team_id or None,
         "reminder_feed_before_minutes": reminder_feed_before_minutes,
+        **text_generation_modes,
         **output_counts,
         **structured_counts,
         # Prompt selection is platform-owned. Keep any existing protected
