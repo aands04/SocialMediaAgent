@@ -29,9 +29,11 @@ from app.meta.publishing import (
     reconcile_attempt,
     refresh_container_status,
 )
+from app.meta.security import secret_hash
 from app.models import (
     AuditLog,
     InstagramConnection,
+    InstagramOAuthState,
     InstagramPage,
     MetaCarouselItem,
     MetaPublishingAttempt,
@@ -41,6 +43,7 @@ from app.models import (
     SystemSetting,
     User,
 )
+from app.tenancy.state import system_scope, tenant_scope
 from app.web import berlin_datetime, check_csrf, csrf_token, current_user, require_admin
 
 router = APIRouter()
@@ -50,9 +53,42 @@ settings = get_settings()
 templates.env.globals["environment"] = settings.environment
 templates.env.globals["meta_test_enabled"] = settings.meta_test_enabled
 
+_PUBLIC_OAUTH_ERROR = (
+    "Die Instagram-Verbindung konnte nicht abgeschlossen werden. "
+    "Kehre zum Dashboard zurück und starte die Einrichtung erneut."
+)
+
 
 def _redirect(path: str, notice: str) -> RedirectResponse:
     return RedirectResponse(f"{path}?notice={notice}", 303)
+
+
+def _oauth_result(
+    request: Request,
+    *,
+    ok: bool,
+    message: str,
+    status_code: int = 200,
+):
+    response = templates.TemplateResponse(
+        request,
+        "meta_oauth_result.html",
+        {"ok": ok, "message": message},
+        status_code=status_code,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
+
+
+def _oauth_state_club_id(db: Session, state: str) -> str | None:
+    with system_scope("Öffentlichen Instagram-OAuth-State einem Verein zuordnen"):
+        return db.scalar(
+            select(InstagramOAuthState.club_id).where(
+                InstagramOAuthState.state_hash == secret_hash(state)
+            )
+        )
 
 
 def _admin(current: User) -> None:
@@ -97,48 +133,48 @@ def meta_oauth_callback(
     db: Session = Depends(get_db),
 ):
     if error:
-        message = f"Instagram-Verbindung abgelehnt: {error_description or error}"
         if state:
             try:
+                club_id = _oauth_state_club_id(db, state)
+                if not club_id:
+                    raise MetaApiError("Verbindungsvorgang ist ungültig oder abgelaufen")
                 # Persist only Meta's bounded error identifier. The externally
                 # supplied description may contain arbitrary or sensitive text.
-                reject_oauth(db, settings, state=state, error=error[:100])
+                with tenant_scope(club_id, "system:instagram-oauth-rejection"):
+                    reject_oauth(db, settings, state=state, error=error[:100])
             except Exception:
                 db.rollback()
-        return templates.TemplateResponse(
+        return _oauth_result(
             request,
-            "meta_oauth_result.html",
-            {"ok": False, "message": message},
+            ok=False,
+            message=_PUBLIC_OAUTH_ERROR,
             status_code=400,
         )
     if not state or not code:
-        return templates.TemplateResponse(
+        return _oauth_result(
             request,
-            "meta_oauth_result.html",
-            {"ok": False, "message": "OAuth-State oder Code fehlt"},
+            ok=False,
+            message=_PUBLIC_OAUTH_ERROR,
             status_code=400,
         )
     try:
-        connection = complete_oauth(
-            db, settings, state=state, code=code, api=MetaApiClient(settings)
-        )
-    except Exception as exc:
-        return templates.TemplateResponse(
+        club_id = _oauth_state_club_id(db, state)
+        if not club_id:
+            raise MetaApiError("Verbindungsvorgang ist ungültig oder abgelaufen")
+        with tenant_scope(club_id, "system:instagram-oauth-callback"):
+            complete_oauth(db, settings, state=state, code=code, api=MetaApiClient(settings))
+    except Exception:
+        db.rollback()
+        return _oauth_result(
             request,
-            "meta_oauth_result.html",
-            {"ok": False, "message": str(exc)},
+            ok=False,
+            message=_PUBLIC_OAUTH_ERROR,
             status_code=400,
         )
-    return templates.TemplateResponse(
+    return _oauth_result(
         request,
-        "meta_oauth_result.html",
-        {
-            "ok": True,
-            "message": (
-                f"Instagram @{connection.confirmed_username} wurde als "
-                f"{connection.account_type} verbunden."
-            ),
-        },
+        ok=True,
+        message="Das Instagram-Business-Konto wurde erfolgreich verbunden.",
     )
 
 

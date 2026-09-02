@@ -67,11 +67,14 @@ def start_oauth(
     api: MetaApiClient,
 ) -> str:
     assert_meta_environment(settings)
+    if not page.club_id or not user.club_id or page.club_id != user.club_id:
+        raise MetaApiError("Instagram-Seite und Benutzer sind nicht demselben Verein zugeordnet")
     if not settings.meta_oauth_redirect_uri:
         raise MetaApiError("META_OAUTH_REDIRECT_URI fehlt")
     state = random_oauth_state()
     db.add(
         InstagramOAuthState(
+            club_id=page.club_id,
             state_hash=secret_hash(state),
             instagram_page_id=page.id,
             user_id=user.id,
@@ -82,6 +85,7 @@ def start_oauth(
     )
     db.add(
         AuditLog(
+            club_id=page.club_id,
             user_id=user.id,
             action="meta.oauth_started",
             entity_type="instagram_page",
@@ -117,10 +121,13 @@ def complete_oauth(
 ) -> InstagramConnection:
     assert_meta_environment(settings, external_call=True)
     record = consume_oauth_state(db, state)
+    record_id = record.id
     try:
         initiating_user = db.get(User, record.user_id)
         if not initiating_user or not initiating_user.active:
             raise MetaApiError("Der Benutzer, der OAuth gestartet hat, ist nicht mehr aktiv")
+        if not record.club_id or initiating_user.club_id != record.club_id:
+            raise MetaApiError("Der Instagram-Verbindungsvorgang ist keinem Verein zugeordnet")
         short = api.exchange_code(code, record.redirect_uri)
         token = api.exchange_long_lived(short)
         profile = api.profile(token.access_token)
@@ -134,11 +141,12 @@ def complete_oauth(
         page = db.get(InstagramPage, record.instagram_page_id)
         if not page:
             raise MetaApiError("Zielseite wurde während OAuth entfernt")
+        if page.club_id != record.club_id:
+            raise MetaApiError("Die Instagram-Zielseite gehört nicht zum Verbindungsvorgang")
         confirmed_username = str(profile.get("username") or "")
         if (
             not (page.defaults or {}).get("guided_setup")
-            and
-            page.username
+            and page.username
             and confirmed_username
             and page.username.casefold() != confirmed_username.casefold()
         ):
@@ -151,7 +159,12 @@ def complete_oauth(
             .where(InstagramConnection.instagram_page_id == page.id)
             .with_for_update()
         )
-        connection = existing or InstagramConnection(instagram_page_id=page.id)
+        if existing and existing.club_id != page.club_id:
+            raise MetaApiError("Die bestehende Instagram-Verbindung gehört zu einem anderen Verein")
+        connection = existing or InstagramConnection(
+            club_id=page.club_id,
+            instagram_page_id=page.id,
+        )
         if not existing:
             db.add(connection)
         connection.instagram_user_id = profile_id
@@ -179,8 +192,10 @@ def complete_oauth(
         page.last_check_at = datetime.now(timezone.utc)
         if (page.defaults or {}).get("guided_setup"):
             page.defaults = {**(page.defaults or {}), "guided_setup": False}
+        db.flush()
         db.add(
             AuditLog(
+                club_id=page.club_id,
                 user_id=record.user_id,
                 action="meta.oauth_completed",
                 entity_type="instagram_connection",
@@ -196,17 +211,28 @@ def complete_oauth(
         return connection
     except Exception as exc:
         safe_error = _safe_error(exc)
-        record.error = safe_error
-        db.add(
-            AuditLog(
-                user_id=record.user_id,
-                action="meta.oauth_rejected",
-                entity_type="instagram_page",
-                entity_id=record.instagram_page_id,
-                details={"error": safe_error},
-            )
-        )
-        db.commit()
+        # A failed flush leaves the SQLAlchemy session unusable until rollback.
+        # Persist only the sanitized rejection in a fresh transaction and never
+        # replace the original exception with PendingRollbackError.
+        db.rollback()
+        try:
+            rejected = db.get(InstagramOAuthState, record_id)
+            if rejected is not None:
+                rejected.used_at = datetime.now(timezone.utc)
+                rejected.error = safe_error
+                db.add(
+                    AuditLog(
+                        club_id=rejected.club_id,
+                        user_id=rejected.user_id,
+                        action="meta.oauth_rejected",
+                        entity_type="instagram_page",
+                        entity_id=rejected.instagram_page_id,
+                        details={"error": safe_error},
+                    )
+                )
+                db.commit()
+        except Exception:
+            db.rollback()
         raise
 
 
@@ -216,6 +242,7 @@ def reject_oauth(db: Session, settings: Settings, *, state: str, error: str) -> 
     record.error = error[:500]
     db.add(
         AuditLog(
+            club_id=record.club_id,
             user_id=record.user_id,
             action="meta.oauth_rejected",
             entity_type="instagram_page",
