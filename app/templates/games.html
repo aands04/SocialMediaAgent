@@ -131,6 +131,8 @@
         <strong class="game-status game-status--{{group.status_key}}">{{group.status_label}}</strong>
         {% if group.detail_post %}
           <a class="button" href="/posts/{{group.detail_post.id}}">{{group.action_label}}</a>
+        {% elif group.identity_review_team_id %}
+          <a class="button" href="/rules?team_id={{group.identity_review_team_id}}#fussball-settings">Mannschaftszuordnung prüfen</a>
         {% elif group.problem_generation_job %}
           <a class="button" href="/generation-jobs/{{group.problem_generation_job.id}}">{{group.action_label}}</a>
         {% else %}

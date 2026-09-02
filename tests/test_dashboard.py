@@ -2154,7 +2154,8 @@ def test_games_page_uses_productive_labels_and_orders_dates_and_kickoffs(browser
     assert "Gegnerlogo fehlt" in all_games
 
 
-def test_games_page_shows_manual_review_for_unresolved_team_identity(browser):
+@pytest.mark.parametrize("with_failed_job", [False, True])
+def test_games_page_shows_manual_review_for_unresolved_team_identity(browser, with_failed_job):
     client, factory = browser
     team_id = create_automation_team(
         factory,
@@ -2188,6 +2189,21 @@ def test_games_page_shows_manual_review_for_unresolved_team_identity(browser):
             source_url="https://example.invalid/resolved-identity",
         )
         db.add_all([unresolved, resolved])
+        db.flush()
+        if with_failed_job:
+            db.add(
+                GenerationJob(
+                    job_type=GenerationJobType.CREATE_POST,
+                    game_id=unresolved.id,
+                    team_id=team.id,
+                    post_type="announcement",
+                    requested_by=db.query(User).one().id,
+                    status=GenerationJobStatus.FAILED,
+                    phase="planning",
+                    idempotency_key="dashboard-unresolved-identity-failed",
+                    active_key=None,
+                )
+            )
         db.commit()
         unresolved_id = unresolved.id
         resolved_id = resolved.id
@@ -2197,9 +2213,17 @@ def test_games_page_shows_manual_review_for_unresolved_team_identity(browser):
     assert response.status_code == 200
     assert "Mannschaftszuordnung prüfen" in response.text
     assert "Gegnerlogo erst nach eindeutiger Zuordnung verfügbar" in response.text
+    assert f'href="/rules?team_id={team_id}#fussball-settings"' in response.text
+    assert "Problem prüfen</button>" not in response.text
     assert f"/games/{unresolved_id}/opponent-logo" not in response.text
     assert "FC Sichtbarer Gegner" in response.text
     assert f"/games/{resolved_id}/opponent-logo" in response.text
+
+    rules_response = client.get(f"/rules?team_id={team_id}")
+    assert rules_response.status_code == 200
+    assert f'value="{team_id}" selected' in rules_response.text
+    assert '<section id="fussball-settings"' in rules_response.text
+    assert 'name="identity_aliases"' in rules_response.text
 
 
 def test_games_filters_reject_invisible_team(browser):
