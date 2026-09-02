@@ -862,7 +862,11 @@ class Post(Base, Timestamped):
     club_id: Mapped[str] = mapped_column(ForeignKey("clubs.id", ondelete="RESTRICT"), index=True)
     game_id: Mapped[str | None] = mapped_column(ForeignKey("games.id"), nullable=True)
     team_id: Mapped[str] = mapped_column(ForeignKey("teams.id"))
-    instagram_page_id: Mapped[str] = mapped_column(ForeignKey("instagram_pages.id"))
+    # Legacy publication target. Content generation is channel-independent;
+    # publication remains gated by a concrete channel on the selected jobs.
+    instagram_page_id: Mapped[str | None] = mapped_column(
+        ForeignKey("instagram_pages.id"), nullable=True
+    )
     post_type: Mapped[str] = mapped_column(String(30))
     active_key: Mapped[str] = mapped_column(String(20), default="active")
     manual_submission_id: Mapped[str | None] = mapped_column(String(120))
