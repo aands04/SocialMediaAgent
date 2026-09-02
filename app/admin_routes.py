@@ -7035,11 +7035,16 @@ def games(
         game.id: logos_by_id.get(game.opponent_logo_id) if game.opponent_logo_id else None
         for game in items
     }
-    opponents = {
-        game.id: opponent_name(game, team_map[game.team_id])
-        for game in items
-        if game.team_id in team_map
-    }
+    opponents: dict[str, str] = {}
+    unresolved_opponent_game_ids: set[str] = set()
+    for game in items:
+        team = team_map.get(game.team_id)
+        if not team:
+            continue
+        try:
+            opponents[game.id] = opponent_name(game, team)
+        except TeamIdentityError:
+            unresolved_opponent_game_ids.add(game.id)
     game_groups = dashboard_game_groups(db, items, team_map)
     game_ids = {game.id for game in items}
     game_posts = (
@@ -7293,6 +7298,7 @@ def games(
         items=items,
         logo_map=logo_map,
         opponents=opponents,
+        unresolved_opponent_game_ids=unresolved_opponent_game_ids,
         game_groups=game_groups,
         upcoming_day_groups=upcoming_day_groups,
         past_day_groups=past_day_groups,
