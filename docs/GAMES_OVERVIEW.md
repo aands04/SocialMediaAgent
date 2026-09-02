@@ -47,6 +47,9 @@ Die Oberfläche unterscheidet unter anderem:
 
 Ein fehlgeschlagener Generierungsauftrag wird über „Problem prüfen“ geöffnet. Eine
 überfällige, noch nicht gestartete Erstellung kann bewusst sofort ausgelöst werden.
+Wenn die automatische Planung stattdessen eine unklare Mannschaftsidentität zur
+manuellen Prüfung markiert hat, führt die Aktion direkt zum Aliasfeld der betroffenen
+Mannschaft. Sie stößt in diesem Zustand keinen weiteren Generierungsversuch an.
 
 ## Datenmodell und Kompatibilität
 

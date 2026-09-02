@@ -7185,6 +7185,17 @@ def games(
             bundle_id=group["key"],
             now=now_utc,
         )
+        identity_review_game = next(
+            (
+                game
+                for game in group["games"]
+                if (game.overrides or {}).get("generation_identity_review_required")
+            ),
+            None,
+        )
+        group["identity_review_team_id"] = (
+            identity_review_game.team_id if identity_review_game else None
+        )
         job_statuses = {row.job.status for row in rows}
         post_statuses = {post.status for post in posts_for_group}
         failed_generation = any(
