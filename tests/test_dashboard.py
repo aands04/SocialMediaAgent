@@ -2668,6 +2668,7 @@ def test_dashboard_admin_flow(browser):
             "generation_lead_days": "4",
             "sync_interval_hours": "24",
             "result_poll_interval_minutes": "15",
+            "identity_aliases": "  JSG Ehlen/Hoof C-Junioren  \nSVE C1\nsve c1",
             "auto_approve_announcements": "true",
             "auto_approve_announcements_acknowledged": "true",
             "club_matchday_feed_mode": "announcements",
@@ -2688,6 +2689,10 @@ def test_dashboard_admin_flow(browser):
         assert saved_team.rules["generation_lead_days"] == 4
         assert saved_team.rules["sync_interval_hours"] == 24
         assert saved_team.rules["result_poll_interval_minutes"] == 15
+        assert saved_team.rules["identity_aliases"] == [
+            "JSG Ehlen/Hoof C-Junioren",
+            "SVE C1",
+        ]
         assert saved_team.rules["auto_approve_announcements"] is True
         assert saved_team.rules["club_matchday_feed_mode"] == "announcements"
         assert saved_team.rules["club_matchday_primary_team_id"] == team.id

@@ -7,6 +7,10 @@ class TeamIdentityError(ValueError):
     pass
 
 
+MAX_IDENTITY_ALIASES = 20
+MAX_IDENTITY_ALIAS_LENGTH = 160
+
+
 def normalize_team_name(value: str) -> str:
     value = unicodedata.normalize("NFKC", value or "")
     value = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", value)
@@ -34,14 +38,64 @@ def team_name_variants(value: str) -> set[str]:
     return variants
 
 
+def validate_identity_aliases(value: object) -> tuple[str, ...]:
+    """Return a bounded, deterministic list of explicitly configured aliases."""
+
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        candidates = value.splitlines()
+    elif isinstance(value, (list, tuple)):
+        candidates = value
+    else:
+        raise TeamIdentityError("Mannschafts-Aliase müssen als Liste gespeichert werden")
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            raise TeamIdentityError("Mannschafts-Aliase müssen Textwerte sein")
+        alias = candidate.strip()
+        if not alias:
+            continue
+        if len(alias) > MAX_IDENTITY_ALIAS_LENGTH:
+            raise TeamIdentityError(
+                f"Mannschafts-Aliase dürfen höchstens {MAX_IDENTITY_ALIAS_LENGTH} Zeichen lang sein"
+            )
+        normalized = normalize_team_name(alias)
+        if not normalized:
+            continue
+        if normalized in seen:
+            continue
+        if len(result) >= MAX_IDENTITY_ALIASES:
+            raise TeamIdentityError(
+                f"Es dürfen höchstens {MAX_IDENTITY_ALIASES} Mannschafts-Aliase gespeichert werden"
+            )
+        seen.add(normalized)
+        result.append(alias)
+    return tuple(result)
+
+
 def team_aliases(team) -> tuple[str, ...]:
-    values = (
+    values = [
         getattr(team, "display_name", None),
         getattr(team, "internal_name", None),
         getattr(team, "short_name", None),
         getattr(team, "club", None),
-    )
-    return tuple(str(value).strip() for value in values if str(value or "").strip())
+    ]
+    rules = getattr(team, "rules", None) or {}
+    values.extend(validate_identity_aliases(rules.get("identity_aliases")))
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        alias = str(value or "").strip()
+        normalized = normalize_team_name(alias)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(alias)
+    return tuple(result)
 
 
 def resolve_team_side(home_team: str, away_team: str, aliases: Iterable[str]) -> str:

@@ -37,7 +37,11 @@ from app.config import get_settings
 from app.db import get_db
 from app.file_delivery import detached_file_response
 from app.games.bundles import connect_games, dashboard_game_groups, separate_games
-from app.games.identity import team_name_variants
+from app.games.identity import (
+    TeamIdentityError,
+    team_name_variants,
+    validate_identity_aliases,
+)
 from app.games.overview import build_game_automation_summary
 from app.limits.service import LimitExceeded, assert_resource_capacity, effective_limits
 from app.logos.service import (
@@ -3354,6 +3358,7 @@ def save_rules(
     generation_lead_days: int = Form(default=4),
     sync_interval_hours: int = Form(default=24),
     result_poll_interval_minutes: int = Form(default=15),
+    identity_aliases: str | None = Form(default=None),
     auto_approve_announcements: bool = Form(default=False),
     auto_approve_results: bool = Form(default=False),
     auto_approve_announcements_acknowledged: bool = Form(default=False),
@@ -3496,6 +3501,14 @@ def save_rules(
             422,
             "Die Ergebnisprüfung am Spieltag kann frühestens alle 10 Minuten durchgeführt werden.",
         )
+    try:
+        parsed_identity_aliases = (
+            list(validate_identity_aliases(identity_aliases))
+            if identity_aliases is not None
+            else list((team.rules or {}).get("identity_aliases", []))
+        )
+    except TeamIdentityError as exc:
+        raise HTTPException(422, str(exc)) from exc
     if not 0 <= reminder_feed_before_minutes <= 10080:
         raise HTTPException(422, "Der Erinnerungszeitpunkt ist ungültig")
     output_counts = {
@@ -3775,6 +3788,7 @@ def save_rules(
         "generation_lead_days": generation_lead_days,
         "sync_interval_hours": sync_interval_hours,
         "result_poll_interval_minutes": result_poll_interval_minutes,
+        "identity_aliases": parsed_identity_aliases,
         "auto_approve_announcements": auto_approve_announcements,
         "auto_approve_results": auto_approve_results,
         "club_matchday_feed_mode": club_matchday_feed_mode,

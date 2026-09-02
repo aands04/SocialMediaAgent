@@ -154,6 +154,24 @@ def _schedule_view(
     timezone_name: str,
 ) -> GenerationScheduleView:
     type_label = POST_TYPE_LABELS.get(post_type, "Beitrag")
+    if (
+        (game.overrides or {}).get("generation_identity_review_required")
+        and post is None
+        and job is None
+    ):
+        return GenerationScheduleView(
+            game.id,
+            team.id,
+            team.display_name,
+            post_type,
+            type_label,
+            due_at,
+            "failed",
+            "Mannschaftszuordnung prüfen",
+            "Bitte einen eindeutigen Mannschafts-Alias hinterlegen.",
+            "danger",
+            True,
+        )
     if job and job.status in RUNNING_GENERATION_STATUSES:
         return GenerationScheduleView(
             game.id,
