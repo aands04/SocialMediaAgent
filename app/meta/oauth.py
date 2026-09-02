@@ -177,6 +177,8 @@ def complete_oauth(
         page.display_name = page.display_name or page.username
         page.connection_status = "connected"
         page.last_check_at = datetime.now(timezone.utc)
+        if (page.defaults or {}).get("guided_setup"):
+            page.defaults = {**(page.defaults or {}), "guided_setup": False}
         db.add(
             AuditLog(
                 user_id=record.user_id,

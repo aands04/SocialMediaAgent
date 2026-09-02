@@ -263,6 +263,47 @@ def test_oauth_state_is_one_time_and_token_is_encrypted(db, tmp_path):
         consume_oauth_state(db, state)
 
 
+def test_guided_oauth_completion_ends_setup_without_enabling_publishing(db, tmp_path):
+    settings = meta_settings(tmp_path)
+    user = User(
+        email="guided-oauth@example.invalid",
+        password_hash="unused",
+        role=Role.ADMIN,
+        all_teams=True,
+    )
+    page = InstagramPage(
+        internal_name="guided-page",
+        display_name="Instagram Hauptseite",
+        username="auswahl-placeholder",
+        club="SV Ehlen",
+        active=False,
+        publishing_enabled=False,
+        automatic_publishing_enabled=False,
+        defaults={"guided_setup": True, "preserved": "value"},
+    )
+    db.add_all([user, page])
+    db.commit()
+    url = start_oauth(db, settings, page, user, OAuthApi())
+    state = parse_qs(url.split("?", 1)[1])["state"][0]
+
+    connection = complete_oauth(
+        db,
+        settings,
+        state=state,
+        code="single-use-code",
+        api=OAuthApi(username="svehlen1901"),
+    )
+
+    db.refresh(page)
+    assert connection.status == "connected"
+    assert page.connection_status == "connected"
+    assert page.username == "svehlen1901"
+    assert page.defaults == {"guided_setup": False, "preserved": "value"}
+    assert page.active is False
+    assert page.publishing_enabled is False
+    assert page.automatic_publishing_enabled is False
+
+
 def test_connection_check_uses_stored_oauth_grant_without_permissions_edge(
     db, tmp_path
 ):

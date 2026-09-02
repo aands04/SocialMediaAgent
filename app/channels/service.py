@@ -79,6 +79,10 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
             )
         )
     )
+    instagram_connections = {
+        item.instagram_page_id: item
+        for item in db.scalars(select(InstagramConnection))
+    }
     result: dict[str, list[dict]] = {
         "instagram": [],
         "facebook": [],
@@ -86,6 +90,16 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
         "telegram": [],
     }
     for item in connections:
+        instagram_connection = (
+            instagram_connections.get(item.legacy_instagram_page_id)
+            if item.channel_type == "instagram"
+            else None
+        )
+        instagram_setup_pending = bool(
+            item.channel_type == "instagram"
+            and item.legacy_instagram_page_id
+            and instagram_connection is None
+        )
         capabilities = {
             capability.key: capability.label
             for capability in CHANNEL_CAPABILITIES.get(item.channel_type, ())
@@ -139,6 +153,7 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
                 "registration_required": registration_required,
                 "has_token": has_token,
                 "reconnect_required": reconnect_required,
+                "instagram_setup_pending": instagram_setup_pending,
                 "reregistration_available": bool(
                     has_token and item.phone_number_id and item.parent_business_id
                 ),
