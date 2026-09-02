@@ -5,8 +5,11 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.exc import IntegrityError
+from starlette.requests import Request
 
+import app.meta.routes as meta_routes
 from app.config import Settings
 from app.meta.api import REQUIRED_SCOPES, MetaApiClient, MetaApiError, OAuthToken
 from app.meta.connection_health import run_automatic_connection_check_cycle
@@ -51,6 +54,7 @@ from app.models import (
     Team,
     User,
 )
+from app.tenancy.state import system_scope
 
 
 def meta_settings(tmp_path):
@@ -247,20 +251,198 @@ def test_oauth_state_is_one_time_and_token_is_encrypted(db, tmp_path):
     url = start_oauth(db, settings, page, user, OAuthApi())
     state = parse_qs(url.split("?", 1)[1])["state"][0]
     api = OAuthApi()
-    connection = complete_oauth(
-        db, settings, state=state, code="single-use-code", api=api
-    )
+    # Simulate a public callback without relying on TenantSession's automatic
+    # club_id stamping. complete_oauth must persist every tenant key explicitly.
+    with system_scope("simulate public Instagram OAuth callback"):
+        connection = complete_oauth(db, settings, state=state, code="single-use-code", api=api)
     assert connection.status == "connected"
+    assert connection.club_id == page.club_id
     assert connection.account_type == "BUSINESS"
     assert set(connection.scopes) == REQUIRED_SCOPES
     assert api.profile_calls == 1
     assert connection.encrypted_token != "long-secret"
     assert "long-secret" not in connection.encrypted_token
-    assert TokenCipher(settings.meta_token_encryption_key).decrypt(
-        connection.encrypted_token
-    ) == "long-secret"
+    assert (
+        TokenCipher(settings.meta_token_encryption_key).decrypt(connection.encrypted_token)
+        == "long-secret"
+    )
     with pytest.raises(MetaApiError, match="bereits verwendet"):
         consume_oauth_state(db, state)
+
+
+def test_oauth_database_failure_is_rolled_back_without_masking_original_error(db, tmp_path):
+    settings = meta_settings(tmp_path)
+    user = User(
+        email="oauth-database-error@example.invalid",
+        password_hash="unused",
+        role=Role.ADMIN,
+        all_teams=True,
+    )
+    page = InstagramPage(
+        internal_name="oauth-database-error",
+        display_name="SV Ehlen",
+        username="svehlen1901",
+        club="SV Ehlen",
+    )
+    db.add_all([user, page])
+    db.commit()
+    url = start_oauth(db, settings, page, user, OAuthApi())
+    state = parse_qs(url.split("?", 1)[1])["state"][0]
+
+    def fail_connection_insert(*_args):
+        raise IntegrityError("INSERT INTO instagram_connections", {}, RuntimeError("constraint"))
+
+    event.listen(InstagramConnection, "before_insert", fail_connection_insert)
+    try:
+        with pytest.raises(IntegrityError):
+            complete_oauth(db, settings, state=state, code="single-use-code", api=OAuthApi())
+    finally:
+        event.remove(InstagramConnection, "before_insert", fail_connection_insert)
+
+    oauth_state = db.scalar(
+        select(InstagramOAuthState).where(InstagramOAuthState.state_hash == secret_hash(state))
+    )
+    assert oauth_state is not None
+    assert oauth_state.used_at is not None
+    assert oauth_state.error == "Interner Fehler während der Meta-Verarbeitung"
+    rejection = db.scalar(
+        select(AuditLog).where(
+            AuditLog.action == "meta.oauth_rejected",
+            AuditLog.entity_id == page.id,
+        )
+    )
+    assert rejection is not None
+    assert rejection.club_id == page.club_id
+
+
+def _oauth_callback_request() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/public/instagram/oauth/callback",
+            "headers": [],
+            "query_string": b"",
+        }
+    )
+
+
+def test_public_oauth_callback_resolves_tenant_and_persists_connection(db, tmp_path, monkeypatch):
+    settings = meta_settings(tmp_path)
+    user = User(
+        email="oauth-public-success@example.invalid",
+        password_hash="unused",
+        role=Role.ADMIN,
+        all_teams=True,
+    )
+    page = InstagramPage(
+        internal_name="oauth-public-success",
+        display_name="SV Ehlen",
+        username="svehlen1901",
+        club="SV Ehlen",
+    )
+    db.add_all([user, page])
+    db.commit()
+    url = start_oauth(db, settings, page, user, OAuthApi())
+    state = parse_qs(url.split("?", 1)[1])["state"][0]
+    monkeypatch.setattr(meta_routes, "settings", settings)
+    monkeypatch.setattr(meta_routes, "MetaApiClient", lambda _settings: OAuthApi())
+
+    with system_scope("simulate unauthenticated public callback"):
+        response = meta_routes.meta_oauth_callback(
+            _oauth_callback_request(),
+            state=state,
+            code="single-use-code",
+            db=db,
+        )
+
+    connection = db.scalar(
+        select(InstagramConnection).where(InstagramConnection.instagram_page_id == page.id)
+    )
+    assert response.status_code == 200
+    assert connection is not None
+    assert connection.club_id == page.club_id
+    assert connection.status == "connected"
+
+
+def test_public_oauth_callback_never_renders_internal_exception(db, tmp_path, monkeypatch):
+    settings = meta_settings(tmp_path)
+    user = User(
+        email="oauth-public-error@example.invalid",
+        password_hash="unused",
+        role=Role.ADMIN,
+        all_teams=True,
+    )
+    page = InstagramPage(
+        internal_name="oauth-public-error",
+        display_name="SV Ehlen",
+        username="svehlen1901",
+        club="SV Ehlen",
+    )
+    db.add_all([user, page])
+    db.commit()
+    url = start_oauth(db, settings, page, user, OAuthApi())
+    state = parse_qs(url.split("?", 1)[1])["state"][0]
+    sensitive_values = (
+        "raw-access-token",
+        "postgresql://internal-database",
+        "https://provider.invalid/private?id=123",
+        page.id,
+    )
+
+    def fail_oauth(*_args, **_kwargs):
+        raise RuntimeError(" | ".join(sensitive_values))
+
+    monkeypatch.setattr(meta_routes, "complete_oauth", fail_oauth)
+    response = meta_routes.meta_oauth_callback(
+        _oauth_callback_request(),
+        state=state,
+        code="single-use-code",
+        db=db,
+    )
+    body = response.body.decode()
+
+    assert response.status_code == 400
+    assert "Die Instagram-Verbindung konnte nicht abgeschlossen werden" in body
+    assert all(value not in body for value in sensitive_values)
+    assert "single-use-code" not in body
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["x-robots-tag"] == "noindex, nofollow"
+
+
+def test_public_oauth_callback_does_not_reflect_provider_error_description(db, tmp_path):
+    settings = meta_settings(tmp_path)
+    user = User(
+        email="oauth-provider-error@example.invalid",
+        password_hash="unused",
+        role=Role.ADMIN,
+        all_teams=True,
+    )
+    page = InstagramPage(
+        internal_name="oauth-provider-error",
+        display_name="SV Ehlen",
+        username="svehlen1901",
+        club="SV Ehlen",
+    )
+    db.add_all([user, page])
+    db.commit()
+    url = start_oauth(db, settings, page, user, OAuthApi())
+    state = parse_qs(url.split("?", 1)[1])["state"][0]
+    provider_text = "provider-token at https://provider.invalid/private?id=123"
+
+    response = meta_routes.meta_oauth_callback(
+        _oauth_callback_request(),
+        state=state,
+        error="access_denied",
+        error_description=provider_text,
+        db=db,
+    )
+    body = response.body.decode()
+
+    assert response.status_code == 400
+    assert provider_text not in body
+    assert "access_denied" not in body
 
 
 def test_guided_oauth_completion_ends_setup_without_enabling_publishing(db, tmp_path):
