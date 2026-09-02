@@ -49,6 +49,12 @@ from app.prompts.service import (
     resolve_prompt,
 )
 from app.rendering.service import Renderer, builtin_template
+from app.textgen.schema import (
+    TEXT_GENERATION_MODE_SCHEMA,
+    configured_text_generation_mode,
+    generate_matchday_schema_text,
+    generate_schema_text,
+)
 from app.textgen.service import GeneratedText, TextGenerator, sanitize_generated_caption
 
 
@@ -684,6 +690,7 @@ def create_post(
     text_prompt_override=None,
     matchday_bundle: dict | None = None,
     allow_manual_retry_reuse: bool = False,
+    text_generation_mode_override: str | None = None,
 ) -> Post:
     if game.status == "provisional" or game.overrides.get("automation_blocked"):
         raise ValueError("Vorläufige Spiele sind für die Beitragserstellung gesperrt")
@@ -730,6 +737,9 @@ def create_post(
     feed_design = _design(db, team.feed_template, post_type, "feed")
     facts = _facts(db, game, team, asset, post_type, logos)
     feed_facts = _facts_for_media(facts, "feed")
+    text_generation_mode = text_generation_mode_override or configured_text_generation_mode(
+        team.rules, post_type
+    )
     feed_prompt = None
     text_prompt = None
     if getattr(renderer, "is_ai", False):
@@ -741,7 +751,9 @@ def create_post(
     if text_prompt_override is not None:
         text_prompt = text_prompt_override
         facts = {**feed_facts, "text_prompt": text_prompt}
-    elif getattr(generator, "is_ai", False):
+    elif text_generation_mode != TEXT_GENERATION_MODE_SCHEMA and getattr(
+        generator, "is_ai", False
+    ):
         text_prompt_name = team.rules.get(
             f"text_prompt_{post_type}", team.rules.get("text_prompt", f"default-text-{post_type}")
         )
@@ -752,7 +764,13 @@ def create_post(
     initial_snapshot = {
         "mode": {
             "image": "openai" if feed_prompt else "playwright",
-            "text": "openai" if text_prompt else "fixture",
+            "text": (
+                "schema"
+                if text_generation_mode == TEXT_GENERATION_MODE_SCHEMA
+                else "openai"
+                if text_prompt
+                else "fixture"
+            ),
             "manual_approval_required": True,
         },
         "feed": feed_design,
@@ -826,7 +844,11 @@ def create_post(
                 prompt_version="continued-existing-text",
             )
     else:
-        text_result = generator.generate(facts)
+        text_result = (
+            generate_schema_text(facts, post_type)
+            if text_generation_mode == TEXT_GENERATION_MODE_SCHEMA
+            else generator.generate(facts)
+        )
     post.text = sanitize_generated_caption(text_result.text)
     if resuming:
         for version in db.scalars(
@@ -845,6 +867,7 @@ def create_post(
             "prompt_version": text_result.prompt_version,
             "tokens": text_result.tokens,
             "shared_matchday_prompt": bool(matchday_bundle),
+            "strategy": text_generation_mode,
         },
     }
     feed_requires_manual_schedule = False
@@ -1397,6 +1420,7 @@ def create_matchday_bundle_posts(
         for game in games
     }
     base_facts = bundle_facts[primary.id]
+    text_generation_mode = configured_text_generation_mode(primary_team.rules, post_type)
     combined_sponsors = []
     seen_sponsors: set[str] = set()
     for game in games:
@@ -1468,6 +1492,8 @@ def create_matchday_bundle_posts(
             "reused",
             prompt_version="continued-matchday-text",
         )
+    elif text_generation_mode == TEXT_GENERATION_MODE_SCHEMA:
+        shared_text = generate_matchday_schema_text(local_games, post_type)
     elif getattr(generator, "is_ai", False):
         prompt_name = primary_team.rules.get(
             f"text_prompt_{post_type}",
@@ -1526,6 +1552,7 @@ def create_matchday_bundle_posts(
                 text_prompt_override=shared_prompt,
                 matchday_bundle=bundle_snapshot,
                 allow_manual_retry_reuse=allow_manual_retry_reuse,
+                text_generation_mode_override=text_generation_mode,
             )
         )
     return posts

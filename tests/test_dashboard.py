@@ -3956,6 +3956,71 @@ def test_rules_reject_unsafe_result_poll_and_unconfirmed_automatic_approval(brow
         assert rules["announcement_weekday_targets"] == legacy_targets
 
 
+def test_rules_store_text_generation_mode_independently_for_each_text_type(browser):
+    client, factory = browser
+    team_id = create_automation_team(factory, suffix="text-generation-modes")
+    with factory() as db:
+        version = db.get(Team, team_id).version
+
+    page = client.get(f"/rules?team_id={team_id}")
+    assert page.status_code == 200
+    assert "Begleittext für Spielankündigung / Vorbericht" in page.text
+    assert "Begleittext für Ergebnismeldung / Nachbericht" in page.text
+    assert "Festes Standardschema" in page.text
+
+    saved = client.post(
+        f"/rules/{team_id}/defaults",
+        data={
+            "csrf_token": session_csrf(client),
+            "expected_team_version": version,
+            "preserve_legacy_weekday_settings": "true",
+            "late_approval": "manual",
+            "result_wait_minutes": 0,
+            "result_poll_interval_minutes": 15,
+            "text_generation_mode_announcement": "schema",
+            "text_generation_mode_reminder": "ai",
+            "text_generation_mode_result": "schema",
+        },
+        follow_redirects=False,
+    )
+
+    assert saved.status_code == 303
+    with factory() as db:
+        rules = db.get(Team, team_id).rules
+        assert rules["text_generation_mode_announcement"] == "schema"
+        assert rules["text_generation_mode_reminder"] == "ai"
+        assert rules["text_generation_mode_result"] == "schema"
+
+
+def test_rules_reject_unknown_text_generation_mode_without_saving(browser):
+    client, factory = browser
+    team_id = create_automation_team(factory, suffix="invalid-text-generation-mode")
+    with factory() as db:
+        team = db.get(Team, team_id)
+        version = team.version
+        before = dict(team.rules or {})
+
+    response = client.post(
+        f"/rules/{team_id}/defaults",
+        data={
+            "csrf_token": session_csrf(client),
+            "expected_team_version": version,
+            "preserve_legacy_weekday_settings": "true",
+            "late_approval": "manual",
+            "result_wait_minutes": 0,
+            "result_poll_interval_minutes": 15,
+            "text_generation_mode_announcement": "untrusted-mode",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Ungültige Auswahl für die Texterstellung" in response.text
+    with factory() as db:
+        team = db.get(Team, team_id)
+        assert team.version == version
+        assert team.rules == before
+
+
 def test_editor_can_view_but_cannot_change_automatic_post_rules(browser):
     client, factory = browser
     team_id = create_automation_team(factory, suffix="editor")
