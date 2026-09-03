@@ -14,6 +14,7 @@ from app.branding.compiler import (
     team_display_name,
 )
 from app.branding.service import STANDARD_FONTS, branding_form_state, branding_snapshot
+from app.channels.service import instagram_page_for_team
 from app.config import get_settings
 from app.games.identity import resolve_team_side, team_aliases
 from app.logos.service import LogoCompositor, LogoValidationError, frozen_logo_set
@@ -30,7 +31,6 @@ from app.models import (
     Game,
     GeneratedMediaSlot,
     GeneratedMediaVersion,
-    InstagramPage,
     JobStatus,
     MediaAsset,
     Post,
@@ -460,10 +460,7 @@ def _result_layout_reference(db: Session, game: Game, team: Team) -> dict | None
                 if not isinstance(entry, dict):
                     continue
                 possible_story_path = Path(str(entry.get("path") or "")).resolve()
-                if (
-                    possible_story_path.is_file()
-                    and not possible_story_path.is_symlink()
-                ):
+                if possible_story_path.is_file() and not possible_story_path.is_symlink():
                     story_path = str(possible_story_path)
                     break
             return {
@@ -657,9 +654,7 @@ def _facts(
         "secondary_font_family": secondary_family,
         "sponsor_references_by_media": sponsor_references_by_media,
         "result_image_fields": list(image_settings.get("result_image_fields") or []),
-        "result_image_extra_rules": str(
-            image_settings.get("result_image_extra_rules") or ""
-        ),
+        "result_image_extra_rules": str(image_settings.get("result_image_extra_rules") or ""),
     }
     if post_type == "result" and game.result_confirmed:
         facts["score"] = f"{game.home_score}:{game.away_score}"
@@ -705,9 +700,7 @@ def create_post(
     resuming = bool(existing and existing.status == PostStatus.INCOMPLETE)
     if existing and not resuming:
         return existing
-    page = db.get(InstagramPage, team.instagram_page_id) if team.instagram_page_id else None
-    if page and page.club_id != team.club_id:
-        raise ValueError("Die Instagram-Seite gehört nicht zu diesem Verein")
+    page = instagram_page_for_team(db, team)
     default_page_id = page.id if page else None
     warnings = [
         warning
@@ -751,9 +744,7 @@ def create_post(
     if text_prompt_override is not None:
         text_prompt = text_prompt_override
         facts = {**feed_facts, "text_prompt": text_prompt}
-    elif text_generation_mode != TEXT_GENERATION_MODE_SCHEMA and getattr(
-        generator, "is_ai", False
-    ):
+    elif text_generation_mode != TEXT_GENERATION_MODE_SCHEMA and getattr(generator, "is_ai", False):
         text_prompt_name = team.rules.get(
             f"text_prompt_{post_type}", team.rules.get("text_prompt", f"default-text-{post_type}")
         )
@@ -1635,9 +1626,7 @@ def rerender_post(
                 "Die ausgewählte Ausgangsversion gehört nicht zu dieser Medienausgabe"
             )
         if not 10 <= len((revision_instruction or "").strip()) <= 2000:
-            raise RerenderConflict(
-                "Die gezielte Bildänderung muss 10 bis 2000 Zeichen lang sein"
-            )
+            raise RerenderConflict("Die gezielte Bildänderung muss 10 bis 2000 Zeichen lang sein")
     story_jobs = {job.id: job for job in jobs if job.kind == "story"}
     if not selected.issubset(story_jobs):
         raise RerenderConflict("Mindestens eine ausgewählte Story gehört nicht zu diesem Beitrag")
@@ -1735,9 +1724,7 @@ def rerender_post(
         raise RerenderConflict("Mindestens eine ausgewählte Story-Variante ist nicht vorhanden")
     if targeted_slot and targeted_slot.media_kind == "story":
         if selected_story_variants != {targeted_slot.variant_number}:
-            raise RerenderConflict(
-                "Die Bildbearbeitung darf genau eine Story-Ausgabe verändern"
-            )
+            raise RerenderConflict("Die Bildbearbeitung darf genau eine Story-Ausgabe verändern")
     feed_design = old_snapshot.get("feed")
     feed_prompt = None
     feed_paths = []
@@ -2166,13 +2153,11 @@ def rerender_post(
                 if targeted_slot.selected_version_id
                 else None
             ) or generated_version
-            bundle_primary, bundle_publication_changed = (
-                synchronize_bundle_publication_version(
-                    db,
-                    post,
-                    targeted_slot,
-                    selected_version,
-                )
+            bundle_primary, bundle_publication_changed = synchronize_bundle_publication_version(
+                db,
+                post,
+                targeted_slot,
+                selected_version,
             )
         except (IndexError, MediaVersionError) as exc:
             raise RerenderConflict(str(exc)) from exc

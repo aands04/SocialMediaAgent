@@ -10,6 +10,7 @@ from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
 
 from app.approvals.service import ApprovalError, approve
+from app.channels.service import InstagramAssignmentConflict, instagram_page_for_team
 from app.config import Settings
 from app.jobs import generation
 from app.models import (
@@ -18,6 +19,7 @@ from app.models import (
     Game,
     GeneratedMediaSlot,
     GenerationJobStatus,
+    InstagramPage,
     Post,
     PostStatus,
     PublicationJob,
@@ -25,6 +27,7 @@ from app.models import (
     Role,
     SocialChannelConnection,
     Team,
+    TeamChannelAssignment,
     User,
 )
 from app.posts.service import create_post
@@ -82,6 +85,43 @@ def _verified_logo_snapshot() -> dict:
     }
 
 
+def _assigned_instagram_page(db, team, *, suffix="assigned", enabled=True):
+    page = InstagramPage(
+        internal_name=f"instagram-{suffix}",
+        display_name=f"Instagram {suffix}",
+        username=f"instagram_{suffix}",
+        club=team.club,
+        active=True,
+        connection_status="connected",
+        publishing_enabled=True,
+    )
+    db.add(page)
+    db.flush()
+    connection = SocialChannelConnection(
+        channel_type="instagram",
+        internal_name=f"instagram-{suffix}",
+        display_name=f"Instagram {suffix}",
+        username=f"instagram_{suffix}",
+        legacy_instagram_page_id=page.id,
+        status="connected",
+        active=True,
+        publishing_enabled=True,
+    )
+    db.add(connection)
+    db.flush()
+    assignment = TeamChannelAssignment(
+        team_id=team.id,
+        channel_connection_id=connection.id,
+        enabled=enabled,
+        announcement_enabled=enabled,
+        result_enabled=enabled,
+        story_enabled=enabled,
+    )
+    db.add(assignment)
+    db.flush()
+    return page, connection, assignment
+
+
 def test_generated_post_does_not_require_a_social_media_channel(db, tmp_path) -> None:
     team, game, _user = _channel_less_graph(db)
 
@@ -106,6 +146,77 @@ def test_generated_post_does_not_require_a_social_media_channel(db, tmp_path) ->
     assert all(job.instagram_page_id is None for job in jobs)
     assert db.query(GeneratedMediaSlot).filter_by(post_id=post.id).count() == 1
     assert db.query(SocialChannelConnection).count() == 0
+
+
+def test_generated_post_uses_authoritative_instagram_team_assignment(db, tmp_path) -> None:
+    team, game, user = _channel_less_graph(db)
+    page, _connection, _assignment = _assigned_instagram_page(db, team)
+    db.commit()
+
+    post = create_post(
+        db,
+        game,
+        team,
+        FixtureTextGenerator(),
+        Renderer(tmp_path / "generated"),
+        logo_snapshot=_verified_logo_snapshot(),
+    )
+    post.status = PostStatus.PENDING
+    post.critical_warnings = []
+    db.commit()
+
+    assert team.instagram_page_id is None
+    assert post.instagram_page_id == page.id
+    assert {
+        job.instagram_page_id for job in db.query(PublicationJob).filter_by(post_id=post.id).all()
+    } == {page.id}
+    approve(db, post, user)
+    assert post.status == PostStatus.APPROVED
+
+
+def test_disabled_assignment_prevents_legacy_instagram_fallback(db) -> None:
+    team, _game, _user = _channel_less_graph(db)
+    page, _connection, _assignment = _assigned_instagram_page(db, team, enabled=False)
+    team.instagram_page_id = page.id
+    db.commit()
+
+    resolved = instagram_page_for_team(db, team)
+
+    assert resolved is None
+    assert not db.new
+    assert not db.dirty
+    assert not db.deleted
+
+
+def test_legacy_instagram_page_remains_fallback_without_assignment_rows(db) -> None:
+    team, _game, _user = _channel_less_graph(db)
+    page = InstagramPage(
+        internal_name="legacy-instagram",
+        display_name="Legacy Instagram",
+        username="legacy_instagram",
+        club=team.club,
+        active=True,
+        connection_status="connected",
+    )
+    db.add(page)
+    db.flush()
+    team.instagram_page_id = page.id
+    db.commit()
+
+    assert instagram_page_for_team(db, team) is page
+    assert not db.new
+    assert not db.dirty
+    assert not db.deleted
+
+
+def test_multiple_enabled_instagram_assignments_fail_closed(db) -> None:
+    team, _game, _user = _channel_less_graph(db)
+    _assigned_instagram_page(db, team, suffix="first")
+    _assigned_instagram_page(db, team, suffix="second")
+    db.commit()
+
+    with pytest.raises(InstagramAssignmentConflict, match="mehrere aktive Instagram-Kanäle"):
+        instagram_page_for_team(db, team)
 
 
 def test_structured_generation_rules_work_without_a_channel(db, tmp_path) -> None:
