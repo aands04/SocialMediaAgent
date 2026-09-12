@@ -26,6 +26,8 @@ Da die Logos bei neuen Ausgaben Teil der KI-Komposition sind, setzt der lokale C
 
 Zeitpunkte sind timezone-aware UTC; Anzeige und Regelkonfiguration erfolgen in `Europe/Berlin`. Relative, unveröffentlichte Aufträge werden bei Verlegung verschoben. Absolute Zeitpunkte bleiben unverändert und werden als veraltet markiert. Bereits veröffentlichte Jobs bleiben unverändert.
 
+Als expliziter Testmodus pro Medienausgabe nutzt `photo_montage` einen separaten Hintergrundprompt ohne Bildreferenzen. `PhotoMontageRenderer` setzt Originalfoto, Logos und Spielangaben lokal zusammen; Fotopixel werden ausschließlich proportional skaliert und per Alphakanal eingefügt. Der Modus verwendet die vorhandenen Versions-, Job-, Kosten- und Freigabeabläufe. Details: [PHOTO_MONTAGE_TEST.md](docs/PHOTO_MONTAGE_TEST.md).
+
 ## Zustandsmodelle
 Beiträge: `detected → planned → creating → pending_approval → approved/scheduled → partially_published → published`; Nebenpfade sind `incomplete`, `rejected`, `reapproval_required`, `publishing_error`, `cancelled`.
 

@@ -273,6 +273,9 @@ def _prompt_reference_images(db: Session, job: GenerationJob, context: dict) -> 
     platform observability data and are resolved again by an authorized route.
     """
 
+    if context.get("image_creation_mode") == "photo_montage":
+        return []  # Only a background prompt is sent; originals stay local.
+
     targeted_id = str(context.get("source_media_version_id") or "").strip()
     if context.get("targeted_edit_source") and targeted_id:
         return [{"role": "source_image", "media_version_id": targeted_id}]
@@ -900,7 +903,7 @@ def enqueue_ai_revision(
     target_media_slot_id: str | None = None,
 ) -> GenerationJob:
     instruction = instruction.strip()
-    if revision_mode not in {"full_regenerate", "targeted_edit"}:
+    if revision_mode not in {"full_regenerate", "targeted_edit", "photo_montage"}:
         raise ValueError("Unbekannte Art der Bildbearbeitung")
     if revision_mode == "targeted_edit" and not source_media_version_id:
         raise ValueError("Für die gezielte Bearbeitung fehlt die Ausgangsversion")

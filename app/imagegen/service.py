@@ -806,6 +806,11 @@ class AIImageRenderer:
     def provider_prompt(data: dict) -> str:
         """Return the exact prompt the lower-level provider will transmit."""
 
+        if data.get("image_creation_mode") == "photo_montage":
+            from app.imagegen.photo_montage import PhotoMontageRenderer
+
+            return PhotoMontageRenderer.provider_prompt(data)
+
         if data.get("targeted_edit_source"):
             return str(data.get("targeted_edit_instruction") or "")
 
@@ -932,6 +937,15 @@ class AIImageRenderer:
         return candidate
 
     def render(self, kind: str, target: str, data: dict) -> Path:
+        if data.get("image_creation_mode") == "photo_montage":
+            from app.imagegen.photo_montage import PhotoMontageRenderer
+
+            montage = PhotoMontageRenderer(
+                self.root, self.media_root, self.upload_root, self.provider
+            )
+            path = montage.render(kind, target, data)
+            self._metadata[str(path)] = montage.metadata_for(path)
+            return path
         if kind not in self.sizes:
             raise ImageGenerationError("Unbekanntes Bildformat")
         prompt = data.get("image_prompt")

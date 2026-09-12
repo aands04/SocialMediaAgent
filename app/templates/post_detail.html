@@ -205,7 +205,7 @@
             <label>Was soll sich an genau diesem Bild ändern?
               <textarea name="instruction" rows="4" minlength="10" maxlength="2000" required placeholder="Beispiel: Verschiebe den Spieler etwas nach rechts und vergrößere den Abstand des Logos zum oberen Rand."></textarea>
             </label>
-            <p><small>An die KI werden nur dieses Bild und deine Änderungsanweisung gesendet. Der ursprüngliche Erstellungs-Prompt sowie Spielerfoto und Logos werden nicht erneut übertragen.</small></p>
+            <p><small>An die KI werden nur dieses Bild und deine Änderungsanweisung gesendet. Der ursprüngliche Erstellungs-Prompt sowie Spielerfoto und Logos werden nicht erneut übertragen. Gesichter können dabei verändert werden – auch bei einer zuvor erstellten Fotomontage.</small></p>
             <button>Gezielte Änderung starten</button>
           </form>
         </details>
@@ -227,6 +227,25 @@
             <button class="secondary">Komplett neu erstellen</button>
           </form>
         </details>
+        <details>
+          <summary>Fotomontage testen · Originalfoto erhalten</summary>
+          <form method="post" action="/posts/{{entry.post.id}}/media-slots/{{slot.id}}/ai-edit">
+            <input type="hidden" name="csrf_token" value="{{csrf}}">
+            <input type="hidden" name="post_version" value="{{entry.post.version}}">
+            <input type="hidden" name="mode" value="photo_montage">
+            {% if member_asset or alternatives %}
+            <label>Originalfoto
+              <select name="media_asset_id">
+                {% if member_asset %}<option value="{{member_asset.id}}" selected>Bisheriges Bild: {{member_asset.filename}}</option>{% endif %}
+                {% for asset in alternatives %}<option value="{{asset.id}}">Anderes, unverbrauchtes Bild: {{asset.filename}}</option>{% endfor %}
+              </select>
+            </label>
+            {% endif %}
+            <p><small>Experimenteller Modus: Die KI erzeugt einen Hintergrund. Originalfoto, Wappen und Spielangaben werden lokal eingesetzt. Das Foto bleibt vollständig sichtbar und wird nur proportional skaliert. Freigestellte PNGs sind möglich; keine automatische Freistellung. Ein kostenpflichtiger Bildaufruf pro Test.</small></p>
+            <p><small>Erstellt eine neue Version dieser Ausgabe; ältere Versionen bleiben vergleichbar. Die neue Auswahl benötigt erneut eine Freigabe.</small></p>
+            <button class="secondary">Fotomontage erstellen</button>
+          </form>
+        </details>
       </div>
       {% endif %}
       {% else %}<div class="alert">Für diese Ausgabe ist keine verwendbare Version ausgewählt.</div>{% endif %}
@@ -237,6 +256,7 @@
           <article class="version-tile {% if media_version.id==selected.id %}selected{% elif media_version.id==slot.selected_version_id %}draft-selected{% endif %}">
             <img src="/posts/{{entry.post.id}}/versions/{{media_version.id}}" alt="Version {{media_version.version_number}} von {{slot.label}}">
             <strong>Version {{media_version.version_number}}</strong>
+            {% if media_version.design_metadata.get('image_creation_mode') == 'photo_montage' %}<small>Fotomontage · Originalfoto erhalten</small>{% endif %}
             <small>{{media_version.created_at|berlin}} · {{media_version.validation_status}}</small>
             {% if media_version.id==selected.id %}
             <span class="selection-label">Wird veröffentlicht</span>

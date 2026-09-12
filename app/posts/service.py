@@ -1580,8 +1580,10 @@ def rerender_post(
     selected_story_variants = {
         int(number) for number in (story_variant_numbers or []) if int(number) > 0
     }
-    if revision_mode not in {"full_regenerate", "targeted_edit"}:
+    if revision_mode not in {"full_regenerate", "targeted_edit", "photo_montage"}:
         raise RerenderConflict("Unbekannte Art der Bildbearbeitung")
+    if revision_mode == "photo_montage" and not getattr(renderer, "is_ai", False):
+        raise RerenderConflict("Die Fotomontage benötigt den aktivierten OpenAI-Bildmodus")
     targeted_source: GeneratedMediaVersion | None = None
     targeted_slot = (
         db.scalar(
@@ -1835,6 +1837,7 @@ def rerender_post(
                             ),
                             "feed_output_index": output_index,
                             "feed_output_count": feed_output_count,
+                            "image_creation_mode": revision_mode,
                             **(
                                 {
                                     "targeted_edit_source": targeted_source.media_path,
@@ -2020,6 +2023,7 @@ def rerender_post(
                     "template": design,
                     "image_prompt": story_prompt,
                     "story_output_index": variant_number,
+                    "image_creation_mode": revision_mode,
                     **(
                         {
                             "targeted_edit_source": targeted_source.media_path,
@@ -2212,7 +2216,7 @@ def revise_post(
 ) -> Post:
     """Apply a persistent AI revision while preserving published outputs."""
     instruction = instruction.strip()
-    if revision_mode not in {"full_regenerate", "targeted_edit"}:
+    if revision_mode not in {"full_regenerate", "targeted_edit", "photo_montage"}:
         raise ValueError("Unbekannte Art der Bildbearbeitung")
     if (revision_mode == "targeted_edit" or instruction) and not 10 <= len(instruction) <= 2000:
         raise ValueError("Die KI-Änderungsanweisung muss 10 bis 2000 Zeichen lang sein")
