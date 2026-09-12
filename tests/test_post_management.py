@@ -318,7 +318,8 @@ def test_ai_revision_enqueue_is_idempotent(db):
     assert first.planned_outputs == 1
 
 
-def test_targeted_media_revision_enqueue_persists_exact_source_and_one_output(db):
+@pytest.mark.parametrize("mode", ["targeted_edit", "photo_montage"])
+def test_targeted_media_revision_enqueue_persists_exact_source_and_one_output(db, mode):
     page, team, game, user = graph(db)
     post, _ = post_with_feed(db, page, team, game, "unused.png")
 
@@ -333,15 +334,17 @@ def test_targeted_media_revision_enqueue_persists_exact_source_and_one_output(db
         revise_feed=True,
         story_job_ids=[],
         feed_positions=[2],
-        revision_mode="targeted_edit",
-        source_media_version_id="selected-version-id",
+        revision_mode=mode,
+        source_media_version_id="selected-version-id" if mode == "targeted_edit" else None,
         target_media_slot_id="selected-slot-id",
     )
 
     assert job.status == GenerationJobStatus.QUEUED
     assert job.planned_outputs == 1
-    assert job.parameters["revision_mode"] == "targeted_edit"
-    assert job.parameters["source_media_version_id"] == "selected-version-id"
+    assert job.parameters["revision_mode"] == mode
+    assert job.parameters["source_media_version_id"] == (
+        "selected-version-id" if mode == "targeted_edit" else None
+    )
     assert job.parameters["target_media_slot_id"] == "selected-slot-id"
     assert job.parameters["feed_positions"] == [2]
     assert job.parameters["revise_text"] is False

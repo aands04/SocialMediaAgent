@@ -195,6 +195,18 @@ def register_media_version(
     ) + 1
     technical = metadata or _path_metadata(media_path, allow_missing=legacy_import)
     prompt = _prompt_metadata(post, "story" if slot.media_kind == "story" else "feed")
+    snapshot = post.design_snapshot or {}
+    candidates = list((snapshot.get("media") or {}).get("feed_variants") or [])
+    candidates.extend(snapshot.get("story_variants") or [])
+    rendering = next(
+        (
+            candidate.get("rendering") or {}
+            for candidate in candidates
+            if isinstance(candidate, dict) and candidate.get("path") == media_path
+        ),
+        {},
+    )
+    preservation = rendering.get("photo_preservation") or {}
     item = GeneratedMediaVersion(
         club_id=post.club_id,
         slot_id=slot.id,
@@ -218,6 +230,14 @@ def register_media_version(
             "post_version": post.version,
             "media_kind": slot.media_kind,
             "creative_traits": _creative_traits(post, "image"),
+            **(
+                {
+                    "image_creation_mode": "photo_montage",
+                    "photo_preservation": preservation,
+                }
+                if rendering.get("image_creation_mode") == "photo_montage"
+                else {}
+            ),
         },
         created_by=created_by,
         legacy_import=legacy_import,

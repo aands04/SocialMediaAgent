@@ -6156,7 +6156,7 @@ def edit_single_post_media_with_ai(
         )
     if post.version != post_version:
         raise HTTPException(409, "Beitrag wurde zwischenzeitlich geändert")
-    if mode not in {"targeted_edit", "full_regenerate"}:
+    if mode not in {"targeted_edit", "full_regenerate", "photo_montage"}:
         raise HTTPException(422, "Unbekannte Art der Bildbearbeitung")
 
     slot = db.scalar(
@@ -6247,6 +6247,8 @@ def edit_single_post_media_with_ai(
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     action = "Gezielte Bildänderung" if mode == "targeted_edit" else "Neugenerierung"
+    if mode == "photo_montage":
+        action = "Fotomontage-Test"
     return redirect(
         f"/generation-jobs/{job.id}",
         f"{action} für {slot.label} wurde eingereiht",

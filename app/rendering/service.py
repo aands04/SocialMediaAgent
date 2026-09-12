@@ -199,6 +199,19 @@ class Renderer:
                 )
                 page.route("**/*", lambda route: route.abort())
                 page.set_content(document, wait_until="load")
+                page.evaluate("""async () => {
+                    await document.fonts.ready;
+                    for (const el of document.querySelectorAll('.montage-fit')) {
+                        let n = parseFloat(getComputedStyle(el).fontSize);
+                        while ((el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth) && n > 18) {
+                            n -= 1; el.style.fontSize = n + 'px';
+                        }
+                    }
+                }""")
+                if page.locator(".montage-fit").evaluate_all(
+                    "els => els.some(el => el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth)"
+                ):
+                    raise RenderValidationError("Pflichtangabe passt nicht in Textbereich")
                 page.evaluate(
                     """() => { for (const el of document.querySelectorAll('.teams')) { let n=parseFloat(getComputedStyle(el).fontSize); const bad=()=>{const r=el.getBoundingClientRect();return r.top<0||r.bottom>innerHeight||el.scrollWidth>el.clientWidth}; while (bad() && n>34) { n-=2; el.style.fontSize=n+'px'; } } }"""
                 )
@@ -208,7 +221,12 @@ class Renderer:
                 )
                 if clipped:
                     raise RenderValidationError("Pflichtangabe passt nicht in Textbereich")
-                page.screenshot(path=str(out), full_page=False, type="png")
+                page.screenshot(
+                    path=str(out),
+                    full_page=False,
+                    type="png",
+                    omit_background=bool(data.get("_transparent_canvas", False)),
+                )
                 browser.close()
         except RenderValidationError:
             raise
