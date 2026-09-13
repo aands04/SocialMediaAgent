@@ -72,7 +72,7 @@ def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     assert "Referenzbild 2" in prompt.rendered
     assert "kein drittes Referenzbild" in prompt.rendered
     assert "oben links und oben rechts" not in prompt.rendered
-    assert prompt.policy_version == "verified-media-ai-references-v7-configured-result-fields"
+    assert prompt.policy_version == "verified-media-ai-references-v8-result-outcome"
     assert "{{" not in prompt.rendered
 
 
@@ -112,6 +112,75 @@ def test_result_image_prompt_is_result_only_and_describes_layout_reference():
     assert "Spielort: Habichtswaldstadion" in prompt.rendered
     assert "Wettbewerb: Kreisliga A" not in prompt.rendered
     assert "Datum: Sonntag, 09.08.2026" not in prompt.rendered
+
+
+@pytest.mark.parametrize("media_kind", ["feed", "story"])
+@pytest.mark.parametrize("layout", [None, "/generated/announcement.png"])
+@pytest.mark.parametrize(
+    "own_team,score,outcome",
+    [
+        ("SV Ehlen", "4:0", "SIEG"),
+        ("SV Ehlen", "0:4", "NIEDERLAGE"),
+        ("SG Beispiel", "4:0", "NIEDERLAGE"),
+        ("SG Beispiel", "0:4", "SIEG"),
+        ("SV Ehlen", "0:0", "UNENTSCHIEDEN"),
+        ("SG Beispiel", "2:2", "UNENTSCHIEDEN"),
+    ],
+)
+def test_result_image_identifies_outcome_for_own_team(media_kind, layout, own_team, score, outcome):
+    prompt = builtin_prompt(
+        "image",
+        "result",
+        media_kind,
+        facts(
+            own_team=own_team,
+            score=score,
+            result_layout_reference=layout,
+            result_image_fields=["score", "teams"],
+        ),
+    )
+    assert f"zeigen: {outcome} für {own_team}." in prompt.rendered
+    assert f"Heim:Gast-Reihenfolge: {score}" in prompt.rendered
+    home, away = score.split(":")
+    assert f"SV Ehlen = {home}; SG Beispiel = {away}" in prompt.rendered
+    if outcome == "NIEDERLAGE":
+        assert "Keine Jubeltexte" in prompt.rendered
+    assert "Widersprechende Ankündigungs- und Jubeltexte entfernen" in prompt.rendered
+
+
+@pytest.mark.parametrize("score", [None, "", "4:", "-1:0", "4:0 n.E.", "None:None"])
+def test_result_image_rejects_missing_or_ambiguous_score(score):
+    with pytest.raises(PromptValidationError, match="Heimtore:Auswärtstore"):
+        builtin_prompt("image", "result", "feed", facts(score=score))
+
+
+def test_result_image_outcome_applies_to_saved_template(db):
+    db.add(
+        PromptTemplate(
+            name="result-outcome",
+            prompt_kind="image",
+            post_type="result",
+            media_kind="feed",
+            version=1,
+            active=True,
+            prompt_body="Zeige {{ score }} mit Jubelstimmung.",
+            model="gpt-image-2",
+            quality="high",
+        )
+    )
+    db.flush()
+    prompt = resolve_prompt(
+        db,
+        "result-outcome",
+        "image",
+        "result",
+        "feed",
+        facts(own_team="SG Beispiel", own_team_display="Unsere Zweite", score="4:0"),
+    )
+    assert not prompt.builtin
+    assert "NIEDERLAGE für Unsere Zweite" in prompt.rendered
+    assert "Keine Jubeltexte" in prompt.rendered
+    assert "Vorrang vor Stil- und Vereinsvorgaben" in prompt.rendered
 
 
 def test_post_facts_prefer_configured_home_venue_and_reuse_announcement_layout(db, tmp_path):
@@ -856,7 +925,7 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     assert post.design_snapshot["prompts"]["feed"]["version"] == 3
     assert (
         post.design_snapshot["prompts"]["feed"]["policy_version"]
-        == "verified-media-ai-references-v7-configured-result-fields"
+        == "verified-media-ai-references-v8-result-outcome"
     )
     prompt_snapshot = post.design_snapshot["prompts"]["feed"]
     assert "rendered" not in prompt_snapshot
@@ -967,11 +1036,7 @@ def test_openai_text_transport_diagnostics_exclude_content(monkeypatch):
                         type(
                             "Choice",
                             (),
-                            {
-                                "message": type(
-                                    "Message", (), {"content": "Geprüfter Text"}
-                                )()
-                            },
+                            {"message": type("Message", (), {"content": "Geprüfter Text"})()},
                         )()
                     ],
                     "usage": type("Usage", (), {"total_tokens": 21})(),

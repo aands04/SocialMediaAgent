@@ -43,6 +43,19 @@ Fixture-Vorschauen und Versionsvergleiche rufen keinen KI-Anbieter auf.
 
 ## Exakt versandte Prompts
 
+Ergebnisbilder erhalten in Feed und Story eine verbindliche Kennzeichnung
+**SIEG**, **NIEDERLAGE** oder **UNENTSCHIEDEN** mit dem Namen der eigenen
+Mannschaft. Der Server leitet sie aus der eindeutigen Mannschaftszuordnung und
+dem bestätigten Heim:Gast-Spielstand ab; fehlende oder unlesbare Ergebnisse
+blockieren den Bildprompt. Tore bleiben eindeutig Heim- und Gastmannschaft
+zugeordnet. Diese Faktenregel gilt auch bei gespeicherten Plattformvorlagen,
+reduzierter Feldauswahl und dem Umbau einer Ankündigungsgrafik. Bei Niederlagen
+sind zusätzliche Jubeltexte und Siegesinszenierungen ausgeschlossen. Reale
+Personen im Referenzbild bleiben erhalten; ein vorhandenes Jubelfoto wird durch
+die deutliche Ergebniskennzeichnung eingeordnet. Bereits erzeugte Bilder und
+gespeicherte Promptversionen bleiben unverändert; die Regel gilt für neue
+Generierungen. Die visuelle Umsetzung durch das Modell bleibt manuell zu prüfen.
+
 Migration `0022` führt `ai_prompt_dispatches` ein. Unmittelbar vor einem echten
 Text- oder Bildaufruf wird dort der vollständige, final zusammengesetzte
 Provider-Input gespeichert. Der Eintrag enthält unter anderem Verein,
