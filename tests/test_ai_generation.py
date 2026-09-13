@@ -72,7 +72,7 @@ def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     assert "Referenzbild 2" in prompt.rendered
     assert "kein drittes Referenzbild" in prompt.rendered
     assert "oben links und oben rechts" not in prompt.rendered
-    assert prompt.policy_version == "verified-media-ai-references-v8-result-outcome"
+    assert prompt.policy_version == "verified-media-ai-references-v9-result-hierarchy"
     assert "{{" not in prompt.rendered
 
 
@@ -117,17 +117,19 @@ def test_result_image_prompt_is_result_only_and_describes_layout_reference():
 @pytest.mark.parametrize("media_kind", ["feed", "story"])
 @pytest.mark.parametrize("layout", [None, "/generated/announcement.png"])
 @pytest.mark.parametrize(
-    "own_team,score,outcome",
+    "own_team,score,outcome,heading,accent",
     [
-        ("SV Ehlen", "4:0", "SIEG"),
-        ("SV Ehlen", "0:4", "NIEDERLAGE"),
-        ("SG Beispiel", "4:0", "NIEDERLAGE"),
-        ("SG Beispiel", "0:4", "SIEG"),
-        ("SV Ehlen", "0:0", "UNENTSCHIEDEN"),
-        ("SG Beispiel", "2:2", "UNENTSCHIEDEN"),
+        ("SV Ehlen", "4:0", "SIEG", "HEIMSIEG!", "leuchtendes Grün"),
+        ("SV Ehlen", "0:4", "NIEDERLAGE", "HEIMNIEDERLAGE", "klares Rot"),
+        ("SG Beispiel", "4:0", "NIEDERLAGE", "AUSWÄRTSNIEDERLAGE", "klares Rot"),
+        ("SG Beispiel", "0:4", "SIEG", "AUSWÄRTSSIEG!", "leuchtendes Grün"),
+        ("SV Ehlen", "0:0", "UNENTSCHIEDEN", "UNENTSCHIEDEN", "Bernstein"),
+        ("SG Beispiel", "2:2", "UNENTSCHIEDEN", "UNENTSCHIEDEN", "Bernstein"),
     ],
 )
-def test_result_image_identifies_outcome_for_own_team(media_kind, layout, own_team, score, outcome):
+def test_result_image_identifies_outcome_for_own_team(
+    media_kind, layout, own_team, score, outcome, heading, accent
+):
     prompt = builtin_prompt(
         "image",
         "result",
@@ -139,7 +141,13 @@ def test_result_image_identifies_outcome_for_own_team(media_kind, layout, own_te
             result_image_fields=["score", "teams"],
         ),
     )
-    assert f"zeigen: {outcome} für {own_team}." in prompt.rendered
+    assert f"Vereinssicht: {outcome} für {own_team}." in prompt.rendered
+    assert f"Exakte große Hauptüberschrift: {heading}." in prompt.rendered
+    assert f"Überschrift: {heading}" in prompt.rendered
+    side = "links" if own_team == "SV Ehlen" else "rechts"
+    assert f"eigene Torzahl ({side}) in {accent}" in prompt.rendered
+    assert "Überschrift: ERGEBNIS" not in prompt.rendered
+    assert "Verwende ERGEBNIS als klare Überschrift" not in prompt.rendered
     assert f"Heim:Gast-Reihenfolge: {score}" in prompt.rendered
     home, away = score.split(":")
     assert f"SV Ehlen = {home}; SG Beispiel = {away}" in prompt.rendered
@@ -154,7 +162,8 @@ def test_result_image_rejects_missing_or_ambiguous_score(score):
         builtin_prompt("image", "result", "feed", facts(score=score))
 
 
-def test_result_image_outcome_applies_to_saved_template(db):
+@pytest.mark.parametrize("layout", [None, "/generated/announcement.png"])
+def test_result_image_outcome_applies_to_saved_template(db, layout):
     db.add(
         PromptTemplate(
             name="result-outcome",
@@ -175,12 +184,19 @@ def test_result_image_outcome_applies_to_saved_template(db):
         "image",
         "result",
         "feed",
-        facts(own_team="SG Beispiel", own_team_display="Unsere Zweite", score="4:0"),
+        facts(
+            own_team="SG Beispiel",
+            own_team_display="Unsere Zweite",
+            score="4:0",
+            result_layout_reference=layout,
+        ),
     )
     assert not prompt.builtin
     assert "NIEDERLAGE für Unsere Zweite" in prompt.rendered
     assert "Keine Jubeltexte" in prompt.rendered
     assert "Vorrang vor Stil- und Vereinsvorgaben" in prompt.rendered
+    assert "Exakte große Hauptüberschrift: AUSWÄRTSNIEDERLAGE." in prompt.rendered
+    assert "eigene Torzahl (rechts) in klares Rot" in prompt.rendered
 
 
 def test_post_facts_prefer_configured_home_venue_and_reuse_announcement_layout(db, tmp_path):
@@ -925,7 +941,7 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     assert post.design_snapshot["prompts"]["feed"]["version"] == 3
     assert (
         post.design_snapshot["prompts"]["feed"]["policy_version"]
-        == "verified-media-ai-references-v8-result-outcome"
+        == "verified-media-ai-references-v9-result-hierarchy"
     )
     prompt_snapshot = post.design_snapshot["prompts"]["feed"]
     assert "rendered" not in prompt_snapshot
