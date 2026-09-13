@@ -55,7 +55,7 @@ DEFAULT_STYLE = (
     "Ausgabe soll eine eigenständige Komposition erhalten"
 )
 
-IMAGE_POLICY_VERSION = "verified-media-ai-references-v8-result-outcome"
+IMAGE_POLICY_VERSION = "verified-media-ai-references-v9-result-hierarchy"
 
 RESULT_IMAGE_EDIT_SAFETY_PREFIX = """VERBINDLICHER ERGEBNISBILD-UMBAU:
 - Referenzbild 1 ist die bereits geprüfte Ankündigungsgrafik genau dieses Spiels
@@ -65,11 +65,13 @@ RESULT_IMAGE_EDIT_SAFETY_PREFIX = """VERBINDLICHER ERGEBNISBILD-UMBAU:
   Sponsorenzeichen, Hintergründe, Lichtstimmung, Farben, Bildausschnitt und
   Motivpositionen so unverändert wie technisch möglich.
 - Füge keine Person, kein Logo, kein Wappen, kein Sponsorenzeichen und kein
-  zusätzliches Motiv hinzu. Entferne oder ersetze keine vorhandene Person und
+  zusätzliches Fotomotiv hinzu. Entferne oder ersetze keine vorhandene Person und
   tausche keine Identität aus.
 - Ändere ausschließlich die Informationshierarchie zur Ergebnismeldung. Zeige
   nur die nachfolgend serverseitig freigegebenen Ergebnisangaben. Ergebnis und
   Mannschaftsnamen sind dabei immer erforderlich.
+- Gestalte dafür Überschrift, Zahlengröße, Schriftanordnung und grafische
+  Ergebnisakzente neu; die bisherige Texthierarchie ist nicht bindend.
 - Entferne beziehungsweise ersetze alle Ankündigungstexte und alle Spielangaben,
   die nicht ausdrücklich im freigegebenen Datenumfang genannt sind.
 - Stelle Ergebnis und Mannschaftsnamen vollständig innerhalb der Bildfläche,
@@ -166,8 +168,8 @@ IMAGE_CONTENT_DIRECTIONS = {
     "announcement": "Zeige Vorfreude und den bevorstehenden Spieltermin; erfinde keinen Spielverlauf.",
     "reminder": "Vermittle, dass das Spiel unmittelbar bevorsteht; Datum und Uhrzeit müssen besonders schnell erfassbar sein.",
     "result": (
-        "Dies ist ausschließlich eine Ergebnismeldung nach Spielende. Verwende ERGEBNIS "
-        "als klare Überschrift und rücke das bestätigte Ergebnis sowie die beiden "
+        "Dies ist ausschließlich eine Ergebnismeldung nach Spielende. Verwende die "
+        "serverseitig vorgegebene Ergebnisüberschrift und rücke das bestätigte Ergebnis sowie die beiden "
         "Mannschaften in den Mittelpunkt. Verwende keine Ankündigungsbegriffe oder "
         "Einladungen wie Heimspiel, Auswärtsspiel, Matchday, Spieltag, Komm vorbei, "
         "Anstoß oder Jetzt unterstützen. Zeige keine Anstoßzeit und keinen Countdown. "
@@ -512,7 +514,11 @@ def prompt_context(
         "venue": f"Spielort: {context['venue_display']}",
         "home_away": f"Spielart: {context['home_away']}",
     }
-    result_lines = ["Überschrift: ERGEBNIS"]
+    heading = "ERGEBNIS"
+    score_match = re.fullmatch(r"\s*([0-9]+)\s*:\s*([0-9]+)\s*", str(context["score"]))
+    if score_match:
+        _, heading = _result_labels(*map(int, score_match.groups()), is_home)
+    result_lines = [f"Überschrift: {heading}"]
     result_lines.extend(
         result_values[value] for value in selected_result_fields if value in result_values
     )
@@ -530,6 +536,16 @@ def render_body(body: str, context: dict) -> str:
         raise PromptValidationError(f"Prompt kann nicht gerendert werden: {exc}") from exc
 
 
+def _result_labels(home_score: int, away_score: int, is_home: bool) -> tuple[str, str]:
+    own_score, opponent_score = (home_score, away_score) if is_home else (away_score, home_score)
+    if own_score == opponent_score:
+        return "UNENTSCHIEDEN", "UNENTSCHIEDEN"
+    location = "HEIM" if is_home else "AUSWÄRTS"
+    if own_score > opponent_score:
+        return "SIEG", f"{location}SIEG!"
+    return "NIEDERLAGE", f"{location}NIEDERLAGE"
+
+
 def result_outcome_instruction(facts: dict) -> str:
     """Derive the outcome from the verified home/away score, never from the image."""
     if facts.get("post_type") != "result":
@@ -539,15 +555,11 @@ def result_outcome_instruction(facts: dict) -> str:
         raise PromptValidationError("Bestätigtes Ergebnis im Format Heimtore:Auswärtstore fehlt")
     own, _, is_home = _own_and_opponent(facts)
     home_score, away_score = map(int, match.groups())
-    own_score, opponent_score = (home_score, away_score) if is_home else (away_score, home_score)
     own_display = str(facts.get("own_team_display") or own).strip() or own
-    outcome = (
-        "SIEG"
-        if own_score > opponent_score
-        else "NIEDERLAGE"
-        if own_score < opponent_score
-        else "UNENTSCHIEDEN"
-    )
+    outcome, heading = _result_labels(home_score, away_score, is_home)
+    accent = {"SIEG": "leuchtendes Grün", "NIEDERLAGE": "klares Rot", "UNENTSCHIEDEN": "Bernstein"}[
+        outcome
+    ]
     mood = {
         "SIEG": "Positive, freudige Siegesstimmung ist erlaubt; keinen Spielverlauf erfinden.",
         "NIEDERLAGE": (
@@ -562,8 +574,23 @@ def result_outcome_instruction(facts: dict) -> str:
     }[outcome]
     return (
         "\nVERBINDLICHE ERGEBNISEINORDNUNG (Vorrang vor Stil- und Vereinsvorgaben):\n"
-        f"- Zusätzlich zu ERGEBNIS zwingend deutlich und mobil lesbar zeigen: {outcome} "
-        f"für {own_display}. Diese Kennzeichnung darf nicht durch die Feldauswahl entfallen.\n"
+        f"- Verifizierte Einordnung aus Vereinssicht: {outcome} für {own_display}.\n"
+        f"- Exakte große Hauptüberschrift: {heading}. Sie ersetzt ERGEBNIS vollständig. "
+        "Kein zusätzliches ERGEBNIS und kein kleiner Ergebnis-Badge unter den Mannschaften. "
+        "Diese Kennzeichnung darf nicht durch die Feldauswahl entfallen.\n"
+        "- Gestalte ein markantes Sportposter: sehr große, fette, schmale Versalien für "
+        "die Überschrift im oberen bis mittleren Bildbereich, optional leicht geneigt "
+        "und mit einer dynamischen Pinsel-Unterstreichung. Lange Überschriften sinnvoll "
+        "zweizeilig umbrechen, niemals abschneiden oder unleserlich verkleinern. "
+        "Direkt darunter der überdimensionale Spielstand als stärkster Blickfang. "
+        "Darunter klar zugeordnete Mannschaftsnamen; weitere freigegebene Angaben "
+        "kleiner und ruhig gruppiert. Keine Ansammlung gleichwertiger Balken und Badges.\n"
+        f"- Nur die eigene Torzahl ({'links' if is_home else 'rechts'}) in {accent} "
+        "hervorheben, gegnerische Torzahl und Doppelpunkt kontrastreich neutral halten. "
+        "Akzente auf Zahl und kleine grafische Details begrenzen; Vereinsfarben, "
+        "Originalwappen und Trikots unverändert lassen. Die Überschrift muss den Ausgang "
+        "auch ohne Farberkennung eindeutig vermitteln. Nur bei Sieg ist ein kleiner "
+        "grüner Haken neben der Überschrift erlaubt; kein Haken bei Niederlage oder Remis.\n"
         f"- Spielstand immer in Heim:Gast-Reihenfolge: {home_score}:{away_score}. "
         f"Tore eindeutig den Namen zuordnen: "
         f"{own_display if is_home else facts['home_team']} = {home_score}; "
@@ -621,7 +648,7 @@ def image_safety_prefix(facts: dict) -> str:
             "Stil-, Farb-, Hierarchie- und Kompositionsreferenz für die neue "
             "Ergebnismeldung. Übernimm daraus keine Ankündigungswörter, Einladungen, "
             "Datums-/Uhrzeit-Hervorhebungen oder sonstige veraltete Texte. Ersetze die "
-            "Ankündigungsbotschaft durch ERGEBNIS und das bestätigte Ergebnis. Personen "
+            "Ankündigungsbotschaft durch die vorgegebene Ergebnisüberschrift und das bestätigte Ergebnis. Personen "
             "oder Logos aus diesem Layoutbild sind keine zusätzlichen Identitäts- oder "
             "Logoquellen; dafür gelten weiterhin ausschließlich die zuvor einzeln "
             "benannten Referenzbilder."

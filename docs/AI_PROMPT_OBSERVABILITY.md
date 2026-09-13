@@ -43,9 +43,17 @@ Fixture-Vorschauen und Versionsvergleiche rufen keinen KI-Anbieter auf.
 
 ## Exakt versandte Prompts
 
-Ergebnisbilder erhalten in Feed und Story eine verbindliche Kennzeichnung
-**SIEG**, **NIEDERLAGE** oder **UNENTSCHIEDEN** mit dem Namen der eigenen
-Mannschaft. Der Server leitet sie aus der eindeutigen Mannschaftszuordnung und
+Ergebnisbilder erhalten in Feed und Story eine große Hauptüberschrift:
+**HEIMSIEG!**, **AUSWÄRTSSIEG!**, **HEIMNIEDERLAGE**,
+**AUSWÄRTSNIEDERLAGE** oder **UNENTSCHIEDEN** aus Sicht der eigenen
+Mannschaft. Sie ersetzt „ERGEBNIS“ und einen nachgeordneten Ergebnis-Badge.
+Direkt darunter steht der überdimensionale Spielstand. Nur die eigene Torzahl
+erhält einen Ergebnisakzent: Grün bei Sieg, Rot bei Niederlage und Bernstein
+bei Remis. Wappen, Trikots und die übrige Vereinsfarbwelt bleiben unverändert.
+Die Überschrift vermittelt den Ausgang auch unabhängig von der Farbe.
+Mannschaftsnamen und weitere ausgewählte Angaben sind kleiner angeordnet;
+die bisherige Texthierarchie einer Ankündigung darf dafür neu gestaltet werden.
+Der Server leitet die Kennzeichnung aus der eindeutigen Mannschaftszuordnung und
 dem bestätigten Heim:Gast-Spielstand ab; fehlende oder unlesbare Ergebnisse
 blockieren den Bildprompt. Tore bleiben eindeutig Heim- und Gastmannschaft
 zugeordnet. Diese Faktenregel gilt auch bei gespeicherten Plattformvorlagen,
