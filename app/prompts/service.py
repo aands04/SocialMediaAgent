@@ -55,7 +55,7 @@ DEFAULT_STYLE = (
     "Ausgabe soll eine eigenständige Komposition erhalten"
 )
 
-IMAGE_POLICY_VERSION = "verified-media-ai-references-v7-configured-result-fields"
+IMAGE_POLICY_VERSION = "verified-media-ai-references-v8-result-outcome"
 
 RESULT_IMAGE_EDIT_SAFETY_PREFIX = """VERBINDLICHER ERGEBNISBILD-UMBAU:
 - Referenzbild 1 ist die bereits geprüfte Ankündigungsgrafik genau dieses Spiels
@@ -501,11 +501,7 @@ def prompt_context(
     selected_result_fields = [
         "score",
         "teams",
-        *(
-            value
-            for value in selected_result_fields
-            if value not in {"score", "teams"}
-        ),
+        *(value for value in selected_result_fields if value not in {"score", "teams"}),
     ]
     result_values = {
         "score": f"Bestätigtes Ergebnis: {context['score']}",
@@ -518,9 +514,7 @@ def prompt_context(
     }
     result_lines = ["Überschrift: ERGEBNIS"]
     result_lines.extend(
-        result_values[value]
-        for value in selected_result_fields
-        if value in result_values
+        result_values[value] for value in selected_result_fields if value in result_values
     )
     context["result_fields_instruction"] = "\n".join(
         f"{index}. {line}" for index, line in enumerate(result_lines, start=1)
@@ -536,9 +530,57 @@ def render_body(body: str, context: dict) -> str:
         raise PromptValidationError(f"Prompt kann nicht gerendert werden: {exc}") from exc
 
 
+def result_outcome_instruction(facts: dict) -> str:
+    """Derive the outcome from the verified home/away score, never from the image."""
+    if facts.get("post_type") != "result":
+        return ""
+    match = re.fullmatch(r"\s*([0-9]+)\s*:\s*([0-9]+)\s*", str(facts.get("score") or ""))
+    if not match:
+        raise PromptValidationError("Bestätigtes Ergebnis im Format Heimtore:Auswärtstore fehlt")
+    own, _, is_home = _own_and_opponent(facts)
+    home_score, away_score = map(int, match.groups())
+    own_score, opponent_score = (home_score, away_score) if is_home else (away_score, home_score)
+    own_display = str(facts.get("own_team_display") or own).strip() or own
+    outcome = (
+        "SIEG"
+        if own_score > opponent_score
+        else "NIEDERLAGE"
+        if own_score < opponent_score
+        else "UNENTSCHIEDEN"
+    )
+    mood = {
+        "SIEG": "Positive, freudige Siegesstimmung ist erlaubt; keinen Spielverlauf erfinden.",
+        "NIEDERLAGE": (
+            "Sachliche, ruhige und respektvolle Ergebnisdarstellung. Keine Jubeltexte, "
+            "Siegesposen, Konfetti, Pokale oder triumphale Effekte hinzufügen. "
+            "Keine erfundene Trauer, Tränen oder Demütigung inszenieren."
+        ),
+        "UNENTSCHIEDEN": (
+            "Ausgewogene, sachliche Stimmung; weder Sieg noch Niederlage inszenieren. "
+            "Keine Siegesparolen, Pokale oder Konfetti hinzufügen."
+        ),
+    }[outcome]
+    return (
+        "\nVERBINDLICHE ERGEBNISEINORDNUNG (Vorrang vor Stil- und Vereinsvorgaben):\n"
+        f"- Zusätzlich zu ERGEBNIS zwingend deutlich und mobil lesbar zeigen: {outcome} "
+        f"für {own_display}. Diese Kennzeichnung darf nicht durch die Feldauswahl entfallen.\n"
+        f"- Spielstand immer in Heim:Gast-Reihenfolge: {home_score}:{away_score}. "
+        f"Tore eindeutig den Namen zuordnen: "
+        f"{own_display if is_home else facts['home_team']} = {home_score}; "
+        f"{facts['away_team'] if is_home else own_display} = {away_score}. "
+        "Die erste Zahl gehört nicht automatisch zur eigenen Mannschaft.\n"
+        f"- {mood}\n"
+        "- Vorhandene reale Personen und ihre Identität unverändert erhalten. Falls das "
+        "Referenzfoto Jubel zeigt, diesen nicht als Beleg für den Spielausgang verwenden; "
+        "die Ergebniseinordnung muss die Bildaussage klar bestimmen. Widersprechende "
+        "Ankündigungs- und Jubeltexte entfernen. Keinen Spielverlauf ableiten.\n"
+    )
+
+
 def image_safety_prefix(facts: dict) -> str:
+    outcome_rules = result_outcome_instruction(facts)
     if facts.get("post_type") == "result" and facts.get("result_layout_reference"):
-        return RESULT_IMAGE_EDIT_SAFETY_PREFIX
+        return RESULT_IMAGE_EDIT_SAFETY_PREFIX + outcome_rules
     next_reference = 3
     if facts.get("opponent_logo"):
         opponent_logo_rule = (
@@ -591,10 +633,13 @@ def image_safety_prefix(facts: dict) -> str:
             if facts.get("post_type") == "result"
             else ""
         )
-    return IMAGE_SAFETY_PREFIX.format(
-        opponent_logo_rule=opponent_logo_rule,
-        sponsor_logo_rules=sponsor_logo_rules,
-        result_layout_reference_rule=result_layout_reference_rule,
+    return (
+        IMAGE_SAFETY_PREFIX.format(
+            opponent_logo_rule=opponent_logo_rule,
+            sponsor_logo_rules=sponsor_logo_rules,
+            result_layout_reference_rule=result_layout_reference_rule,
+        )
+        + outcome_rules
     )
 
 
@@ -603,6 +648,7 @@ def builtin_prompt(
 ) -> ResolvedPrompt:
     settings = get_settings()
     image = prompt_kind == "image"
+    facts = facts | {"post_type": post_type}
     name = f"default-image-{media_kind}" if image else f"default-text-{post_type}"
     if image and post_type == "result" and facts.get("result_layout_reference"):
         body = RESULT_IMAGE_EDIT_DIRECTION.replace(
@@ -671,6 +717,7 @@ def resolve_prompt(
     media_kind: str,
     facts: dict,
 ) -> ResolvedPrompt:
+    facts = facts | {"post_type": post_type}
     item = db.scalar(
         select(PromptTemplate)
         .where(
