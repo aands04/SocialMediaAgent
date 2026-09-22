@@ -36,7 +36,7 @@ from app.channels.service import sync_instagram_channel
 from app.config import get_settings
 from app.db import get_db
 from app.file_delivery import detached_file_response
-from app.games.bundles import connect_games, dashboard_game_groups, separate_games
+from app.games.bundles import connect_games, dashboard_game_groups
 from app.games.identity import (
     TeamIdentityError,
     team_name_variants,
@@ -193,7 +193,32 @@ from app.web import (
     require_platform_admin,
 )
 
-router = APIRouter()
+
+def require_active_contribution(
+    request: Request,
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+    post_id = request.path_params.get("post_id")
+    if (
+        not post_id
+        and request.url.path.startswith("/publications/")
+        and request.path_params.get("job_id")
+    ):
+        job = db.get(PublicationJob, request.path_params["job_id"])
+        post_id = job.post_id if job else None
+    post = db.get(Post, post_id) if post_id else None
+    bundle = (post.design_snapshot or {}).get("club_matchday_carousel") if post else None
+    if post and bundle and post.active_key != "active":
+        require(current, db, "view", post.team_id)
+        raise HTTPException(
+            409, "Dieser Beitrag ist archiviert; bitte einen neuen Einzelbeitrag erstellen"
+        )
+
+
+router = APIRouter(dependencies=[Depends(require_active_contribution)])
 templates = Jinja2Templates(directory="app/templates")
 templates.env.filters["berlin"] = berlin_datetime
 settings = get_settings()
@@ -743,7 +768,9 @@ def update_club_branding(
 
 def _invalidate_posts_for_logo_change(db: Session, game: Game, reason: str) -> list[str]:
     affected = []
-    for post in db.scalars(select(Post).where(Post.game_id == game.id)).all():
+    for post in db.scalars(
+        select(Post).where(Post.game_id == game.id, Post.active_key == "active")
+    ).all():
         if post.status in {PostStatus.PUBLISHED, PostStatus.CANCELLED}:
             continue
         post.version += 1
@@ -771,7 +798,9 @@ def _invalidate_posts_for_logo_change(db: Session, game: Game, reason: str) -> l
 def _invalidate_posts_for_result_change(db: Session, game: Game, reason: str) -> list[str]:
     """Revoke open result approvals, including shared matchday carousels."""
     affected: list[str] = []
-    candidates = db.scalars(select(Post).where(Post.post_type == "result")).all()
+    candidates = db.scalars(
+        select(Post).where(Post.post_type == "result", Post.active_key == "active")
+    ).all()
     for post in candidates:
         bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
         if post.game_id != game.id and game.id not in (bundle.get("game_ids") or []):
@@ -1516,9 +1545,7 @@ def media(
     category_counts = {
         key: sum(item.media_category == key for item in all_items) for key in MEDIA_CATEGORIES
     }
-    reservation_game_ids = {
-        item.reserved_game_id for item in all_items if item.reserved_game_id
-    }
+    reservation_game_ids = {item.reserved_game_id for item in all_items if item.reserved_game_id}
     reservation_games = (
         {
             game.id: game
@@ -1549,9 +1576,7 @@ def media(
     except LimitExceeded:
         storage_limit_bytes = 0
     storage_percent = (
-        min(100, round(storage_bytes * 100 / storage_limit_bytes))
-        if storage_limit_bytes
-        else 0
+        min(100, round(storage_bytes * 100 / storage_limit_bytes)) if storage_limit_bytes else 0
     )
     folders = []
     external_import_available = False
@@ -1590,9 +1615,7 @@ def media(
         reservation_games=reservation_games,
         category_labels=MEDIA_CATEGORY_LABELS,
         storage_used_display=format_storage_gb(storage_bytes, fixed_decimals=True),
-        storage_limit_display=format_storage_gb(
-            storage_limit_bytes, fixed_decimals=False
-        ),
+        storage_limit_display=format_storage_gb(storage_limit_bytes, fixed_decimals=False),
         storage_has_limit=bool(storage_limit_bytes),
         storage_percent=storage_percent,
         title="Medienbibliothek",
@@ -1634,9 +1657,7 @@ def scan_media(
     require(current, db, "generate", team_id)
     if not current.club_id:
         raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
-    team = db.scalar(
-        select(Team).where(Team.id == team_id, Team.club_id == current.club_id)
-    )
+    team = db.scalar(select(Team).where(Team.id == team_id, Team.club_id == current.club_id))
     if not team:
         raise HTTPException(404)
     store = LocalStorageProvider(settings.media_root)
@@ -1736,9 +1757,7 @@ async def upload_player_images(
     require(current, db, "generate", team_id)
     if not current.club_id:
         raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
-    team = db.scalar(
-        select(Team).where(Team.id == team_id, Team.club_id == current.club_id)
-    )
+    team = db.scalar(select(Team).where(Team.id == team_id, Team.club_id == current.club_id))
     if not team:
         raise HTTPException(404)
     try:
@@ -2239,9 +2258,7 @@ def bulk_media_action(
             if action == "release":
                 release_asset(db, asset, actor_user_id=current.id)
             elif action == "delete":
-                remove_source_file = soft_delete_asset(
-                    db, asset, actor_user_id=current.id
-                )
+                remove_source_file = soft_delete_asset(db, asset, actor_user_id=current.id)
                 if remove_source_file:
                     mark_local_media_deleted(
                         db,
@@ -2251,9 +2268,7 @@ def bulk_media_action(
                     )
                     try:
                         deleted_source_paths.append(
-                            media_asset_path(
-                                asset, settings.media_root, settings.upload_root
-                            )
+                            media_asset_path(asset, settings.media_root, settings.upload_root)
                         )
                     except StorageError:
                         pass
@@ -2310,9 +2325,7 @@ def media_detail(
     if not asset:
         raise HTTPException(404)
     require(current, db, "view", asset.team_id)
-    team = db.scalar(
-        select(Team).where(Team.id == asset.team_id, Team.club_id == current.club_id)
-    )
+    team = db.scalar(select(Team).where(Team.id == asset.team_id, Team.club_id == current.club_id))
     games = db.scalars(
         select(Game)
         .where(Game.team_id == asset.team_id, Game.club_id == current.club_id)
@@ -2328,12 +2341,16 @@ def media_detail(
         .order_by(MediaUsageHistory.created_at.desc())
     ).all()
     game_ids = {item.game_id for item in history if item.game_id}
-    history_games = {
-        game.id: game
-        for game in db.scalars(
-            select(Game).where(Game.id.in_(game_ids), Game.club_id == current.club_id)
-        ).all()
-    } if game_ids else {}
+    history_games = (
+        {
+            game.id: game
+            for game in db.scalars(
+                select(Game).where(Game.id.in_(game_ids), Game.club_id == current.club_id)
+            ).all()
+        }
+        if game_ids
+        else {}
+    )
     reservation_game = (
         db.scalar(
             select(Game).where(
@@ -2346,9 +2363,7 @@ def media_detail(
         else None
     )
     uploader = (
-        db.scalar(
-            select(User).where(User.id == asset.uploaded_by, User.club_id == current.club_id)
-        )
+        db.scalar(select(User).where(User.id == asset.uploaded_by, User.club_id == current.club_id))
         if asset.uploaded_by
         else None
     )
@@ -4846,8 +4861,13 @@ def post_detail(
             and not job.locked_at
             and job.id not in active_attempt_job_ids
         )
-    can_edit_all = all(allowed(db, current, "edit_post", member.team_id) for member in bundle_posts)
-    can_delete_all = all(allowed(db, current, "approve", member.team_id) for member in bundle_posts)
+    archived_matchday = aggregate_bundle and item.active_key != "active"
+    can_edit_all = not archived_matchday and all(
+        allowed(db, current, "edit_post", member.team_id) for member in bundle_posts
+    )
+    can_delete_all = not archived_matchday and all(
+        allowed(db, current, "approve", member.team_id) for member in bundle_posts
+    )
     incomplete_members = [
         member
         for member in bundle_posts
@@ -4985,6 +5005,7 @@ def post_detail(
             )
             return candidates[0], display_version or version
         return None, version
+
     catalog_groups: dict[tuple[str, str, int], list[dict]] = {}
     for entry in media_catalog:
         slot = entry["slot"]
@@ -5045,7 +5066,11 @@ def post_detail(
                     }
                 )
         else:
-            current_version = db.get(GeneratedMediaVersion, job.media_version_id)
+            current_version = (
+                db.get(GeneratedMediaVersion, job.media_version_id)
+                if job.media_version_id
+                else None
+            )
             current_entry, display_version = publication_catalog_entry(
                 current_version,
                 media_path=job.media_path,
@@ -5153,20 +5178,28 @@ def post_detail(
     }
     job_version_labels = {}
     for job in jobs:
-        media_version = db.get(GeneratedMediaVersion, job.media_version_id)
-        text_version = db.get(PostTextVersion, job.text_version_id)
+        media_version = (
+            db.get(GeneratedMediaVersion, job.media_version_id) if job.media_version_id else None
+        )
+        text_version = db.get(PostTextVersion, job.text_version_id) if job.text_version_id else None
         job_version_labels[job.id] = {
             "media": media_version.version_number if media_version else None,
             "text": text_version.version_number if text_version else None,
         }
-    unpublished_jobs = [job for job in jobs if job.status != JobStatus.PUBLISHED]
+    unpublished_jobs = [
+        job
+        for job in jobs
+        if job.status not in {JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED}
+    ]
     next_publication = min(
         (job.scheduled_at for job in unpublished_jobs if job.scheduled_at),
         default=None,
     )
     published_count = sum(job.status == JobStatus.PUBLISHED for job in jobs)
-    open_count = len(jobs) - published_count
-    if incomplete_members:
+    open_count = len(unpublished_jobs)
+    if archived_matchday:
+        publication_summary = "Archivierter gemeinsamer Beitrag"
+    elif incomplete_members:
         publication_summary = "Generierung unvollständig"
     elif jobs and published_count == len(jobs):
         publication_summary = "Vollständig veröffentlicht"
@@ -5305,7 +5338,12 @@ def post_detail(
         current_media_assets_by_post=current_media_assets_by_post,
         alternative_media_assets_by_post=alternative_media_assets_by_post,
         can_edit=can_edit_all,
-        can_generate=not bundle_error
+        can_separate=aggregate_bundle
+        and not bundle_error
+        and can_delete_all
+        and all(allowed(db, current, "edit_game", member.team_id) for member in bundle_posts),
+        can_generate=not archived_matchday
+        and not bundle_error
         and not incomplete_members
         and all(allowed(db, current, "generate", member.team_id) for member in bundle_posts),
         can_approve=not bundle_error and not incomplete_members and can_delete_all,
@@ -5642,11 +5680,7 @@ def choose_publication_media_variant(
         )
     elif job.media_version_id:
         previous_version_id = job.media_version_id
-    previous = (
-        db.get(GeneratedMediaVersion, previous_version_id)
-        if previous_version_id
-        else None
-    )
+    previous = db.get(GeneratedMediaVersion, previous_version_id) if previous_version_id else None
     try:
         selected = select_publication_media_variant(
             db,
@@ -6143,9 +6177,7 @@ def edit_single_post_media_with_ai(
     from app.jobs.generation import enqueue_ai_revision
 
     check_csrf(request, csrf_token_value)
-    post = db.scalar(
-        select(Post).where(Post.id == post_id).with_for_update()
-    )
+    post = db.scalar(select(Post).where(Post.id == post_id).with_for_update())
     if not post:
         raise HTTPException(404)
     require(current, db, "generate", post.team_id)
@@ -6211,16 +6243,12 @@ def edit_single_post_media_with_ai(
             ):
                 raise HTTPException(409, "Das ausgewählte Spielerbild ist nicht mehr frei")
 
-    has_feed_variants = bool(
-        ((post.design_snapshot or {}).get("media") or {}).get("feed_variants")
-    )
+    has_feed_variants = bool(((post.design_snapshot or {}).get("media") or {}).get("feed_variants"))
     feed_positions = None
     story_variants = None
     revise_feed = slot.media_kind == "feed"
     if revise_feed:
-        feed_positions = [
-            slot.variant_number if has_feed_variants else slot.output_position
-        ]
+        feed_positions = [slot.variant_number if has_feed_variants else slot.output_position]
     else:
         story_variants = [slot.variant_number]
 
@@ -6239,9 +6267,7 @@ def edit_single_post_media_with_ai(
             feed_positions=feed_positions,
             story_variant_numbers=story_variants,
             revision_mode=mode,
-            source_media_version_id=(
-                selected_version.id if mode == "targeted_edit" else None
-            ),
+            source_media_version_id=(selected_version.id if mode == "targeted_edit" else None),
             target_media_slot_id=slot.id,
         )
     except ValueError as exc:
@@ -6948,10 +6974,12 @@ def games(
     teams = [
         t
         for t in db.scalars(
-            select(Team).where(
+            select(Team)
+            .where(
                 Team.club_id == current.club_id,
                 Team.archived_at.is_(None),
-            ).order_by(Team.display_name.asc(), Team.id.asc())
+            )
+            .order_by(Team.display_name.asc(), Team.id.asc())
         )
         if require_visible(db, current, t.id)
     ]
@@ -7112,9 +7140,7 @@ def games(
         if game_ids
         else []
     )
-    media_preferences_by_game = {
-        preference.game_id: preference for preference in media_preferences
-    }
+    media_preferences_by_game = {preference.game_id: preference for preference in media_preferences}
     publication_jobs = (
         list(
             db.scalars(
@@ -7142,9 +7168,7 @@ def games(
     for post in game_posts:
         if post.game_id in posts_by_game:
             posts_by_game[post.game_id].append(post)
-    generation_jobs_by_game: dict[str, list[GenerationJob]] = {
-        game_id: [] for game_id in game_ids
-    }
+    generation_jobs_by_game: dict[str, list[GenerationJob]] = {game_id: [] for game_id in game_ids}
     for job in generation_jobs:
         if job.game_id in generation_jobs_by_game:
             generation_jobs_by_game[job.game_id].append(job)
@@ -7161,9 +7185,7 @@ def games(
             post for game in group["games"] for post in posts_by_game.get(game.id, [])
         ]
         generation_jobs_for_group = [
-            job
-            for game in group["games"]
-            for job in generation_jobs_by_game.get(game.id, [])
+            job for game in group["games"] for job in generation_jobs_by_game.get(game.id, [])
         ]
         group["publication_rows"] = sorted(rows, key=lambda row: row.scheduled_at)
         group["publication_targets"] = list(
@@ -7211,14 +7233,17 @@ def games(
         )
         job_statuses = {row.job.status for row in rows}
         post_statuses = {post.status for post in posts_for_group}
-        failed_generation = any(
-            job.status
-            in {
-                GenerationJobStatus.FAILED,
-                GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
-            }
-            for job in generation_jobs_for_group
-        ) and not posts_for_group
+        failed_generation = (
+            any(
+                job.status
+                in {
+                    GenerationJobStatus.FAILED,
+                    GenerationJobStatus.MANUAL_REVIEW_REQUIRED,
+                }
+                for job in generation_jobs_for_group
+            )
+            and not posts_for_group
+        )
         group["problem_generation_job"] = max(
             (
                 job
@@ -7239,16 +7264,12 @@ def games(
             or PostStatus.ERROR in post_statuses
         ):
             status_key, status_label = "problem", "Problem"
-        elif (
-            any(row.attention for row in rows)
-            or post_statuses
-            & {
-                PostStatus.CREATING,
-                PostStatus.INCOMPLETE,
-                PostStatus.PENDING,
-                PostStatus.REAPPROVAL,
-            }
-        ):
+        elif any(row.attention for row in rows) or post_statuses & {
+            PostStatus.CREATING,
+            PostStatus.INCOMPLETE,
+            PostStatus.PENDING,
+            PostStatus.REAPPROVAL,
+        }:
             status_key, status_label = "attention", "Freigabe ausstehend"
         elif JobStatus.PUBLISHED in job_statuses or PostStatus.PUBLISHED in post_statuses:
             if job_statuses and job_statuses <= {
@@ -7259,13 +7280,17 @@ def games(
                 status_key, status_label = "published", "Veröffentlicht"
             else:
                 status_key, status_label = "attention", "Teilweise veröffentlicht"
-        elif job_statuses & {
-            JobStatus.APPROVED,
-            JobStatus.SCHEDULED,
-            JobStatus.WAITING,
-            JobStatus.PUBLISHING,
-            JobStatus.RETRY,
-        } or PostStatus.SCHEDULED in post_statuses:
+        elif (
+            job_statuses
+            & {
+                JobStatus.APPROVED,
+                JobStatus.SCHEDULED,
+                JobStatus.WAITING,
+                JobStatus.PUBLISHING,
+                JobStatus.RETRY,
+            }
+            or PostStatus.SCHEDULED in post_statuses
+        ):
             status_key, status_label = "planned", "Geplant"
         elif posts_for_group:
             status_key, status_label = "attention", "Manuelle Planung erforderlich"
@@ -7297,15 +7322,11 @@ def games(
             group["action_label"] = "Jetzt erstellen"
         else:
             group["action_label"] = (
-                "Gemeinsamen Beitrag erstellen"
-                if group["grouped"]
-                else "Beitrag jetzt erstellen"
+                "Gemeinsamen Beitrag erstellen" if group["grouped"] else "Beitrag jetzt erstellen"
             )
 
     if contribution_status != "all":
-        game_groups = [
-            group for group in game_groups if group["status_key"] == contribution_status
-        ]
+        game_groups = [group for group in game_groups if group["status_key"] == contribution_status]
     upcoming_groups: dict[object, list[dict]] = {}
     past_groups: dict[object, list[dict]] = {}
     for group in game_groups:
@@ -7348,15 +7369,11 @@ def game_media_selection(
 ):
     if not current.club_id:
         raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
-    game = db.scalar(
-        select(Game).where(Game.id == game_id, Game.club_id == current.club_id)
-    )
+    game = db.scalar(select(Game).where(Game.id == game_id, Game.club_id == current.club_id))
     if not game:
         raise HTTPException(404, "Spiel nicht gefunden")
     require(current, db, "generate", game.team_id)
-    team = db.scalar(
-        select(Team).where(Team.id == game.team_id, Team.club_id == current.club_id)
-    )
+    team = db.scalar(select(Team).where(Team.id == game.team_id, Team.club_id == current.club_id))
     if not team:
         raise HTTPException(404, "Mannschaft nicht gefunden")
     if contribution_type not in CONTRIBUTION_TYPE_LABELS:
@@ -7424,9 +7441,7 @@ def update_game_media_selection(
     check_csrf(request, csrf_token_value)
     if not current.club_id:
         raise HTTPException(403, "Eindeutiger Vereinskontext fehlt")
-    game = db.scalar(
-        select(Game).where(Game.id == game_id, Game.club_id == current.club_id)
-    )
+    game = db.scalar(select(Game).where(Game.id == game_id, Game.club_id == current.club_id))
     if not game:
         raise HTTPException(404, "Spiel nicht gefunden")
     require(current, db, "generate", game.team_id)
@@ -7558,11 +7573,20 @@ def separate_game_bundle(
     check_csrf(request, csrf_token_value)
     selected_ids = list(dict.fromkeys(game_ids))
     games = [db.get(Game, item_id) for item_id in selected_ids]
-    if len(selected_ids) < 2 or any(item is None for item in games):
+    if not selected_ids or any(item is None for item in games):
         raise HTTPException(422, "Die verbundene Spielgruppe ist nicht mehr vollständig")
     for item in games:
         require(current, db, "edit_game", item.team_id)
-    separate_games(games)
+    from app.posts.separation import separate_matchday_posts
+
+    try:
+        separate_matchday_posts(db, games, current)
+    except PermissionError as exc:
+        db.rollback()
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
     audit(
         db,
         current,
@@ -7573,7 +7597,46 @@ def separate_game_bundle(
         {"game_ids": selected_ids},
     )
     db.commit()
-    return redirect("/games", "Spiele werden künftig getrennt behandelt")
+    return redirect(
+        "/games",
+        "Spiele getrennt; alte gemeinsame Beiträge archiviert und offene Aufträge abgebrochen",
+    )
+
+
+@router.post("/posts/{post_id}/separate")
+def separate_post_bundle(
+    post_id: str,
+    request: Request,
+    version: int = Form(),
+    csrf_token_value: str = Form(alias="csrf_token"),
+    current=Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    from app.posts.separation import separate_matchday_posts
+
+    check_csrf(request, csrf_token_value)
+    post = db.get(Post, post_id)
+    if not post or not post.game_id:
+        raise HTTPException(404)
+    require(current, db, "approve", post.team_id)
+    if post.version != version:
+        raise HTTPException(409, "Der Beitrag wurde zwischenzeitlich geändert")
+    if not (post.design_snapshot or {}).get("club_matchday_carousel"):
+        raise HTTPException(409, "Dieser Beitrag gehört nicht zu einem gemeinsamen Spieltag")
+    try:
+        separate_matchday_posts(db, [db.get(Game, post.game_id)], current)
+        if post.version != version + 1:
+            raise ValueError("Der Beitrag wurde zwischenzeitlich geändert")
+        db.commit()
+    except PermissionError as exc:
+        db.rollback()
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    return redirect(
+        "/games", "Spiele vollständig getrennt. Neue Beiträge können einzeln erstellt werden."
+    )
 
 
 @router.post("/games/mock")

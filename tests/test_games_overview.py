@@ -265,3 +265,22 @@ def test_overview_marks_unavailable_scheduler_calculation(monkeypatch, db):
     assert summary.generation_schedule_state == "unavailable"
     assert summary.next_generation_label == ("Automatisierungszeit derzeit nicht bestimmbar")
     assert summary.action_required is False
+
+
+def test_old_bundle_failure_does_not_block_separated_game_overview(db):
+    _, team, game = _game_setup(db)
+    game.overrides = {"generation_revision": "new", "generation_bundle_separated": True}
+    job = GenerationJob(
+        id="old-bundle-failure",
+        club_id=game.club_id,
+        game_id=game.id,
+        team_id=team.id,
+        job_type=GenerationJobType.CREATE_POST,
+        post_type="announcement",
+        requested_by="actor",
+        status=GenerationJobStatus.FAILED,
+        idempotency_key="old-bundle",
+        parameters={"bundle_game_ids": [game.id, "other-game"]},
+    )
+    summary = _summary(db, [game], [team], jobs=[job])
+    assert all(item.label != "Erstellung fehlgeschlagen" for item in summary.generation_items)

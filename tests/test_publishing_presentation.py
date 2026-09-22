@@ -123,3 +123,17 @@ def test_presentation_denies_missing_or_mismatched_tenant_context(db):
     assert publication_views(db, [job], club_id="fremder-verein", channels=[]) == []
     with pytest.raises(ValueError, match="Vereinskontext"):
         operational_channels(db, "")
+
+
+@pytest.mark.parametrize("status", [JobStatus.CANCELLED, JobStatus.SKIPPED])
+def test_terminal_unapproved_jobs_do_not_request_approval(db, status):
+    club, _, _, _, _, job = _publishing_records(db)
+    job.status = status
+    job.approval_status = "unapproved"
+    job.stale_time = True
+    job.scheduled_at = datetime.now(timezone.utc) - timedelta(days=10)
+    db.commit()
+    view = publication_views(db, [job], club_id=club.id)[0]
+    assert not view.attention
+    assert not view.overdue
+    assert view.status_label in {"Abgebrochen", "Übersprungen"}

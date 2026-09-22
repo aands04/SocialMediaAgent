@@ -2550,6 +2550,9 @@ def recompose_post_logos(
 
 
 def reschedule_game(db: Session, game: Game, new_kickoff: datetime):
+    from app.posts.separation import separate_rescheduled_matchday
+
+    separate_rescheduled_matchday(db, game, new_kickoff)
     old = game.kickoff
     game.original_kickoff = game.original_kickoff or old
     game.kickoff = new_kickoff

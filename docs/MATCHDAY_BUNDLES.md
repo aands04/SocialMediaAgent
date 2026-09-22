@@ -26,6 +26,42 @@ desselben Instagram-Ziels und desselben Spieltags ausdrücklich verbinden. Mit
 **Spiele bewusst trennen** werden sie dauerhaft aus der automatischen Gruppe
 genommen, bis sie erneut bewusst verbunden werden.
 
+## Bestehende Beiträge vollständig trennen
+
+**Spiele trennen** beendet auch die gemeinsame Beitragsverarbeitung. Bei bereits
+verlegten oder früher nur optisch getrennten Spielen steht am alten gemeinsamen
+Beitrag unter **Weitere Aktionen und Gefahrenbereich** die Aktion
+**Spiele und offene Beiträge trennen** bereit. Sie berücksichtigt alle betroffenen
+Mannschaften, auch wenn nur ein Teilbeitrag geöffnet wurde.
+
+- Alle noch aktiven gemeinsamen Beiträge werden archiviert. Ihre Texte, Medien,
+  eingefrorenen Versionen und veröffentlichten Plattformaufträge bleiben erhalten.
+- Noch nicht gesendete gemeinsame Feed- und individuelle Story-Aufträge dieser
+  Beiträge werden abgebrochen. Sie erscheinen nicht mehr als offene Freigaben.
+- Wartende gemeinsame Generierungsaufträge werden abgebrochen. Laufende
+  Generierungen, laufende/unklare Veröffentlichungen oder vorhandene unaufgelöste
+  Meta-Container blockieren die Trennung vollständig, bis sie geklärt sind.
+- Jedes Spiel erhält einen neuen Generierungsstand und bleibt von automatischer
+  Bündelung ausgeschlossen. Unter **Spiele** können neue, unabhängige Beiträge
+  erstellt werden; die aktivierte Automatik kann sie zum vorgesehenen Zeitpunkt
+  ebenfalls einreihen. Bestehende Freigabe- und Kostenregeln gelten unverändert.
+- Alte Generierungsaufträge und gespeicherte Bearbeitungs-/Freigabelinks können
+  archivierte Beiträge nicht wieder aktivieren. Wiederholtes Trennen verändert
+  bereits neu angelegte Einzelaufträge nicht.
+
+Eine durch den Import oder die Spielverlegungsfunktion erkannte Verschiebung auf
+einen anderen Berliner Kalendertag führt dieselbe Trennung aus, wenn ein aktiver
+oder noch wartender gemeinsamer Beitrag existiert. Eine reine Uhrzeitänderung am
+selben Tag löst die Gruppe nicht auf. Bereits vor dieser Korrektur verlegte Spiele
+werden über die oben genannte Aktion am alten Beitrag bereinigt.
+
+Die historische Darstellung bleibt bewusst gemeinsam: Ein bereits veröffentlichtes
+Karussell lässt sich nicht rückwirkend in unabhängige Veröffentlichungen zerlegen.
+Aktive Einzelbeiträge haben keine Verknüpfung zu diesem alten Bündel.
+Die Änderung benötigt keine Datenbankmigration und führt bei der Trennung selbst
+keine externen Provider- oder KI-Aufrufe aus.
+
+
 ## Systemweiter Gegnerlogo-Katalog
 
 Jeder neue, technisch validierte Gegnerlogo-Upload wird zusätzlich als eigene
