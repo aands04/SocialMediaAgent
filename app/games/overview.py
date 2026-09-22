@@ -315,6 +315,18 @@ def build_game_automation_summary(
 
     now = _aware_utc(now or datetime.now(timezone.utc))
     timezone_name = settings.timezone
+    games_by_id = {game.id: game for game in games}
+    generation_jobs = [
+        job
+        for job in generation_jobs
+        if job.game_id in games_by_id
+        and (
+            ((job.parameters or {}).get("generation_revisions") or {}).get(job.game_id)
+            if (job.parameters or {}).get("bundle_game_ids")
+            else (job.parameters or {}).get("generation_revision")
+        )
+        == (games_by_id[job.game_id].overrides or {}).get("generation_revision")
+    ]
     latest_posts = _latest_by_type([post for post in posts if post.active_key == "active"])
     latest_jobs = _latest_by_type(generation_jobs)
     rules_by_team: dict[str, list[StoryRule]] = {}

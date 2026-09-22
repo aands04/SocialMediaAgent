@@ -108,7 +108,7 @@
         {% endif %}
       </div>
       {% if group.grouped %}
-      <form method="post" action="/games/bundles/separate" onsubmit="return confirm('Möchtest du diese Spiele künftig getrennt behandeln?');">
+      <form method="post" action="/games/bundles/separate" onsubmit="return confirm('Spiele vollständig trennen? Gemeinsame Beiträge werden archiviert und offene Aufträge abgebrochen. Neue Einzelbeiträge müssen neu erstellt und freigegeben werden.');">
         <input type="hidden" name="csrf_token" value="{{csrf}}">
         {% for x in group.games %}<input type="hidden" name="game_ids" value="{{x.id}}">{% endfor %}
         <button class="secondary">Spiele trennen</button>

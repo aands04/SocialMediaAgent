@@ -44,6 +44,8 @@ def approve(
     *,
     commit: bool = True,
 ) -> Post:
+    if (post.design_snapshot or {}).get("club_matchday_carousel") and post.active_key != "active":
+        raise ApprovalError("Archivierte Beiträge dürfen nicht erneut freigegeben werden")
     if not allowed(db, user, "approve", post.team_id):
         raise ApprovalError("Keine Freigabeberechtigung")
     page = db.get(InstagramPage, post.instagram_page_id) if post.instagram_page_id else None
@@ -209,11 +211,7 @@ def approve(
         db,
         post,
         selected,
-        (
-            set(selected_channel_connections)
-            if selected_channel_connections is not None
-            else None
-        ),
+        (set(selected_channel_connections) if selected_channel_connections is not None else None),
     )
     db.add(
         AuditLog(
@@ -252,6 +250,8 @@ def approve_matchday_bundle(
     selected_channel_connections: list[str] | None = None,
 ) -> Post:
     """Approve the aggregate carousel and all selected per-game stories atomically."""
+    if (post.design_snapshot or {}).get("club_matchday_carousel") and post.active_key != "active":
+        raise ApprovalError("Archivierte Beiträge dürfen nicht erneut freigegeben werden")
     try:
         primary, members, visible_jobs, _job_posts = matchday_bundle_jobs(db, post)
         if len(members) == 1 or post.id != primary.id:
@@ -291,6 +291,8 @@ def approve_matchday_bundle(
 
 
 def edit_text(db: Session, post: Post, user: User, text: str, expected_version: int):
+    if (post.design_snapshot or {}).get("club_matchday_carousel") and post.active_key != "active":
+        raise ApprovalError("Archivierte Beiträge dürfen nicht geändert werden")
     if post.version != expected_version:
         raise ApprovalError("Bearbeitungskonflikt: Beitrag wurde zwischenzeitlich geändert")
     from app.models import PostTextVersion

@@ -64,7 +64,11 @@ def _different(current, value) -> bool:
 
 def _invalidate_publications(db: Session, game: Game, kickoff_delta) -> None:
     candidate_posts = list(
-        db.scalars(select(Post).where(Post.status.in_(REAPPROVAL_POST_STATUSES)))
+        db.scalars(
+            select(Post).where(
+                Post.active_key == "active", Post.status.in_(REAPPROVAL_POST_STATUSES)
+            )
+        )
     )
     posts = [
         post
@@ -241,6 +245,10 @@ def import_snapshot(db: Session, snapshot: ProviderSnapshot, user: User | None =
             if changed:
                 kickoff_delta = kickoff - old_kickoff if old_kickoff != kickoff else None
                 if kickoff_delta:
+                    from app.posts.separation import separate_rescheduled_matchday
+
+                    if separate_rescheduled_matchday(db, game, kickoff):
+                        values["overrides"] = {**(game.overrides or {}), **provider_overrides}
                     game.original_kickoff = game.original_kickoff or game.kickoff
                 if old_scores != incoming_scores:
                     game.result_confirmed = False

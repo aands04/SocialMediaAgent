@@ -2,6 +2,7 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from socket import gethostname
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import or_, select
@@ -12,7 +13,7 @@ from app.approvals.service import ApprovalError, approve
 from app.auth.service import allowed
 from app.config import Settings
 from app.creative.usage import record_internal_usage
-from app.games.bundles import generation_bundle_games
+from app.games.bundles import generation_bundle_games, generation_request_key
 from app.generation import build_renderer, build_text_generator
 from app.logos.service import (
     LogoValidationError,
@@ -181,8 +182,7 @@ def _record_prompt_dispatch(
                 usage_type="creative_director",
                 idempotency_key=f"creative:dispatch:{existing.id}",
                 model=str(
-                    existing.creative_profile_snapshot.get("director_version")
-                    or "structured-v1"
+                    existing.creative_profile_snapshot.get("director_version") or "structured-v1"
                 ),
                 generation_job_id=job.id,
                 post_id=job.post_id,
@@ -227,9 +227,7 @@ def _record_prompt_dispatch(
             TenantContext(job.club_id, job.requested_by or "system"),
             usage_type="creative_director",
             idempotency_key=f"creative:dispatch:{item.id}",
-            model=str(
-                item.creative_profile_snapshot.get("director_version") or "structured-v1"
-            ),
+            model=str(item.creative_profile_snapshot.get("director_version") or "structured-v1"),
             generation_job_id=job.id,
             post_id=job.post_id,
             details={"prompt_dispatch_id": item.id},
@@ -300,9 +298,7 @@ def _prompt_reference_images(db: Session, job: GenerationJob, context: dict) -> 
     if context.get("team_logo") and team_logo.get("id"):
         references.append({"role": "team_logo", "logo_asset_id": str(team_logo["id"])})
     if context.get("opponent_logo") and opponent_logo.get("id"):
-        references.append(
-            {"role": "opponent_logo", "logo_asset_id": str(opponent_logo["id"])}
-        )
+        references.append({"role": "opponent_logo", "logo_asset_id": str(opponent_logo["id"])})
     for sponsor in context.get("sponsor_references") or []:
         if isinstance(sponsor, dict) and sponsor.get("media_asset_id"):
             references.append(
@@ -648,7 +644,7 @@ def enqueue_create(
     )
     if existing_post:
         return None, existing_post
-    key = f"create:{game.id}:{post_type}"
+    key = generation_request_key([game], post_type)
     existing_job = db.scalar(select(GenerationJob).where(GenerationJob.idempotency_key == key))
     if existing_job:
         return existing_job, None
@@ -665,7 +661,11 @@ def enqueue_create(
         max_attempts=_retry_attempt_budget(planned_outputs),
         idempotency_key=key,
         active_key=key,
-        parameters={"post_type": post_type, "logos": frozen_logo_set(db, game, team)},
+        parameters={
+            "post_type": post_type,
+            "logos": frozen_logo_set(db, game, team),
+            "generation_revision": (game.overrides or {}).get("generation_revision"),
+        },
     )
     db.add(job)
     try:
@@ -732,8 +732,7 @@ def enqueue_bundle_create(
         by_game = {item.game_id: item for item in existing_posts}
         existing = next(by_game[item.id] for item in games if item.id in by_game)
         return None, existing
-    digest = hashlib.sha256(":".join(game_ids).encode("utf-8")).hexdigest()[:24]
-    key = f"create-bundle:{post_type}:{digest}"
+    key = generation_request_key(games, post_type)
     existing_job = db.scalar(
         select(GenerationJob).where(
             or_(GenerationJob.active_key == key, GenerationJob.idempotency_key == key)
@@ -763,6 +762,9 @@ def enqueue_bundle_create(
             "post_type": post_type,
             "matchday_bundle_key": bundle_key,
             "bundle_game_ids": game_ids,
+            "generation_revisions": {
+                item.id: (item.overrides or {}).get("generation_revision") for item in games
+            },
             "logos_by_game": logos,
             "single_shared_text_prompt": True,
         },
@@ -1212,6 +1214,17 @@ def _created_posts_for_job(db: Session, job: GenerationJob) -> list[Post]:
     ]
     if not game_ids:
         game_ids = [job.game_id]
+    for game_id in game_ids:
+        game = db.get(Game, game_id)
+        frozen_revision = (
+            (parameters.get("generation_revisions") or {}).get(game_id)
+            if parameters.get("bundle_game_ids")
+            else parameters.get("generation_revision")
+        )
+        if not game or frozen_revision != (game.overrides or {}).get("generation_revision"):
+            # A stale retry must never adopt or mark new independent drafts as
+            # its own partial output after a separation.
+            return []
     posts = list(
         db.scalars(
             select(Post).where(
@@ -1479,6 +1492,19 @@ def process_generation_job(
                 "Das Spiel ist vorläufig, abgesagt, verschoben oder für Automatisierung gesperrt."
             )
         parameters = dict(job.parameters or {})
+        if job.post_id:
+            source_post = db.get(Post, job.post_id)
+            if (
+                source_post
+                and (source_post.design_snapshot or {}).get("club_matchday_carousel")
+                and source_post.active_key != "active"
+            ):
+                raise ValueError("Der gemeinsame Beitrag wurde archiviert; bitte neu erstellen")
+        if job.job_type == GenerationJobType.CREATE_POST and not parameters.get("bundle_game_ids"):
+            if parameters.get("generation_revision") != (game.overrides or {}).get(
+                "generation_revision"
+            ):
+                raise ValueError("Die Spielzuordnung wurde geändert; bitte neu erstellen")
         bundle_game_ids = list(parameters.get("bundle_game_ids") or [])
         if job.job_type == GenerationJobType.CREATE_POST and bundle_game_ids:
             bundle_games = [db.get(Game, item_id) for item_id in bundle_game_ids]
@@ -1507,6 +1533,27 @@ def process_generation_job(
                     raise ValueError("Ein verbundenes Spiel ist gesperrt oder nicht mehr regulär")
                 if job.post_type == "result" and not item.result_confirmed:
                     raise ValueError("Nicht alle verbundenen Ergebnisse sind bestätigt")
+            for item in bundle_games:
+                if (parameters.get("generation_revisions") or {}).get(item.id) != (
+                    item.overrides or {}
+                ).get("generation_revision"):
+                    raise ValueError("Die Spielgruppe wurde getrennt; bitte neu erstellen")
+            if any(
+                (item.overrides or {}).get("generation_bundle_separated") for item in bundle_games
+            ):
+                raise ValueError("Die Spielgruppe wurde getrennt; bitte neu erstellen")
+            if (
+                len(
+                    {
+                        item.kickoff.replace(tzinfo=item.kickoff.tzinfo or timezone.utc)
+                        .astimezone(ZoneInfo("Europe/Berlin"))
+                        .date()
+                        for item in bundle_games
+                    }
+                )
+                != 1
+            ):
+                raise ValueError("Die Spiele liegen nicht mehr am selben Spieltag")
             logos_by_game = dict(parameters.get("logos_by_game") or {})
             for item in bundle_games:
                 frozen = dict(logos_by_game.get(item.id) or {})
@@ -1681,9 +1728,7 @@ def process_generation_job(
                     media_asset_id=parameters.get("media_asset_id"),
                     feed_positions=list(parameters.get("feed_positions", [])),
                     story_variant_numbers=list(parameters.get("story_variant_numbers", [])),
-                    revision_mode=str(
-                        parameters.get("revision_mode") or "full_regenerate"
-                    ),
+                    revision_mode=str(parameters.get("revision_mode") or "full_regenerate"),
                     source_media_version_id=parameters.get("source_media_version_id"),
                     target_media_slot_id=parameters.get("target_media_slot_id"),
                 )
@@ -1976,11 +2021,7 @@ def retry_job(
         if job.job_type == GenerationJobType.CREATE_POST
         else _has_completed_job_output(db, job)
     )
-    if (
-        usable_output
-        and not resumable_partial
-        and not confirm_new_budget_with_existing_output
-    ):
+    if usable_output and not resumable_partial and not confirm_new_budget_with_existing_output:
         raise ValueError(
             "Es wurde bereits mindestens eine verwendbare Ausgabe gespeichert. Prüfen Sie "
             "den Teilbeitrag; ein neuer kostenpflichtiger Auftrag wird nicht gestartet."
@@ -2002,9 +2043,7 @@ def retry_job(
     parameters["manual_retry_root_key"] = root_key
     parameters["manual_retry_of_job_id"] = job.id
     parameters["manual_retry_requested_at"] = _now().isoformat()
-    parameters["manual_retry_confirmed_new_budget"] = bool(
-        confirm_new_budget_with_existing_output
-    )
+    parameters["manual_retry_confirmed_new_budget"] = bool(confirm_new_budget_with_existing_output)
     # The explicit user confirmation covers a fresh provider budget and reuse
     # of the exact manually selected reference image. The override is scoped
     # to this job and never re-enables the asset globally.
@@ -2099,9 +2138,7 @@ def retry_job(
             "confirmed_new_budget": bool(confirm_new_budget_with_existing_output),
         },
     )
-    feedback_post = partial_post or (
-        db.get(Post, job.post_id) if job.post_id else None
-    )
+    feedback_post = partial_post or (db.get(Post, job.post_id) if job.post_id else None)
     if feedback_post is not None:
         from app.creative.hooks import record_regeneration_request
 

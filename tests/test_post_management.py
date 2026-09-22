@@ -161,12 +161,8 @@ def test_deleting_bundle_removes_every_unpublished_member_and_file(db, tmp_path)
     second_media = generated / "second.png"
     first_media.write_bytes(b"first")
     second_media.write_bytes(b"second")
-    primary, first_publication = post_with_feed(
-        db, page, first_team, first_game, first_media
-    )
-    member, second_publication = post_with_feed(
-        db, page, second_team, second_game, second_media
-    )
+    primary, first_publication = post_with_feed(db, page, first_team, first_game, first_media)
+    member, second_publication = post_with_feed(db, page, second_team, second_game, second_media)
     member_ids = [primary.id, member.id]
     for item, role in ((primary, "primary"), (member, "member")):
         item.design_snapshot = {
@@ -238,9 +234,7 @@ def test_published_post_cannot_be_deleted(db, tmp_path):
     upload.mkdir()
     media = generated / "published.png"
     media.write_bytes(b"published")
-    post, publication = post_with_feed(
-        db, page, team, game, media, status=PostStatus.PUBLISHED
-    )
+    post, publication = post_with_feed(db, page, team, game, media, status=PostStatus.PUBLISHED)
     publication.status = JobStatus.PUBLISHED
     publication.platform_id = "instagram-1"
     db.commit()
@@ -365,3 +359,306 @@ def test_post_detail_uses_one_media_catalog_with_per_image_actions():
     assert "/ai-edit" in source
     assert "Dieses Bild gezielt ändern" in source
     assert "Dieses Bild komplett neu erstellen" in source
+
+
+@pytest.fixture
+def shared_contribution(db, tmp_path):
+    page, team, game, user = graph(db)
+    game.kickoff = game.kickoff.replace(hour=12, minute=0)
+    team.rules = {"announcement_enabled": True, "club_matchday_feed_mode": "announcements"}
+    other = Team(
+        internal_name="separation-two",
+        display_name="SV Test II",
+        short_name="SVT II",
+        slug="separation-two",
+        club=team.club,
+        instagram_page_id=page.id,
+        fussball_url="https://example.invalid/two",
+        media_subdir="two",
+        rules=team.rules,
+    )
+    db.add(other)
+    db.flush()
+    second_game = Game(
+        team_id=other.id,
+        provider="mock",
+        external_id="separation-two",
+        home_team=other.display_name,
+        away_team="FC II",
+        kickoff=game.kickoff + timedelta(hours=2),
+        source_url="fixture://two",
+    )
+    db.add(second_game)
+    db.commit()
+    primary, feed = post_with_feed(db, page, team, game, tmp_path / "first.png")
+    member, story = post_with_feed(db, page, other, second_game, tmp_path / "second.png")
+    feed.kind = "carousel"
+    story.kind = "story"
+    for post in (primary, member):
+        post.design_snapshot = {
+            "club_matchday_carousel": {
+                "primary_post_id": primary.id,
+                "member_post_ids": [primary.id, member.id],
+                "game_ids": [game.id, second_game.id],
+                "role": "primary" if post == primary else "member",
+            }
+        }
+    db.commit()
+    return user, [game, second_game], [team, other], [primary, member], [feed, story]
+
+
+def test_separation_preserves_published_history_and_allows_independent_generation(
+    db,
+    shared_contribution,
+):
+    from copy import deepcopy
+
+    from app.approvals.service import ApprovalError, approve_matchday_bundle
+    from app.games.bundles import generation_bundle_games
+    from app.models import GenerationJob
+    from app.posts.separation import separate_matchday_posts
+
+    user, games, teams, posts, jobs = shared_contribution
+    jobs[0].status = JobStatus.PUBLISHED
+    jobs[0].platform_id = "published-carousel"
+    jobs[0].published_at = datetime.now(timezone.utc)
+    posts[0].status = PostStatus.PARTIAL
+    old_snapshots = [deepcopy(post.design_snapshot) for post in posts]
+    old_job = (
+        jobs[0].version,
+        jobs[0].text_snapshot,
+        jobs[0].media_path,
+        jobs[0].published_at.replace(tzinfo=None),
+    )
+    db.commit()
+
+    separate_matchday_posts(db, [games[1]], user)
+    db.commit()
+    assert jobs[0].status == JobStatus.PUBLISHED
+    assert (
+        jobs[0].version,
+        jobs[0].text_snapshot,
+        jobs[0].media_path,
+        jobs[0].published_at.replace(tzinfo=None),
+    ) == old_job
+    assert jobs[0].platform_id == "published-carousel"
+    assert jobs[1].status == JobStatus.CANCELLED
+    assert all(post.active_key != "active" and not post.publishing_enabled for post in posts)
+    assert [post.design_snapshot for post in posts] == old_snapshots
+    assert all((game.overrides or {}).get("generation_bundle_separated") for game in games)
+    with pytest.raises(ApprovalError, match="Archivierte"):
+        approve_matchday_bundle(db, posts[0], user)
+    for game, team in zip(games, teams, strict=True):
+        assert generation_bundle_games(db, game, team, "announcement")[0] == [game]
+        job, existing = generation.enqueue_bundle_create(db, game, team, user, "announcement")
+        assert existing is None and job.game_id == game.id
+        assert not job.parameters.get("bundle_game_ids")
+    assert db.query(GenerationJob).count() == 2
+    # Repeating separation cannot cancel the new independent work or rotate keys.
+    revisions = [game.overrides["generation_revision"] for game in games]
+    separate_matchday_posts(db, games, user)
+    assert [game.overrides["generation_revision"] for game in games] == revisions
+    assert all(
+        job.status == GenerationJobStatus.QUEUED for job in db.scalars(select(GenerationJob))
+    )
+
+
+@pytest.mark.parametrize("status", [JobStatus.PUBLISHING, JobStatus.UNCERTAIN])
+def test_separation_refuses_inflight_publications_atomically(db, shared_contribution, status):
+    from app.posts.separation import separate_matchday_posts
+
+    user, games, _, posts, jobs = shared_contribution
+    jobs[1].status = status
+    db.commit()
+    with pytest.raises(ValueError, match="Plattformvorgang"):
+        separate_matchday_posts(db, games, user)
+    assert all(post.active_key == "active" for post in posts)
+    assert not games[0].overrides.get("generation_bundle_separated")
+    assert jobs[0].status != JobStatus.CANCELLED
+
+
+def test_separation_blocks_existing_meta_container(db, shared_contribution):
+    from app.models import MetaPublishingAttempt
+    from app.posts.separation import separate_matchday_posts
+
+    user, games, _, posts, jobs = shared_contribution
+    from app.models import InstagramConnection
+
+    connection = InstagramConnection(instagram_page_id=posts[1].instagram_page_id)
+    db.add(connection)
+    db.flush()
+    attempt = MetaPublishingAttempt(
+        publication_job_id=jobs[1].id,
+        connection_id=connection.id,
+        target_account_id="fixture",
+        media_kind="story",
+        local_media_version=1,
+        media_path="fixture.png",
+        file_checksum="a" * 64,
+        started_by=user.id,
+        meta_container_id="container",
+        phase="failed",
+    )
+    db.add(attempt)
+    db.commit()
+    with pytest.raises(ValueError, match="Meta-Vorgang"):
+        separate_matchday_posts(db, games, user)
+    assert all(post.active_key == "active" for post in posts)
+
+
+def test_separation_requires_every_teams_permission(db, shared_contribution):
+    from app.posts.separation import separate_matchday_posts
+
+    user, games, _, posts, _ = shared_contribution
+    user.role = Role.VIEWER
+    user.all_teams = False
+    db.commit()
+    with pytest.raises(PermissionError):
+        separate_matchday_posts(db, [games[0]], user)
+    assert all(post.active_key == "active" for post in posts)
+
+
+def test_reschedule_dissolves_existing_bundle_but_time_change_does_not(db, shared_contribution):
+    from app.posts.separation import separate_rescheduled_matchday
+
+    _, games, _, posts, jobs = shared_contribution
+    assert not separate_rescheduled_matchday(db, games[1], games[1].kickoff + timedelta(hours=1))
+    assert posts[0].active_key == "active"
+    assert separate_rescheduled_matchday(db, games[1], games[1].kickoff + timedelta(days=10))
+    assert all(post.active_key != "active" for post in posts)
+    assert all(job.status == JobStatus.CANCELLED for job in jobs)
+
+
+def test_imported_reschedule_preserves_split_overrides_and_published_jobs(db, shared_contribution):
+    from app.games.importer import import_snapshot
+    from app.models import ProviderSnapshot
+
+    _, games, teams, posts, jobs = shared_contribution
+    game = games[1]
+    game.provider = "fussball.de"
+    jobs[0].status = JobStatus.PUBLISHED
+    jobs[0].platform_id = "existing-publication"
+    new_kickoff = game.kickoff + timedelta(days=10)
+    snapshot = ProviderSnapshot(
+        team_id=teams[1].id,
+        source_url="fixture://reschedule",
+        status_code=200,
+        fetched_at=datetime.now(timezone.utc),
+        checksum="b" * 64,
+        relative_path="fixture.html",
+        parser_result={
+            "games": [
+                {
+                    "external_id": game.external_id,
+                    "home_team": game.home_team,
+                    "away_team": game.away_team,
+                    "kickoff": new_kickoff.isoformat(),
+                    "status": "scheduled",
+                }
+            ]
+        },
+    )
+    db.add(snapshot)
+    db.commit()
+    import_snapshot(db, snapshot)
+    db.commit()
+    db.refresh(game)
+    assert game.kickoff.replace(tzinfo=timezone.utc) == new_kickoff
+    assert game.overrides["generation_bundle_separated"]
+    assert game.overrides["generation_revision"]
+    assert game.overrides["snapshot_id"] == snapshot.id
+    assert all(post.active_key != "active" for post in posts)
+    assert jobs[0].status == JobStatus.PUBLISHED
+    assert jobs[0].platform_id == "existing-publication"
+    assert jobs[1].status == JobStatus.CANCELLED
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_separation_cancels_queued_coordinator_but_blocks_running_generation(
+    db, shared_contribution, running
+):
+    from app.models import GenerationJob, GenerationJobType
+    from app.posts.separation import separate_matchday_posts
+
+    user, games, _, posts, jobs = shared_contribution
+    job = GenerationJob(
+        job_type=GenerationJobType.CREATE_POST,
+        game_id=games[0].id,
+        team_id=games[0].team_id,
+        post_type="announcement",
+        requested_by=user.id,
+        status=GenerationJobStatus.RUNNING if running else GenerationJobStatus.QUEUED,
+        idempotency_key="old-bundle",
+        active_key="old-bundle",
+        parameters={"bundle_game_ids": [game.id for game in games]},
+    )
+    db.add(job)
+    db.commit()
+    if running:
+        with pytest.raises(ValueError, match="Generierung"):
+            separate_matchday_posts(db, [games[1]], user)
+        assert all(post.active_key == "active" for post in posts)
+        assert all(publication.status != JobStatus.CANCELLED for publication in jobs)
+    else:
+        separate_matchday_posts(db, [games[1]], user)
+        assert job.status == GenerationJobStatus.CANCELLED
+        assert job.cancel_requested and job.active_key is None
+        assert job.completed_at is not None
+
+
+def test_separation_refuses_nonreciprocal_bundle(db, shared_contribution):
+    from app.posts.separation import separate_matchday_posts
+
+    user, games, _, posts, jobs = shared_contribution
+    posts[1].design_snapshot = {}
+    db.commit()
+    with pytest.raises(ValueError, match="widersprüchlich"):
+        separate_matchday_posts(db, [games[0]], user)
+    assert all(post.active_key == "active" for post in posts)
+    assert all(job.status != JobStatus.CANCELLED for job in jobs)
+
+
+def test_old_bundle_retry_cannot_adopt_new_drafts_or_call_generators(
+    db, shared_contribution, monkeypatch
+):
+    from app.models import GenerationJob, GenerationJobType
+    from app.posts.separation import separate_matchday_posts
+
+    user, games, _, posts, _ = shared_contribution
+    job = GenerationJob(
+        job_type=GenerationJobType.CREATE_POST,
+        game_id=games[0].id,
+        team_id=games[0].team_id,
+        post_type="announcement",
+        requested_by=user.id,
+        status=GenerationJobStatus.FAILED,
+        idempotency_key="old-retry",
+        parameters={"bundle_game_ids": [game.id for game in games]},
+    )
+    db.add(job)
+    db.commit()
+    separate_matchday_posts(db, [games[1]], user)
+    db.commit()
+    new_post = Post(
+        game_id=games[0].id,
+        team_id=games[0].team_id,
+        instagram_page_id=posts[0].instagram_page_id,
+        post_type="announcement",
+        status=PostStatus.PENDING,
+        text="Neuer unabhängiger Beitrag",
+    )
+    db.add(new_post)
+    job.status = GenerationJobStatus.RUNNING
+    db.commit()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("An archived bundle must never reach a generator")
+
+    monkeypatch.setattr(generation, "build_text_generator", forbidden)
+    monkeypatch.setattr(generation, "build_renderer", forbidden)
+    result = generation.process_generation_job(db, job.id, Settings())
+    assert result.status == GenerationJobStatus.FAILED
+    assert "getrennt" in result.error_message
+    assert new_post.status == PostStatus.PENDING
+    assert not new_post.critical_warnings
+    assert result.result_post_id is None

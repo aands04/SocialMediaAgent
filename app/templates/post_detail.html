@@ -1,5 +1,8 @@
 {% extends 'base.html' %}
 {% block content %}
+{% if aggregate_bundle and item.active_key != 'active' %}
+<div class="notice">Dieser gemeinsame Beitrag wurde nach der Spieltrennung archiviert. Offene Aufträge wurden abgebrochen; veröffentlichte Inhalte bleiben unverändert erhalten. Neue Einzelbeiträge können unter <a href="/games">Spiele</a> erstellt werden.</div>
+{% endif %}
 {% set is_manual=item.design_snapshot.get('source') == 'manual_upload' %}
 <p><a href="/posts">&larr; Zur Veröffentlichungsarbeit</a></p>
 <section class="review-hero">
@@ -28,7 +31,7 @@
     <a class="button secondary" href="#more-actions">Weitere Aktionen</a>
   </div>
 </section>
-{% if incomplete_members %}
+{% if incomplete_members and not (aggregate_bundle and item.active_key != 'active') %}
 <section class="alert" aria-labelledby="incomplete-generation-title">
   <h2 id="incomplete-generation-title">Beitrag noch nicht vollständig erzeugt</h2>
   <p>
@@ -526,12 +529,20 @@
   </tr>{% endfor %}
 </table>
 </details>
-{% if not can_approve %}
+{% if not can_approve and not (aggregate_bundle and item.active_key != 'active') %}
 <div class="notice">Dieser Beitrag wartet auf die Freigabe durch einen Redakteur oder Administrator.</div>
 {% endif %}
 {% if can_approve or can_delete %}
 <details id="more-actions" class="danger-zone">
   <summary>Weitere Aktionen und Gefahrenbereich</summary>
+  {% if can_separate %}
+  <form method="post" action="/posts/{{item.id}}/separate" onsubmit="return confirm('Alle Spiele dieses gemeinsamen Beitrags trennen? Offene gemeinsame Aufträge werden abgebrochen. Veröffentlichte Inhalte bleiben als Historie erhalten. Neue Einzelbeiträge müssen neu erstellt und freigegeben werden.');">
+    <input type="hidden" name="csrf_token" value="{{csrf}}">
+    <input type="hidden" name="version" value="{{item.version}}">
+    <button class="danger">Spiele und offene Beiträge trennen</button>
+    <p>Bricht die offenen Aufträge ab und archiviert die gemeinsamen Beiträge. Veröffentlichte Inhalte bleiben erhalten. Anschließend können die Spiele unabhängig voneinander neue Beiträge erhalten.</p>
+  </form>
+  {% endif %}
   {% if can_approve and not aggregate_bundle %}
   <form method="post" action="/posts/{{item.id}}/reject">
     <input type="hidden" name="csrf_token" value="{{csrf}}"><label>Ablehnungsgrund (optional)<input name="reason"></label><button class="danger">Beitrag ablehnen</button>

@@ -238,6 +238,8 @@ def _status_view(
 
     if job.status == JobStatus.PUBLISHED:
         return "Veröffentlicht", None, "success", False, False
+    if job.status in {JobStatus.CANCELLED, JobStatus.SKIPPED}:
+        return JOB_STATUS_LABELS[job.status], None, "neutral", False, False
     if job.status == JobStatus.FAILED:
         return (
             "Fehlgeschlagen",

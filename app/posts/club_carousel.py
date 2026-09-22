@@ -123,11 +123,7 @@ def matchday_bundle_jobs(
     primary_id = str(bundle["primary_post_id"])
     primary = next((item for item in members if item.id == primary_id), post)
     member_ids = [item.id for item in members]
-    jobs = list(
-        db.scalars(
-            select(PublicationJob).where(PublicationJob.post_id.in_(member_ids))
-        )
-    )
+    jobs = list(db.scalars(select(PublicationJob).where(PublicationJob.post_id.in_(member_ids))))
     visible = [
         job
         for job in jobs
@@ -187,9 +183,7 @@ def reorder_matchday_carousel(
             )
         )
     }
-    if first_team_id not in teams or not any(
-        member.team_id == first_team_id for member in members
-    ):
+    if first_team_id not in teams or not any(member.team_id == first_team_id for member in members):
         raise ClubCarouselConflict("Die ausgewählte Mannschaft gehört nicht zu diesem Karussell")
 
     carousel = db.scalar(
@@ -247,7 +241,10 @@ def reorder_matchday_carousel(
 
     old_team_ids = [member.team_id for member in members]
     selected_member = next(member for member in members if member.team_id == first_team_id)
-    ordered_members = [selected_member, *[member for member in members if member.id != selected_member.id]]
+    ordered_members = [
+        selected_member,
+        *[member for member in members if member.id != selected_member.id],
+    ]
     new_team_ids = [member.team_id for member in ordered_members]
 
     if save_as_default:
@@ -310,9 +307,7 @@ def reorder_matchday_carousel(
             open_job.approval_status = "reapproval_required"
             open_job.approved_post_version = None
             if open_job.id != carousel.id:
-                open_job.error = (
-                    "Karussell-Reihenfolge geändert; erneute Freigabe erforderlich"
-                )
+                open_job.error = "Karussell-Reihenfolge geändert; erneute Freigabe erforderlich"
 
         new_member_ids = [member.id for member in ordered_members]
         new_game_ids = [member.game_id for member in ordered_members]
@@ -376,9 +371,7 @@ def is_redundant_matchday_bundle_feed(post: Post, job: PublicationJob) -> bool:
     bundle = (post.design_snapshot or {}).get("club_matchday_carousel") or {}
     primary_id = str(bundle.get("primary_post_id") or "").strip()
     member_ids = {
-        str(item).strip()
-        for item in (bundle.get("member_post_ids") or [])
-        if str(item).strip()
+        str(item).strip() for item in (bundle.get("member_post_ids") or []) if str(item).strip()
     }
     if (
         not primary_id
@@ -402,6 +395,8 @@ def is_redundant_matchday_bundle_feed(post: Post, job: PublicationJob) -> bool:
 def reconcile_matchday_bundle_feed_jobs(db: Session, post: Post) -> int:
     """Cancel stale individual feed jobs that a completed carousel supersedes."""
 
+    if post.active_key != "active":
+        return 0
     members = matchday_bundle_posts(db, post)
     if len(members) < 2:
         return 0
@@ -538,13 +533,8 @@ def coordinate_club_matchday_feed(
     feed_jobs_by_post = {item.id: _feed_jobs(db, item.id) for item in ordered_posts}
     if any(not feed_jobs_by_post[item.id] for item in ordered_posts):
         raise ClubCarouselConflict("Mindestens ein Feed-Auftrag des Vereins fehlt")
-    all_feed_jobs = [
-        feed for item in ordered_posts for feed in feed_jobs_by_post[item.id]
-    ]
-    if any(
-        item.status in {JobStatus.PUBLISHED, JobStatus.PUBLISHING}
-        for item in all_feed_jobs
-    ):
+    all_feed_jobs = [feed for item in ordered_posts for feed in feed_jobs_by_post[item.id]]
+    if any(item.status in {JobStatus.PUBLISHED, JobStatus.PUBLISHING} for item in all_feed_jobs):
         raise ClubCarouselConflict(
             "Ein Feed des gemeinsamen Spieltags wurde bereits veröffentlicht"
         )
@@ -595,8 +585,7 @@ def coordinate_club_matchday_feed(
     shared_texts = {
         item.text
         for item in ordered_posts
-        if (item.design_snapshot or {}).get("matchday_bundle")
-        and item.text
+        if (item.design_snapshot or {}).get("matchday_bundle") and item.text
     }
     primary.text = (
         shared_texts.pop()

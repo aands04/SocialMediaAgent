@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.games.bundles import generation_bundle_games
+from app.games.bundles import generation_bundle_games, generation_request_key
 from app.games.identity import TeamIdentityError, resolve_team_side, team_aliases
 from app.games.importer import import_snapshot
 from app.games.live_test import serialize
@@ -536,13 +536,7 @@ def plan_generation_jobs(
                 continue
             if post_type == "result" and any(not item.result_confirmed for item in bundle_games):
                 continue
-            if bundle_key and len(bundle_games) >= 2:
-                digest = hashlib.sha256(
-                    ":".join(item.id for item in bundle_games).encode("utf-8")
-                ).hexdigest()[:24]
-                idempotency_key = f"create-bundle:{post_type}:{digest}"
-            else:
-                idempotency_key = f"create:{game.id}:{post_type}"
+            idempotency_key = generation_request_key(bundle_games, post_type)
             existing_job = db.scalar(
                 select(GenerationJob.id).where(GenerationJob.idempotency_key == idempotency_key)
             )

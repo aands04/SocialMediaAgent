@@ -679,9 +679,7 @@ def test_club_dashboard_shows_usage_and_next_seven_days_in_plain_language(browse
                 MediaAsset(
                     team_id=team.id,
                     storage_kind="upload",
-                    relative_path=(
-                        f"clubs/{team.club_id}/teams/{team.id}/players/legacy.jpg"
-                    ),
+                    relative_path=(f"clubs/{team.club_id}/teams/{team.id}/players/legacy.jpg"),
                     filename="legacy.jpg",
                     mime_type="image/jpeg",
                     size=80_000_000,
@@ -1761,9 +1759,9 @@ def test_nginx_proxies_refresh_web_container_address_via_docker_dns():
 
 
 def test_public_nginx_exposes_only_post_for_telegram_webhooks():
-    config = (
-        Path(__file__).parents[1] / "deploy" / "nginx" / "meta-public.conf"
-    ).read_text(encoding="utf-8")
+    config = (Path(__file__).parents[1] / "deploy" / "nginx" / "meta-public.conf").read_text(
+        encoding="utf-8"
+    )
     assert "location ^~ /webhooks/telegram/" in config
     assert "limit_except POST { deny all; }" in config
 
@@ -2059,7 +2057,7 @@ def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(brow
         db.commit()
         game_ids = [item.id for item in games]
 
-    page = client.get("/games")
+    page = client.get("/games?period=all")
     assert page.status_code == 200
     assert page.text.count("Gemeinsamen Beitrag erstellen") == 1
     assert "Gemeinsamer Spieltag · 2 Spiele" in page.text
@@ -2076,7 +2074,7 @@ def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(brow
             game.away_score = 0
             game.result_confirmed = True
         db.commit()
-    confirmed_page = client.get("/games").text
+    confirmed_page = client.get("/games?period=all").text
     grouped_result = re.search(
         r'<button name="post_type" value="result"([^>]*)>Gemeinsame Ergebnismeldung erzeugen</button>',
         confirmed_page,
@@ -2090,7 +2088,7 @@ def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(brow
         follow_redirects=False,
     )
     assert separated.status_code == 303
-    separated_page = client.get("/games").text
+    separated_page = client.get("/games?period=all").text
     assert "Gemeinsamen Beitrag erstellen" not in separated_page
 
     connected = client.post(
@@ -2099,7 +2097,7 @@ def test_games_dashboard_groups_and_consciously_splits_or_connects_matchday(brow
         follow_redirects=False,
     )
     assert connected.status_code == 303
-    connected_page = client.get("/games").text
+    connected_page = client.get("/games?period=all").text
     assert connected_page.count("Gemeinsamen Beitrag erstellen") == 1
     assert "Gemeinsamer Spieltag · 2 Spiele" in connected_page
 
@@ -2168,12 +2166,8 @@ def test_games_page_uses_productive_labels_and_orders_dates_and_kickoffs(browser
     assert "Nächste Veröffentlichung" in html
     assert "Bildauswahl:" in html
     assert "Vergangener Gegner" not in html
-    assert html.index("Früher Gegner") < html.index("Gegner 13 Uhr") < html.index(
-        "Später Gegner"
-    )
-    assert html.index("Gegner 13 Uhr") < html.index("Gegner 15 Uhr") < html.index(
-        "Gegner 17 Uhr"
-    )
+    assert html.index("Früher Gegner") < html.index("Gegner 13 Uhr") < html.index("Später Gegner")
+    assert html.index("Gegner 13 Uhr") < html.index("Gegner 15 Uhr") < html.index("Gegner 17 Uhr")
 
     all_games = client.get("/games?period=all").text
     assert "Vergangener Gegner" in all_games
@@ -2346,7 +2340,7 @@ def test_games_page_ignores_superseded_post_approval_status(browser):
     assert response.status_code == 200
     assert "Freigabe ausstehend" not in response.text
     assert '<strong class="game-status game-status--planned">Geplant</strong>' in response.text
-    assert f'/posts/{active_id}' in response.text
+    assert f"/posts/{active_id}" in response.text
 
 
 def test_matchday_post_page_shows_both_feeds_and_all_four_stories(browser, tmp_path):
@@ -4165,3 +4159,108 @@ def test_live_center_accepts_tenant_scoped_manual_event_with_csrf(browser):
         assert event.status == "confirmed"
         assert state is not None
         assert (state.home_score, state.away_score) == (1, 0)
+
+
+def test_separate_published_bundle_from_detail_and_block_archived_actions(browser, tmp_path):
+    client, factory = browser
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="split", display_name="Split", username="split", club="SV"
+        )
+        db.add(page)
+        db.flush()
+        posts, games, jobs = [], [], []
+        for number in (1, 2):
+            team = Team(
+                internal_name=f"split-{number}",
+                display_name=f"SV {number}",
+                short_name=f"SV {number}",
+                slug=f"split-{number}",
+                club="SV",
+                fussball_url="https://example.invalid",
+                instagram_page_id=page.id,
+                media_subdir=f"split-{number}",
+            )
+            db.add(team)
+            db.flush()
+            game = Game(
+                team_id=team.id,
+                provider="mock",
+                external_id=f"split-{number}",
+                home_team=team.display_name,
+                away_team="FC",
+                kickoff=datetime.now(timezone.utc) + timedelta(days=2),
+                source_url="fixture://split",
+            )
+            db.add(game)
+            db.flush()
+            media = tmp_path / f"split-{number}.png"
+            Image.new("RGB", (1080, 1920)).save(media)
+            post = Post(
+                team_id=team.id,
+                game_id=game.id,
+                instagram_page_id=page.id,
+                post_type="announcement",
+                text="Historischer gemeinsamer Text",
+                feed_path=str(media),
+                status=PostStatus.PARTIAL if number == 1 else PostStatus.PENDING,
+            )
+            db.add(post)
+            db.flush()
+            job = PublicationJob(
+                post_id=post.id,
+                game_id=game.id,
+                team_id=team.id,
+                instagram_page_id=page.id,
+                kind="story",
+                media_path=str(media),
+                scheduled_at=game.kickoff,
+                idempotency_key=f"split-{number}",
+                status=JobStatus.PUBLISHED if number == 1 else JobStatus.UNAPPROVED,
+            )
+            db.add(job)
+            posts.append(post)
+            games.append(game)
+            jobs.append(job)
+        for post in posts:
+            post.design_snapshot = {
+                "club_matchday_carousel": {
+                    "primary_post_id": posts[0].id,
+                    "member_post_ids": [p.id for p in posts],
+                    "game_ids": [g.id for g in games],
+                }
+            }
+        db.commit()
+        post_id, member_id, job_id = posts[0].id, posts[1].id, jobs[1].id
+        version = posts[0].version
+
+    detail = client.get(f"/posts/{post_id}")
+    assert detail.status_code == 200
+    assert "Spiele und offene Beiträge trennen" in detail.text
+    token = session_csrf(client)
+    stale = client.post(
+        f"/posts/{post_id}/separate", data={"csrf_token": token, "version": version + 1}
+    )
+    assert stale.status_code == 409
+    response = client.post(
+        f"/posts/{post_id}/separate",
+        data={"csrf_token": token, "version": version},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with factory() as db:
+        assert db.get(PublicationJob, job_id).status == JobStatus.CANCELLED
+        assert db.get(Post, member_id).active_key != "active"
+    historical = client.get(f"/posts/{post_id}")
+    assert historical.status_code == 200
+    assert "Archivierter gemeinsamer Beitrag" in historical.text
+    assert "Ausgewählte Aufträge freigeben" not in historical.text
+    for url in (
+        f"/posts/{post_id}/approve",
+        f"/posts/{member_id}/text",
+        f"/publications/{job_id}/cancel",
+    ):
+        blocked = client.post(
+            url, data={"csrf_token": token, "text": "changed", "version": version}
+        )
+        assert blocked.status_code == 409

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, time, timezone
+from hashlib import sha256
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,19 @@ from app.models import Game, Team
 
 BERLIN = ZoneInfo("Europe/Berlin")
 GROUPABLE_POST_TYPES = {"announcement", "result"}
+
+
+def generation_request_key(games: list[Game], post_type: str) -> str:
+    """Keep legacy keys until an explicit separation starts a new generation."""
+    if len(games) == 1:
+        key = f"create:{games[0].id}:{post_type}"
+    else:
+        digest = sha256(":".join(game.id for game in games).encode()).hexdigest()[:24]
+        key = f"create-bundle:{post_type}:{digest}"
+    revisions = [(game.overrides or {}).get("generation_revision", "") for game in games]
+    if any(revisions):
+        key += ":" + sha256(":".join(revisions).encode()).hexdigest()[:20]
+    return key
 
 
 def _utc(value: datetime) -> datetime:
@@ -69,9 +83,7 @@ def _sort_games(games: list[Game], teams: dict[str, Team], reference_team: Team)
     preferred = str((reference_team.rules or {}).get("club_matchday_primary_team_id") or "")
     if not preferred:
         for candidate in teams.values():
-            preferred = str(
-                (candidate.rules or {}).get("club_matchday_primary_team_id") or ""
-            )
+            preferred = str((candidate.rules or {}).get("club_matchday_primary_team_id") or "")
             if preferred:
                 break
     if preferred:
@@ -208,18 +220,18 @@ def connect_games(db: Session, games: list[Game], teams: dict[str, Team]) -> str
 
 
 def separate_games(games: list[Game]) -> None:
-    for item in games:
-        overrides = dict(item.overrides or {})
-        overrides.pop("generation_bundle_id", None)
-        overrides.pop("generation_bundle_source", None)
-        overrides["generation_bundle_separated"] = True
-        item.overrides = overrides
-        item.version += 1
+    """Compatibility entry point; separation includes persisted contributions."""
+    from sqlalchemy.orm import object_session
+
+    from app.posts.separation import separate_matchday_posts
+
+    db = object_session(games[0]) if games else None
+    if db is None:
+        raise ValueError("Zum Trennen wird eine aktive Datenbanksitzung benötigt")
+    separate_matchday_posts(db, games)
 
 
-def dashboard_game_groups(
-    db: Session, games: list[Game], teams: dict[str, Team]
-) -> list[dict]:
+def dashboard_game_groups(db: Session, games: list[Game], teams: dict[str, Team]) -> list[dict]:
     remaining = {item.id: item for item in games}
     groups: list[dict] = []
     for game in games:
