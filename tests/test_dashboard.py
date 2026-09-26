@@ -143,14 +143,69 @@ def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
 
     assert page.status_code == 200
     assert '<header class="app-header">' in page.text
-    assert '<nav class="app-nav">' in page.text
-    assert "/static/style.css?v=20260811-media-library" in page.text
+    assert '<nav id="app-navigation" class="app-nav"' in page.text
+    assert "/static/style.css?v=20260922-navigation" in page.text
+    assert 'id="app-nav-toggle"' in page.text
+    assert 'aria-expanded="false"' in page.text
+    assert 'aria-controls="app-navigation"' in page.text
+    assert '<nav id="app-navigation" class="app-nav" aria-label="Hauptnavigation">' in page.text
 
     stylesheet = client.get("/static/style.css?v=20260811-publishing-workspace")
     assert stylesheet.status_code == 200
     assert stylesheet.headers["cache-control"] == "no-cache, must-revalidate"
     assert "main header{" in stylesheet.text
     assert "main nav{" in stylesheet.text
+
+
+def test_club_navigation_prioritizes_five_work_areas_and_groups_admin_tools(browser):
+    client, _factory = browser
+    page = client.get("/games")
+
+    assert page.status_code == 200
+    primary_items = re.findall(r'data-nav-primary="true"[^>]*>([^<]+)', page.text)
+    assert primary_items == ["Heute", "Beiträge", "Spiele", "Medien", "Einstellungen"]
+    assert 'href="/games" aria-current="page"' in page.text
+    assert 'href="/live"' in page.text
+    assert "Technik &amp; Betrieb" in page.text
+    assert "Veröffentlichungsprotokoll" in page.text
+    assert "Vorlagen &amp; Schriften" in page.text
+    assert "/static/navigation.js?v=20260922-navigation" in page.text
+
+
+def test_technical_navigation_is_hidden_for_non_admins(browser):
+    client, factory = browser
+    with factory() as db:
+        club = db.query(Club).one()
+        editor = User(
+            email="navigation-editor@test.invalid",
+            password_hash=hash_password("Very-Secure-Test-Password"),
+            role=Role.EDITOR,
+            all_teams=True,
+            club_id=club.id,
+        )
+        db.add(editor)
+        db.commit()
+
+    client.post("/logout")
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)', login_page.text).group(1)
+    response = client.post(
+        "/login",
+        data={
+            "email": "navigation-editor@test.invalid",
+            "password": "Very-Secure-Test-Password",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    page = client.get("/")
+    assert "Technik &amp; Betrieb" not in page.text
+    assert "Generierungsaufträge" not in page.text
+    assert "Systemstatus" not in page.text
+    assert "Mannschaften" in page.text
+    assert "Automatische Beiträge" in page.text
 
 
 def create_automation_team(factory, *, suffix: str, rules: dict | None = None):
@@ -1888,7 +1943,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260811-media-library" in teams_page
+    assert "/static/style.css?v=20260922-navigation" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text

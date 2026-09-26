@@ -6,45 +6,69 @@
   {% if description %}<meta name="description" content="{{ description }}">{% endif %}
   {% if robots %}<meta name="robots" content="{{ robots }}">{% endif %}
   <title>{{ title or 'Vereinszentrale' }}</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260811-media-library">
+  <link rel="stylesheet" href="/static/style.css?v=20260922-navigation">
 </head>
 <body class="{% if environment == 'meta-test' %}meta-test-environment{% endif %}">
 <header class="app-header">
   <strong>⚽ Vereinszentrale</strong>
   {% if user %}<span class="signed-in-user">Eingeloggt als <strong>{{ user.email }}</strong> ({% if user.account_type.value == 'platform_admin' %}PlatformAdmin{% else %}{{ user.role.label }}{% endif %})</span>{% endif %}
   {% if environment == 'meta-test' %}<span class="environment-badge">META-TEST – ECHTE VERÖFFENTLICHUNGEN MÖGLICH</span>{% endif %}
-  <button aria-label="Navigation" onclick="document.querySelector('.app-nav').classList.toggle('open')">☰</button>
+  <button id="app-nav-toggle" type="button" aria-label="Navigation öffnen" aria-expanded="false" aria-controls="app-navigation">☰</button>
 </header>
 {% if user %}
-<nav class="app-nav">
+{% set current_path = request.url.path %}
+<nav id="app-navigation" class="app-nav" aria-label="Hauptnavigation">
   {% if user.account_type.value == 'platform_admin' %}
-  <a href="/platform">Plattformübersicht</a>
-  <a href="/platform/clubs">Vereine</a>
-  <a href="/platform/plans">Tarif- und Limitprofile</a>
-  <a href="/prompts">Zentrale Promptvorlagen</a>
-  <a href="/platform/ai-generations">KI-Generierungen</a>
-  <a href="/platform/creative-intelligence">Creative Intelligence</a>
-  <a href="/platform/audit">Plattform-Audit</a>
+  <a href="/platform" {% if current_path == '/platform' %}aria-current="page"{% endif %}>Plattformübersicht</a>
+  <a href="/platform/clubs" {% if current_path.startswith('/platform/clubs') %}aria-current="page"{% endif %}>Vereine</a>
+  <a href="/platform/plans" {% if current_path.startswith('/platform/plans') %}aria-current="page"{% endif %}>Tarif- und Limitprofile</a>
+  <a href="/prompts" {% if current_path.startswith('/prompts') %}aria-current="page"{% endif %}>Zentrale Promptvorlagen</a>
+  <a href="/platform/ai-generations" {% if current_path.startswith('/platform/ai-generations') %}aria-current="page"{% endif %}>KI-Generierungen</a>
+  <a href="/platform/creative-intelligence" {% if current_path.startswith('/platform/creative-intelligence') %}aria-current="page"{% endif %}>Creative Intelligence</a>
+  <a href="/platform/audit" {% if current_path.startswith('/platform/audit') %}aria-current="page"{% endif %}>Plattform-Audit</a>
   <a href="/platform/usage.csv">Verbrauch als CSV</a>
-  <a href="/account/password">Passwort ändern</a>
-  <form method="post" action="/logout"><button>Abmelden</button></form>
+  <a href="/account/password" {% if current_path == '/account/password' %}aria-current="page"{% endif %}>Passwort ändern</a>
+  <form class="app-nav-logout" method="post" action="/logout"><button>Abmelden</button></form>
   {% else %}
-  {% for href,label in [
-    ('/','Übersicht'),('/teams','Mannschaften'),('/channels','Social-Media-Kanäle'),
-    ('/games','Spiele'),('/live','Live Center'),('/rules','Automatische Beiträge'),('/media','Medienbibliothek'),
-    ('/assets','HTML/CSS-Fallbacks'),
-    ('/generation-jobs','Generierungsaufträge'),
-    ('/posts','Beiträge & Freigaben'),
-    ('/publications','Veröffentlichungen'),
-    ('/diagnostics','Provider-Diagnose'),('/system','Systemstatus')
-  ] %}<a href="{{ href }}">{{ label }}</a>{% endfor %}
-  {% if user.role.value != 'viewer' %}<a href="/posts/manual/new">Beitrag manuell erstellen</a>{% endif %}
-  {% if user.role.value == 'admin' %}<a href="/users">Benutzer & Rechte</a>{% endif %}
-  {% if user.role.value == 'admin' %}<a href="/branding">Vereinsbranding</a>{% endif %}
-  {% if user.role.value == 'admin' %}<a href="/creative-intelligence">Gelernte Vorlieben</a>{% endif %}
-  <a href="/account/password">Passwort ändern</a>
-  <a href="/account/email">E-Mail-Adresse ändern</a>
-  <form method="post" action="/logout"><button>Abmelden</button></form>
+  {% set games_active = current_path.startswith('/games') or current_path.startswith('/live') %}
+  {% set settings_active = current_path.startswith('/teams') or current_path.startswith('/channels') or current_path.startswith('/instagram') or current_path.startswith('/rules') or current_path.startswith('/branding') or current_path.startswith('/creative-intelligence') or current_path.startswith('/users') or current_path.startswith('/account') %}
+  {% set technical_active = current_path.startswith('/assets') or current_path.startswith('/generation-jobs') or current_path.startswith('/publications') or current_path.startswith('/diagnostics') or current_path.startswith('/system') %}
+
+  <p class="app-nav-label">Arbeitsbereiche</p>
+  <a class="app-nav-primary" data-nav-primary="true" href="/" {% if current_path == '/' %}aria-current="page"{% endif %}>Heute</a>
+  <a class="app-nav-primary" data-nav-primary="true" href="/posts" {% if current_path.startswith('/posts') %}aria-current="page"{% endif %}>Beiträge</a>
+  <a class="app-nav-primary" data-nav-primary="true" href="/games" {% if games_active %}aria-current="page"{% endif %}>Spiele</a>
+  {% if games_active %}<a class="app-nav-sub-link" href="/live" {% if current_path.startswith('/live') %}aria-current="page"{% endif %}>Live Center</a>{% endif %}
+  <a class="app-nav-primary" data-nav-primary="true" href="/media" {% if current_path.startswith('/media') %}aria-current="page"{% endif %}>Medien</a>
+
+  <details class="app-nav-group{% if settings_active %} app-nav-group-current{% endif %}" {% if settings_active %}open{% endif %}>
+    <summary class="app-nav-primary" data-nav-primary="true">Einstellungen</summary>
+    <div class="app-nav-submenu">
+      <a href="/teams" {% if current_path.startswith('/teams') %}aria-current="page"{% endif %}>Mannschaften</a>
+      <a href="/channels" {% if current_path.startswith('/channels') %}aria-current="page"{% endif %}>Social-Media-Kanäle</a>
+      <a href="/rules" {% if current_path.startswith('/rules') %}aria-current="page"{% endif %}>Automatische Beiträge</a>
+      {% if user.role.value == 'admin' %}<a href="/branding" {% if current_path.startswith('/branding') %}aria-current="page"{% endif %}>Vereinsbranding</a>{% endif %}
+      {% if user.role.value == 'admin' %}<a href="/creative-intelligence" {% if current_path.startswith('/creative-intelligence') %}aria-current="page"{% endif %}>Gelernte Vorlieben</a>{% endif %}
+      {% if user.role.value == 'admin' %}<a href="/users" {% if current_path.startswith('/users') %}aria-current="page"{% endif %}>Benutzer & Rechte</a>{% endif %}
+      <a href="/account/password" {% if current_path == '/account/password' %}aria-current="page"{% endif %}>Passwort ändern</a>
+      <a href="/account/email" {% if current_path == '/account/email' %}aria-current="page"{% endif %}>E-Mail-Adresse ändern</a>
+    </div>
+  </details>
+
+  {% if user.role.value == 'admin' %}
+  <details class="app-nav-group app-nav-technical{% if technical_active %} app-nav-group-current{% endif %}" {% if technical_active %}open{% endif %}>
+    <summary>Technik &amp; Betrieb</summary>
+    <div class="app-nav-submenu">
+      <a href="/generation-jobs" {% if current_path.startswith('/generation-jobs') %}aria-current="page"{% endif %}>Generierungsaufträge</a>
+      <a href="/publications" {% if current_path.startswith('/publications') %}aria-current="page"{% endif %}>Veröffentlichungsprotokoll</a>
+      <a href="/diagnostics" {% if current_path.startswith('/diagnostics') %}aria-current="page"{% endif %}>Provider-Diagnose</a>
+      <a href="/system" {% if current_path.startswith('/system') %}aria-current="page"{% endif %}>Systemstatus</a>
+      <a href="/assets" {% if current_path.startswith('/assets') %}aria-current="page"{% endif %}>Vorlagen &amp; Schriften</a>
+    </div>
+  </details>
+  {% endif %}
+
+  <form class="app-nav-logout" method="post" action="/logout"><button>Abmelden</button></form>
   {% endif %}
 </nav>
 {% endif %}
@@ -56,5 +80,6 @@
   <a href="/datenschutz">Datenschutz</a>
   <a href="/datenloeschung">Datenlöschung</a>
 </footer>
+{% if user %}<script src="/static/navigation.js?v=20260922-navigation" defer></script>{% endif %}
 </body>
 </html>
