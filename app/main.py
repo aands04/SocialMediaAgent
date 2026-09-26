@@ -636,40 +636,36 @@ def dashboard(
         if row.scheduled_at >= now and row.job.status not in terminal_publication_statuses
     ]
     next_publication = min(planned_views, key=lambda row: row.scheduled_at, default=None)
-    attention_count = sum(
-        row.attention and row.job.status != JobStatus.PUBLISHED for row in workspace_views
+    attention_items = []
+    seen_attention_posts = set()
+    for row in sorted(
+        (
+            item
+            for item in workspace_views
+            if item.attention and item.job.status != JobStatus.PUBLISHED
+        ),
+        key=lambda item: item.scheduled_at,
+    ):
+        contribution_id = row.job.post_id or row.job.id
+        if contribution_id in seen_attention_posts:
+            continue
+        seen_attention_posts.add(contribution_id)
+        attention_items.append(row)
+    next_game = (
+        db.scalar(
+            select(Game)
+            .where(
+                Game.club_id == current.club_id,
+                Game.team_id.in_(visible_team_ids),
+                Game.kickoff >= now,
+            )
+            .order_by(Game.kickoff, Game.id)
+            .limit(1)
+        )
+        if visible_team_ids
+        else None
     )
-    counts = {
-        "teams": len(visible_team_ids),
-        "games": int(
-            db.scalar(
-                select(func.count())
-                .select_from(Game)
-                .where(
-                    Game.club_id == current.club_id,
-                    Game.team_id.in_(visible_team_ids),
-                )
-            )
-            or 0
-        )
-        if visible_team_ids
-        else 0,
-        "planned_posts": len({row.job.post_id for row in planned_views}),
-        "publications": int(
-            db.scalar(
-                select(func.count())
-                .select_from(PublicationJob)
-                .where(
-                    PublicationJob.club_id == current.club_id,
-                    PublicationJob.team_id.in_(visible_team_ids),
-                    PublicationJob.status == JobStatus.PUBLISHED,
-                )
-            )
-            or 0
-        )
-        if visible_team_ids
-        else 0,
-    }
+    visible_team_by_id = {team.id: team for team in visible_teams}
     club = db.get(Club, current.club_id)
     if club is None:
         raise HTTPException(403, "Verein ist nicht vorhanden")
@@ -709,11 +705,12 @@ def dashboard(
         {
             "user": current,
             "club": club,
-            "counts": counts,
+            "attention_items": attention_items[:3],
+            "attention_count": len(attention_items),
+            "next_game": next_game,
+            "next_game_team": visible_team_by_id.get(next_game.team_id) if next_game else None,
             "next_publication": next_publication,
             "planned_publication_count": len(planned_views),
-            "attention_count": attention_count,
-            "active_channels": channels,
             "usage_cards": usage_cards,
             "club_status_labels": {
                 "setup_pending": "Einrichtung offen",

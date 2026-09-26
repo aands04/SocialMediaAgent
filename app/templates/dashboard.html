@@ -1,65 +1,107 @@
 {% extends 'base.html' %}
 {% block content %}
-<h1>Übersicht</h1>
-<p>
-  Verein: <strong>{{ club.name }}</strong> ·
-  Tarif: <strong>{{ usage_cards.plan.name if usage_cards.plan else 'nicht zugeordnet' }}</strong> ·
-  Status: {{ club_status_labels.get(club.status.value, 'Prüfung erforderlich') }}
-</p>
+<header class="dashboard-heading">
+  <p class="eyebrow">Heute im Verein</p>
+  <h1>Heute</h1>
+  <p><strong>{{ club.name }}</strong> · {{ club_status_labels.get(club.status.value, 'Prüfung erforderlich') }}</p>
+</header>
 
-<div class="cards">
-  <article><strong>{{ counts.teams }}</strong><span>Mannschaften</span></article>
-  <article><strong>{{ counts.games }}</strong><span>Spiele</span></article>
-  <article><strong>{{ counts.planned_posts }}</strong><span>Geplante Beiträge</span></article>
-  <article><strong>{{ counts.publications }}</strong><span>Veröffentlichungen</span></article>
+<div class="dashboard-work-grid">
+  <section class="dashboard-focus" aria-labelledby="dashboard-focus-title">
+    <div class="dashboard-section-heading">
+      <div>
+        <p class="eyebrow">Priorität</p>
+        <h2 id="dashboard-focus-title">Jetzt zu tun</h2>
+      </div>
+      {% if attention_count %}<span class="dashboard-count">{{ attention_count }}</span>{% endif %}
+    </div>
+    {% if attention_items %}
+    <ol class="dashboard-task-list">
+      {% for item in attention_items %}
+      <li>
+        <div>
+          <strong>{{ item.contribution_label }} · {{ item.title }}</strong>
+          <span>{{ item.status_label }}{% if item.status_detail %} · {{ item.status_detail }}{% endif %}</span>
+          <small>{{ item.channel.label }} · {{ item.target }}</small>
+        </div>
+        <a class="button" href="{{ '/posts/' ~ item.post.id if item.post else '/posts' }}">Prüfen</a>
+      </li>
+      {% endfor %}
+    </ol>
+    {% if attention_count > attention_items|length %}<p class="dashboard-more-note">{{ attention_count - attention_items|length }} weitere Aufgabe(n) warten.</p>{% endif %}
+    {% else %}
+    <div class="dashboard-all-clear">
+      <strong>Alles vorbereitet</strong>
+      <span>Aktuell benötigt kein Beitrag deine Aufmerksamkeit.</span>
+    </div>
+    {% endif %}
+    <a class="dashboard-text-link" href="/posts?status=attention">Alle Beiträge mit Handlungsbedarf öffnen</a>
+  </section>
+
+  <section class="dashboard-next" aria-labelledby="dashboard-next-title">
+    <div class="dashboard-section-heading">
+      <div>
+        <p class="eyebrow">Vorschau</p>
+        <h2 id="dashboard-next-title">Als Nächstes</h2>
+      </div>
+    </div>
+    <div class="dashboard-next-list">
+      <article>
+        <span>Nächstes Spiel</span>
+        {% if next_game %}
+        <strong>{{ next_game.home_team }} – {{ next_game.away_team }}</strong>
+        <time datetime="{{ next_game.kickoff.isoformat() }}">{{ next_game.kickoff|berlin }}</time>
+        {% if next_game_team %}<small>{{ next_game_team.display_name }}</small>{% endif %}
+        {% else %}
+        <strong>Kein kommendes Spiel</strong>
+        <small>Im sichtbaren Spielplan ist noch kein Termin vorhanden.</small>
+        {% endif %}
+        <a href="/games">Spiele öffnen</a>
+      </article>
+      <article>
+        <span>Nächste Veröffentlichung</span>
+        {% if next_publication %}
+        <strong>{{ next_publication.job.scheduled_at|berlin }}</strong>
+        <small>{{ next_publication.contribution_label }} · {{ next_publication.channel.label }} · {{ next_publication.target }}</small>
+        {% if planned_publication_count > 1 %}<small>{{ planned_publication_count }} Ausgaben sind in den nächsten 7 Tagen geplant.</small>{% endif %}
+        {% else %}
+        <strong>Noch nichts geplant</strong>
+        <small>Für die nächsten 7 Tage ist keine Veröffentlichung vorgesehen.</small>
+        {% endif %}
+        <a href="/posts?status=planned">Planung öffnen</a>
+      </article>
+    </div>
+  </section>
 </div>
 
-<section>
-  <h2>Limits und Verbrauch</h2>
-  <div class="cards">
-    <article>
-      <strong>{{ usage_cards.teams.used }} / {{ usage_cards.teams.limit }}</strong>
-      <span>Aktive Mannschaften</span>
-    </article>
-    <article>
-      <strong>{{ usage_cards.storage.used_gb }} / {{ usage_cards.storage.limit_gb }} GB</strong>
-      <span>Speicherverbrauch ({{ usage_cards.storage.percent }} %)</span>
-    </article>
-    <article>
-      <strong>{{ usage_cards.text.completed }} / {{ usage_cards.text.limit }}</strong>
-      <span>KI-Textgenerierungen</span>
-    </article>
-    <article>
-      <strong>{{ usage_cards.image.completed }} / {{ usage_cards.image.limit }}</strong>
-      <span>KI-Bilder</span>
-    </article>
+<section class="dashboard-quickstart" aria-labelledby="dashboard-quickstart-title">
+  <div>
+    <p class="eyebrow">Direkt loslegen</p>
+    <h2 id="dashboard-quickstart-title">Schnellstart</h2>
   </div>
-  {% if usage_cards.storage.percent >= 75 or usage_cards.text.remaining == 0 or usage_cards.image.remaining == 0 %}
-    <div class="warning">Mindestens ein Kontingent ist fast erreicht oder ausgeschöpft. Neue limitrelevante Aktionen können blockiert werden.</div>
-  {% endif %}
-  <p>Nächste KI-Kontingenterneuerung: {{ usage_cards.text.period_end|berlin }}</p>
+  <nav class="dashboard-quick-actions" aria-label="Schnellstart">
+    {% if user.role.value in ['admin', 'approver', 'editor'] %}<a class="button" href="/posts/manual/new">Beitrag erstellen</a>{% endif %}
+    <a class="button secondary" href="/posts">Beiträge prüfen</a>
+    <a class="button secondary" href="/games">Spiele öffnen</a>
+    <a class="button secondary" href="/media">Medien öffnen</a>
+  </nav>
 </section>
 
-<section class="dashboard-publishing-summary">
-  <div class="section-heading">
-    <div>
-      <h2>Geplante Veröffentlichungen</h2>
-      <p>Der kompakte Überblick über die nächsten 7 Tage. Details und Freigaben findest du im zentralen Arbeitsbereich.</p>
+{% if usage_cards.storage.percent >= 75 or usage_cards.text.remaining == 0 or usage_cards.image.remaining == 0 %}
+<div class="warning dashboard-usage-warning">Mindestens ein Kontingent ist fast erreicht oder ausgeschöpft. <a href="#dashboard-usage">Details ansehen</a></div>
+{% endif %}
+
+<details class="dashboard-usage" id="dashboard-usage">
+  <summary>Tarif und Kontingente</summary>
+  <div class="dashboard-usage-content">
+    <p>Tarif: <strong>{{ usage_cards.plan.name if usage_cards.plan else 'nicht zugeordnet' }}</strong></p>
+    <div class="dashboard-usage-grid">
+      <article><strong>{{ usage_cards.teams.used }} / {{ usage_cards.teams.limit }}</strong><span>Aktive Mannschaften</span></article>
+      <article><strong>{{ usage_cards.storage.used_gb }} / {{ usage_cards.storage.limit_gb }} GB</strong><span>Speicher ({{ usage_cards.storage.percent }} %)</span></article>
+      <article><strong>{{ usage_cards.text.completed }} / {{ usage_cards.text.limit }}</strong><span>KI-Texte</span></article>
+      <article><strong>{{ usage_cards.image.completed }} / {{ usage_cards.image.limit }}</strong><span>KI-Bilder</span></article>
     </div>
-    <a class="button" href="/posts">Beiträge &amp; Freigaben öffnen</a>
+    <small>Nächste KI-Kontingenterneuerung: {{ usage_cards.text.period_end|berlin }}</small>
   </div>
-  <div class="cards">
-    <article>
-      <strong>{% if next_publication %}{{next_publication.job.scheduled_at|berlin}}{% else %}—{% endif %}</strong>
-      <span>Nächste Veröffentlichung</span>
-      {% if next_publication %}<small>{{next_publication.channel.label}} · {{next_publication.target}}</small>{% endif %}
-    </article>
-    <article><strong>{{planned_publication_count}}</strong><span>Geplante Ausführungen</span></article>
-    <article class="{% if attention_count %}publication-summary-warning{% endif %}"><strong>{{attention_count}}</strong><span>Benötigen Aufmerksamkeit</span></article>
-    <article>
-      <strong>{{active_channels|length}}</strong><span>Eingerichtete Kanäle</span>
-      <small>{% for channel in active_channels %}{{channel.label}}{% if not loop.last %} · {% endif %}{% else %}Noch keine{% endfor %}</small>
-    </article>
-  </div>
-</section>
+</details>
 {% endblock %}
