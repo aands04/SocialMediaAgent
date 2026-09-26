@@ -66,13 +66,26 @@ header .signed-in-user{margin-left:auto;margin-right:22px;font-size:.85rem;font-
 .app-nav a{display:block;padding:9px 12px;color:#26375c;text-decoration:none;border-radius:6px}
 .app-nav a:hover{background:#e8eefc}
 .app-nav button{padding:10px 16px}
+.app-nav-label{margin:2px 12px 8px;color:#64748b;font-size:.72rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+.app-nav-primary{font-weight:750}
+.app-nav a[aria-current="page"],.app-nav-group-current>summary{background:#dbeafe;color:#1e3a8a}
+.app-nav-group{margin:2px 0}
+.app-nav-group>summary{padding:9px 12px;border-radius:6px;color:#26375c;cursor:pointer;font-weight:750;list-style-position:inside}
+.app-nav-group>summary:hover{background:#e8eefc}
+.app-nav-submenu{margin:3px 0 8px 13px;padding-left:8px;border-left:2px solid #dbe3f0}
+.app-nav-submenu a,.app-nav-sub-link{padding:7px 10px;font-size:.9rem}
+.app-nav-sub-link{margin-left:13px}
+.app-nav-technical{margin-top:18px;padding-top:12px;border-top:1px solid #e2e8f0}
+.app-nav-technical>summary{color:#526079;font-size:.9rem}
+.app-nav-logout{margin-top:18px;padding-top:14px;border-top:1px solid #e2e8f0}
+.app-nav-logout button{width:100%;background:#e2e8f0;color:#172554}
 .meta-test-environment .app-header{background:#7f1d1d}
 .app-header .signed-in-user{margin-left:auto;margin-right:22px;font-size:.85rem;font-weight:400;text-align:right}
 .app-header .signed-in-user strong{font-size:inherit}
 main header{height:auto;background:transparent;color:inherit;padding:0;font-size:inherit}
 main header button{display:inline-block}
 main nav{position:static;top:auto;bottom:auto;width:auto;overflow:visible;border:0}
-@media(max-width:800px){.app-header>button{display:block}.app-nav{display:none;z-index:2;width:100%}.app-nav.open{display:block}.app-header .signed-in-user{max-width:55%;margin-right:8px;font-size:.7rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+@media(max-width:800px){.app-header>button{display:block}.app-nav{display:none;z-index:2;width:100%;padding-bottom:32px}.app-nav.open{display:block}.app-nav a,.app-nav-group>summary{min-height:44px;display:flex;align-items:center}.app-header .signed-in-user{max-width:55%;margin-right:8px;font-size:.7rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 
 /* Lesbare Arbeitsbereiche für Spieltage und Veröffentlichungen. */
 .section-heading,.publication-heading{margin-bottom:18px}
