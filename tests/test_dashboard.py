@@ -144,7 +144,7 @@ def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
     assert page.status_code == 200
     assert '<header class="app-header">' in page.text
     assert '<nav id="app-navigation" class="app-nav"' in page.text
-    assert "/static/style.css?v=20260922-navigation" in page.text
+    assert "/static/style.css?v=20260926-dashboard" in page.text
     assert 'id="app-nav-toggle"' in page.text
     assert 'aria-expanded="false"' in page.text
     assert 'aria-controls="app-navigation"' in page.text
@@ -698,6 +698,20 @@ def test_club_dashboard_shows_usage_and_next_seven_days_in_plain_language(browse
         )
         db.add(post)
         db.flush()
+        db.add(
+            Game(
+                team_id=team.id,
+                provider="fussball.de",
+                external_id="dashboard-next-game",
+                home_team="Erste Mannschaft",
+                away_team="FC Vorschau",
+                kickoff=scheduled_at + timedelta(days=1),
+                competition="Kreisliga",
+                venue="Sportplatz",
+                pitch="Rasenplatz",
+                source_url="https://example.invalid/dashboard-next-game",
+            )
+        )
         db.add_all(
             [
                 PublicationJob(
@@ -750,23 +764,27 @@ def test_club_dashboard_shows_usage_and_next_seven_days_in_plain_language(browse
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Geplante Beiträge" in response.text
-    assert "Veröffentlichungen" in response.text
-    assert "<strong>2</strong><span>Mannschaften</span>" in response.text
+    assert "<h1>Heute</h1>" in response.text
+    assert "Jetzt zu tun" in response.text
+    assert "Als Nächstes" in response.text
+    assert "Schnellstart" in response.text
+    assert "Tarif und Kontingente" in response.text
+    assert "Nächstes Spiel" in response.text
+    assert "Erste Mannschaft – FC Vorschau" in response.text
     assert re.search(
         r"<strong>1 / \d+</strong>\s*<span>Aktive Mannschaften</span>",
         response.text,
     )
-    assert "KI-Textgenerierungen" in response.text
+    assert "KI-Texte" in response.text
     assert "KI-Bilder" in response.text
     assert "0,09 / 1.000 GB" in response.text
     assert "0 / 20" in response.text
-    assert "Geplante Veröffentlichungen" in response.text
     assert "Nächste Veröffentlichung" in response.text
-    assert "Benötigen Aufmerksamkeit" in response.text
-    assert "Eingerichtete Kanäle" in response.text
+    assert "Beitrag erstellen" in response.text
     assert 'href="/posts"' in response.text
-    assert f'href="/posts/{post_id}"' not in response.text
+    assert f'href="/posts/{post_id}"' in response.text
+    assert "Limits und Verbrauch" not in response.text
+    assert "Geplante Beiträge" not in response.text
     assert "Aktuelle Beiträge" not in response.text
 
 
@@ -1943,7 +1961,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260922-navigation" in teams_page
+    assert "/static/style.css?v=20260926-dashboard" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text
