@@ -144,7 +144,7 @@ def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
     assert page.status_code == 200
     assert '<header class="app-header">' in page.text
     assert '<nav id="app-navigation" class="app-nav"' in page.text
-    assert "/static/style.css?v=20260926-dashboard" in page.text
+    assert "/static/style.css?v=20260926-posts" in page.text
     assert 'id="app-nav-toggle"' in page.text
     assert 'aria-expanded="false"' in page.text
     assert 'aria-controls="app-navigation"' in page.text
@@ -1404,10 +1404,19 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
 
     default_page = client.get("/posts")
     assert default_page.status_code == 200
-    assert "Zentraler Veröffentlichungsplan" in default_page.text
-    assert "Zuletzt veröffentlicht" in default_page.text
-    assert "Als Nächstes geplant" in default_page.text
-    assert "Benötigt deine Aufmerksamkeit" in default_page.text
+    assert "Veröffentlichungsplan" in default_page.text
+    assert "Weitere Filter" in default_page.text
+    assert "Veröffentlicht" in default_page.text
+    assert "<span>Geplant</span>" in default_page.text
+    assert "Handlungsbedarf" in default_page.text
+    assert "Zu prüfen" in default_page.text
+    assert "Filter anwenden" not in default_page.text
+    assert "Zurücksetzen" not in default_page.text
+    assert '<nav class="publication-status-tabs" aria-label="Beitragsstatus">' in default_page.text
+    assert "<strong>4</strong><span>Alle</span>" in default_page.text
+    assert "<strong>3</strong><span>Zu prüfen</span>" in default_page.text
+    assert "<strong>0</strong><span>Geplant</span>" in default_page.text
+    assert "<strong>1</strong><span>Veröffentlicht</span>" in default_page.text
     assert "Überfälliger manueller Beitrag" in default_page.text
     assert "Überfällig" in default_page.text
     assert "Jüngster veröffentlichter Spielbeitrag" in default_page.text
@@ -1422,7 +1431,9 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
 
     extended_page = client.get("/posts?days=14")
     assert extended_page.status_code == 200
-    assert "nächsten 14 Tagen" in extended_page.text
+    assert "nächste 14 Tage" in extended_page.text
+    assert '<details class="publication-filters" open>' in extended_page.text
+    assert "Weitere Filter · aktiv" in extended_page.text
     assert berlin_datetime(carousel_time) in extended_page.text
     assert "Karussell" in extended_page.text
     assert "3 Bilder" in extended_page.text
@@ -1472,6 +1483,20 @@ def test_publication_plan_shows_recent_and_adjustable_upcoming_windows(browser):
         assert rejected_post.status == PostStatus.REJECTED
         rejection_audit = db.query(AuditLog).filter_by(action="post.rejected").one()
         assert rejection_audit.details["reason"] is None
+
+
+def test_empty_publication_workspace_uses_one_calm_empty_state(browser):
+    client, _factory = browser
+
+    response = client.get("/posts")
+
+    assert response.status_code == 200
+    assert response.text.count("Noch keine Beiträge in diesem Zeitraum") == 1
+    assert "Aktuell ist keine Aktion erforderlich." not in response.text
+    assert "Für diesen Zeitraum ist nichts geplant." not in response.text
+    assert "In den letzten 2 Tagen wurde nichts veröffentlicht." not in response.text
+    assert '<details class="publication-filters" >' in response.text
+    assert "Weitere Filter · aktiv" not in response.text
 
 
 def test_manual_post_can_be_uploaded_and_scheduled_from_dashboard(browser, tmp_path, monkeypatch):
@@ -1961,7 +1986,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260926-dashboard" in teams_page
+    assert "/static/style.css?v=20260926-posts" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text

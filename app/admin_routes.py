@@ -4546,6 +4546,11 @@ def posts(
         key=lambda row: row.event_at,
         reverse=True,
     )
+    summary = {
+        "attention": len(attention_rows),
+        "planned": len(planned_rows),
+        "published": len(published_rows),
+    }
     if status == "attention":
         planned_rows = []
         published_rows = []
@@ -4574,19 +4579,7 @@ def posts(
         content_options=content_options,
         published_since=published_since,
         planned_until=planned_until,
-        summary={
-            "attention": len([row for row in base_views if row.attention]),
-            "planned": len(
-                [
-                    row
-                    for row in base_views
-                    if row.job.status
-                    not in {JobStatus.PUBLISHED, JobStatus.CANCELLED, JobStatus.SKIPPED}
-                    and row.scheduled_at >= now
-                ]
-            ),
-            "published": len([row for row in base_views if row.job.status == JobStatus.PUBLISHED]),
-        },
+        summary=summary,
         title="Beiträge und Freigaben",
     )
 
