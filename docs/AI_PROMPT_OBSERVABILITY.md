@@ -41,6 +41,18 @@ Text, Feed oder Story als auch gespeicherte Versionen zur Auswahl.
 
 Fixture-Vorschauen und Versionsvergleiche rufen keinen KI-Anbieter auf.
 
+Die Bild-Policy `verified-media-ai-references-v10-person-preservation` verlangt
+für neue Feed- und Storybilder die unveränderte Übernahme jeder Person aus der
+Fotoreferenz, einschließlich Gesicht, Kleidung, Körperhaltung, Beinen und genauer
+Fußstellung. Neue Bälle, Requisiten, verdeckte Körperteile oder neue Posen sind
+ausgeschlossen. Nur die gesamte Person darf proportional skaliert und verschoben
+werden; beim Ergebnis-Umbau bleiben auch Größe und Position erhalten. Hintergrund
+und Layout müssen sich der Person anpassen. Diese serverseitigen Regeln gelten
+auch für gespeicherte Vorlagen und haben Vorrang vor Branding und Variantenstil.
+Bestehende Bilder werden dadurch nicht korrigiert. Die generative Umsetzung ist
+keine Garantie für pixelgenaue Erhaltung und bleibt visuell zu prüfen; für lokale
+Übernahme der Fotopixel existiert der Testmodus [photo_montage](PHOTO_MONTAGE_TEST.md).
+
 ## Exakt versandte Prompts
 
 Ergebnisbilder erhalten in Feed und Story eine große Hauptüberschrift:

@@ -55,7 +55,31 @@ DEFAULT_STYLE = (
     "Ausgabe soll eine eigenständige Komposition erhalten"
 )
 
-IMAGE_POLICY_VERSION = "verified-media-ai-references-v9-result-hierarchy"
+IMAGE_POLICY_VERSION = "verified-media-ai-references-v10-person-preservation"
+
+PERSON_PRESERVATION_RULES = """VERBINDLICHER PERSONENSCHUTZ – VORRANG VOR ALLEN GESTALTUNGSVORGABEN:
+- Übernimm jede Person aus Referenzbild 1 unverändert wie einen fotografischen
+  Ausschnitt. Nicht neu zeichnen, rekonstruieren, retuschieren oder neu inszenieren.
+  Gesicht, Mimik, Blickrichtung, Haare, Haut, Körperform, Proportionen, Kleidung,
+  Trikotaufdrucke, Abzeichen, Socken und Schuhe müssen dem Original entsprechen.
+- Bewahre die exakte Körperhaltung und Pose: Kopf, Rumpf, Arme, Hände, Finger,
+  Beine, Knie und insbesondere Fußstellung, Fußabstand, Fußausrichtung und
+  Bodenkontakt bleiben unverändert. Kein Bein anheben, beugen oder versetzen;
+  keinen Fuß auf einen Ball stellen und keine Lauf-, Schuss- oder Jubelpose erfinden.
+- Ergänze keine im Original fehlenden oder verdeckten Körperteile. Füge keine
+  Personen und keine Bälle oder anderen Requisiten hinzu; erfinde insbesondere
+  keine Gegenstände unter den Füßen oder in den Händen.
+- Bei neuen Kompositionen darf ausschließlich die gesamte Person als Einheit
+  proportional skaliert und verschoben werden; nicht spiegeln, drehen, verzerren
+  oder einzelne Körperteile verändern. Alle im Original sichtbaren Körperteile
+  einschließlich der Schuhe sichtbar lassen. Beim Ergebnisbild-Umbau bleiben
+  zusätzlich der vorhandene Bildausschnitt, die Größe und Motivposition erhalten.
+- Gestalte Hintergrund, Typografie und grafische Effekte um die unveränderte
+  Person herum. Keine Umfärbung, neue Beleuchtung oder Effekte auf der Person.
+  Wenn das Layout nicht passt, ändere das Layout, niemals die Person oder Pose.
+  Diese Regeln gelten auch bei widersprechenden Vorlagen, Branding-, Stil- und
+  Variantenanweisungen; Dynamik darf ausschließlich außerhalb der Person entstehen.
+"""
 
 RESULT_IMAGE_EDIT_SAFETY_PREFIX = """VERBINDLICHER ERGEBNISBILD-UMBAU:
 - Referenzbild 1 ist die bereits geprüfte Ankündigungsgrafik genau dieses Spiels
@@ -607,7 +631,7 @@ def result_outcome_instruction(facts: dict) -> str:
 def image_safety_prefix(facts: dict) -> str:
     outcome_rules = result_outcome_instruction(facts)
     if facts.get("post_type") == "result" and facts.get("result_layout_reference"):
-        return RESULT_IMAGE_EDIT_SAFETY_PREFIX + outcome_rules
+        return RESULT_IMAGE_EDIT_SAFETY_PREFIX + PERSON_PRESERVATION_RULES + outcome_rules
     next_reference = 3
     if facts.get("opponent_logo"):
         opponent_logo_rule = (
@@ -666,6 +690,7 @@ def image_safety_prefix(facts: dict) -> str:
             sponsor_logo_rules=sponsor_logo_rules,
             result_layout_reference_rule=result_layout_reference_rule,
         )
+        + PERSON_PRESERVATION_RULES
         + outcome_rules
     )
 

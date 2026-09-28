@@ -72,8 +72,50 @@ def test_prompt_context_uses_exact_home_venue_german_date_and_placeholders():
     assert "Referenzbild 2" in prompt.rendered
     assert "kein drittes Referenzbild" in prompt.rendered
     assert "oben links und oben rechts" not in prompt.rendered
-    assert prompt.policy_version == "verified-media-ai-references-v9-result-hierarchy"
+    assert prompt.policy_version == "verified-media-ai-references-v10-person-preservation"
     assert "{{" not in prompt.rendered
+
+
+@pytest.mark.parametrize("media_kind", ["feed", "story"])
+@pytest.mark.parametrize(
+    "post_type,layout",
+    [
+        ("announcement", None),
+        ("reminder", None),
+        ("result", None),
+        ("result", "/generated/announcement.png"),
+    ],
+)
+@pytest.mark.parametrize("saved", [False, True])
+def test_person_pose_protection_applies_to_all_image_templates(
+    db, media_kind, post_type, layout, saved
+):
+    from app.prompts.service import PERSON_PRESERVATION_RULES
+
+    data = facts(score="2:1", result_layout_reference=layout)
+    if saved:
+        db.add(
+            PromptTemplate(
+                name="person-protection",
+                prompt_kind="image",
+                post_type=post_type,
+                media_kind=media_kind,
+                version=1,
+                active=True,
+                prompt_body="Dynamische Pose mit einem Fuß auf einem Ball.",
+                model="gpt-image-2",
+                quality="high",
+            )
+        )
+        db.flush()
+        prompt = resolve_prompt(db, "person-protection", "image", post_type, media_kind, data)
+        assert not prompt.builtin
+    else:
+        prompt = builtin_prompt("image", post_type, media_kind, data)
+    assert PERSON_PRESERVATION_RULES in prompt.rendered
+    assert "Fußstellung, Fußabstand, Fußausrichtung" in prompt.rendered
+    assert "keinen Fuß auf einen Ball stellen" in prompt.rendered
+    assert prompt.policy_version == "verified-media-ai-references-v10-person-preservation"
 
 
 def test_away_venue_requires_pitch_and_formats_only_place():
@@ -941,7 +983,7 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     assert post.design_snapshot["prompts"]["feed"]["version"] == 3
     assert (
         post.design_snapshot["prompts"]["feed"]["policy_version"]
-        == "verified-media-ai-references-v9-result-hierarchy"
+        == "verified-media-ai-references-v10-person-preservation"
     )
     prompt_snapshot = post.design_snapshot["prompts"]["feed"]
     assert "rendered" not in prompt_snapshot
