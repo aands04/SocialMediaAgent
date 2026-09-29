@@ -4,13 +4,17 @@
   <div>
     <p class="eyebrow">Sport und Beiträge</p>
     <h1>Spiele</h1>
-    <p>Spiele, automatische Beitragserstellung und Veröffentlichungen auf einen Blick.</p>
-  </div>
-  <div class="games-heading__actions">
-    <button type="button" data-toggle-details="manual-game">+ Spiel manuell anlegen</button>
-    <button type="button" class="secondary" data-toggle-details="connect-games">Spiele zusammenfassen</button>
+    <p>Behalte die nächsten Spieltage im Blick und erledige offene Beitragsschritte.</p>
   </div>
 </header>
+
+<details class="games-management">
+  <summary>Spiele verwalten</summary>
+  <div class="games-heading__actions">
+    <button type="button" data-toggle-details="manual-game">Spiel manuell anlegen</button>
+    <button type="button" class="secondary" data-toggle-details="connect-games">Spiele zusammenfassen</button>
+  </div>
+</details>
 
 <details id="manual-game" class="game-admin-tools">
   <summary>Spiel manuell anlegen</summary>
@@ -38,8 +42,16 @@
   </form>
 </details>
 
-<section class="games-filter-panel" aria-labelledby="games-filter-title">
-  <div><p class="eyebrow">Ansicht</p><h2 id="games-filter-title">Spiele filtern</h2></div>
+{% set filters_active = selected_team_id or selected_contribution_status != 'all' or selected_period in ['next_30','all'] %}
+<nav class="games-period-tabs" aria-label="Zeitraum">
+  <a href="/games?period=upcoming&team_id={{selected_team_id}}&contribution_status={{selected_contribution_status}}" {% if selected_period=='upcoming' %}aria-current="page"{% endif %}>Kommend</a>
+  <a href="/games?period=today&team_id={{selected_team_id}}&contribution_status={{selected_contribution_status}}" {% if selected_period=='today' %}aria-current="page"{% endif %}>Heute</a>
+  <a href="/games?period=next_7&team_id={{selected_team_id}}&contribution_status={{selected_contribution_status}}" {% if selected_period=='next_7' %}aria-current="page"{% endif %}>7 Tage</a>
+  <a href="/games?period=past&team_id={{selected_team_id}}&contribution_status={{selected_contribution_status}}" {% if selected_period=='past' %}aria-current="page"{% endif %}>Vergangen</a>
+</nav>
+
+<details class="games-filters" {% if filters_active %}open{% endif %}>
+  <summary>Weitere Filter{% if filters_active %} · aktiv{% endif %}</summary>
   <form method="get" action="/games" class="games-filter-form">
     <label>Mannschaft
       <select name="team_id">
@@ -67,9 +79,10 @@
         <option value="problem" {% if selected_contribution_status=='problem' %}selected{% endif %}>Problem</option>
       </select>
     </label>
-    <button>Filter anwenden</button>
+    <button>Anzeigen</button>
+    {% if filters_active %}<a class="button secondary" href="/games">Filter löschen</a>{% endif %}
   </form>
-</section>
+</details>
 
 {% macro render_automation_details(group) %}
   {% if group.automation.generation_count > 1 or group.grouped %}
@@ -117,18 +130,14 @@
     </header>
 
     <section class="game-publication-summary" aria-label="Automatik- und Veröffentlichungsstatus">
-      <div><span class="eyebrow">Beitrag</span><strong class="game-tone--{{group.automation.contribution_tone}}">{{group.automation.contribution_label}}</strong></div>
+      <div><span class="eyebrow">Status</span><strong class="game-status game-status--{{group.status_key}}">{{group.status_label}}</strong></div>
       <div>
-        <span class="eyebrow">Automatische Erstellung</span>
+        <span class="eyebrow">Nächster Schritt</span>
         <strong class="game-tone--{{group.automation.generation_tone}}">{{group.automation.next_generation_label}}</strong>
         {% if group.automation.next_generation_detail %}<small>{{group.automation.next_generation_detail}}</small>{% endif %}
-        {{render_automation_details(group)}}
       </div>
       <div><span class="eyebrow">Nächste Veröffentlichung</span><strong>{{group.automation.next_publication_label}}</strong></div>
-      <div><span class="eyebrow">Kanäle</span><strong>{{group.automation.active_channels|join(' · ') if group.automation.active_channels else 'Noch keine'}}</strong></div>
       <div class="game-publication-summary__status">
-        <span class="eyebrow">Status</span>
-        <strong class="game-status game-status--{{group.status_key}}">{{group.status_label}}</strong>
         {% if group.detail_post %}
           <a class="button" href="/posts/{{group.detail_post.id}}">{{group.action_label}}</a>
         {% elif group.identity_review_team_id %}
@@ -139,6 +148,14 @@
           <form method="post" action="/games/{{group.games[0].id}}/generate"><input type="hidden" name="csrf_token" value="{{csrf}}"><button name="post_type" value="announcement">{{group.action_label}}</button></form>
         {% endif %}
       </div>
+      <details class="game-publication-details">
+        <summary>Beitrag, Automatik und Kanäle</summary>
+        <div class="game-publication-details__grid">
+          <div><span class="eyebrow">Beitrag</span><strong class="game-tone--{{group.automation.contribution_tone}}">{{group.automation.contribution_label}}</strong></div>
+          <div><span class="eyebrow">Kanäle</span><strong>{{group.automation.active_channels|join(' · ') if group.automation.active_channels else 'Noch keine'}}</strong></div>
+        </div>
+        {{render_automation_details(group)}}
+      </details>
     </section>
 
     <div class="game-card-list">
@@ -153,25 +170,10 @@
           <h4>{{x.home_team}} – {{x.away_team}}</h4>
           <time>{{x.kickoff|berlin}}</time>
           {% if x.result_confirmed and x.home_score is not none and x.away_score is not none %}<strong class="game-result">{{x.home_score}} : {{x.away_score}}</strong><small>Ergebnis bestätigt: {{x.home_score}}:{{x.away_score}}</small>{% endif %}
-        </div>
-        <div class="game-card__main">
           <p class="game-facts-inline">
             {{x.competition or 'Wettbewerb offen'}} · {{x.venue or 'Spielort offen'}}{% if x.pitch %} · {{x.pitch}}{% endif %}
             {% if x.overrides.get('provider_status')=='provisional' %}<span class="badge game-provisional-inline">Spielplan vorläufig</span>{% endif %}
           </p>
-          <p class="game-media-choice">
-            <strong>Bildauswahl:</strong>
-            {% if media_pref and media_pref.selection_mode == 'manual' %}manuell festgelegt{% else %}automatisch{% endif %}
-            · <a href="/games/{{x.id}}/media-selection?contribution_type=announcement">{% if media_pref and media_pref.selection_mode == 'manual' %}ändern{% else %}Bild festlegen{% endif %}</a>
-          </p>
-        </div>
-        <div class="game-opponent-logo game-logo-compact">
-          {% if x.id in unresolved_opponent_game_ids %}
-          <div><strong>Mannschaftszuordnung prüfen</strong><small class="game-logo-missing">Gegnerlogo erst nach eindeutiger Zuordnung verfügbar</small></div>
-          {% else %}
-          {% if logo %}<img class="logo-thumb" width="48" height="48" src="/logos/{{logo.id}}/preview?game_id={{x.id}}" alt="Gegnerlogo {{logo.display_name}}">{% endif %}
-          <div><strong>{{opponents.get(x.id,'Gegner')}}</strong>{% if logo and not x.overrides.get('use_opponent_logo', true) %}<small class="game-logo-missing">Logo bewusst deaktiviert</small>{% elif not logo %}<small class="game-logo-missing">Gegnerlogo fehlt</small>{% endif %}<a href="/games/{{x.id}}/opponent-logo">Logo {% if logo %}ändern{% else %}auswählen{% endif %}</a></div>
-          {% endif %}
         </div>
 
         <details class="game-card-details">
@@ -185,8 +187,23 @@
         </details>
 
         <details class="game-card-details game-more-actions">
-          <summary>Weitere Aktionen</summary>
+          <summary>Bilder und weitere Aktionen</summary>
           <div class="game-more-actions__content">
+            <div class="game-media-tools">
+              <div>
+                <span class="eyebrow">Bildauswahl</span>
+                <strong>{% if media_pref and media_pref.selection_mode == 'manual' %}Manuell festgelegt{% else %}Automatisch{% endif %}</strong>
+                <a href="/games/{{x.id}}/media-selection?contribution_type=announcement">{% if media_pref and media_pref.selection_mode == 'manual' %}Bildauswahl ändern{% else %}Bild festlegen{% endif %}</a>
+              </div>
+              <div class="game-opponent-logo game-logo-compact">
+                {% if x.id in unresolved_opponent_game_ids %}
+                <div><span class="eyebrow">Gegnerlogo</span><strong>Mannschaftszuordnung prüfen</strong><small class="game-logo-missing">Gegnerlogo erst nach eindeutiger Zuordnung verfügbar</small></div>
+                {% else %}
+                {% if logo %}<img class="logo-thumb" width="48" height="48" src="/logos/{{logo.id}}/preview?game_id={{x.id}}" alt="Gegnerlogo {{logo.display_name}}">{% endif %}
+                <div><span class="eyebrow">Gegnerlogo</span><strong>{{opponents.get(x.id,'Gegner')}}</strong>{% if logo and not x.overrides.get('use_opponent_logo', true) %}<small class="game-logo-missing">Logo bewusst deaktiviert</small>{% elif not logo %}<small class="game-logo-missing">Gegnerlogo fehlt</small>{% endif %}<a href="/games/{{x.id}}/opponent-logo">Logo {% if logo %}ändern{% else %}auswählen{% endif %}</a></div>
+                {% endif %}
+              </div>
+            </div>
             <a class="button secondary" href="/games/{{x.id}}/match-report">FuPa-Spielbericht bearbeiten</a>
             {% if x.overrides.get('provider_status')=='provisional' and not x.overrides.get('provisional_confirmed_by') %}
             <form method="post" action="/games/{{x.id}}/confirm-provisional" onsubmit="return confirm('Diesen vorläufigen Spieltermin für die Beitragserstellung manuell bestätigen?');">

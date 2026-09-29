@@ -144,7 +144,7 @@ def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
     assert page.status_code == 200
     assert '<header class="app-header">' in page.text
     assert '<nav id="app-navigation" class="app-nav"' in page.text
-    assert "/static/style.css?v=20260926-posts" in page.text
+    assert "/static/style.css?v=20260929-games2" in page.text
     assert 'id="app-nav-toggle"' in page.text
     assert 'aria-expanded="false"' in page.text
     assert 'aria-controls="app-navigation"' in page.text
@@ -155,6 +155,8 @@ def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
     assert stylesheet.headers["cache-control"] == "no-cache, must-revalidate"
     assert "main header{" in stylesheet.text
     assert "main nav{" in stylesheet.text
+    assert "#manual-game:not([open]),#connect-games:not([open]){display:none}" in stylesheet.text
+    assert "body:has(#connect-games[open]) .game-select{display:flex}" in stylesheet.text
 
 
 def test_club_navigation_prioritizes_five_work_areas_and_groups_admin_tools(browser):
@@ -1986,7 +1988,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260926-posts" in teams_page
+    assert "/static/style.css?v=20260929-games2" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text
@@ -2259,10 +2261,17 @@ def test_games_page_uses_productive_labels_and_orders_dates_and_kickoffs(browser
     assert "Lokales Testspiel anlegen" not in html
     assert "Mock-Spiel anlegen" not in html
     assert "<h1>Spiele</h1>" in html
+    assert 'class="games-management"' in html
+    assert '<nav class="games-period-tabs" aria-label="Zeitraum">' in html
+    assert 'aria-current="page">Kommend</a>' in html
+    assert '<details class="games-filters" >' in html
     assert "Spiel manuell anlegen" in html
-    assert "Automatische Erstellung" in html
+    assert "Nächster Schritt" in html
+    assert "Beitrag, Automatik und Kanäle" in html
     assert "Nächste Veröffentlichung" in html
-    assert "Bildauswahl:" in html
+    assert "Bilder und weitere Aktionen" in html
+    assert "Bildauswahl" in html
+    assert "Filter anwenden" not in html
     assert "Vergangener Gegner" not in html
     assert html.index("Früher Gegner") < html.index("Gegner 13 Uhr") < html.index("Später Gegner")
     assert html.index("Gegner 13 Uhr") < html.index("Gegner 15 Uhr") < html.index("Gegner 17 Uhr")
@@ -2271,6 +2280,8 @@ def test_games_page_uses_productive_labels_and_orders_dates_and_kickoffs(browser
     assert "Vergangener Gegner" in all_games
     assert all_games.index("Kommende Spiele") < all_games.index("Vergangene Spiele")
     assert "Gegnerlogo fehlt" in all_games
+    assert '<details class="games-filters" open>' in all_games
+    assert "Weitere Filter · aktiv" in all_games
 
 
 @pytest.mark.parametrize("with_failed_job", [False, True])
