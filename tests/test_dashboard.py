@@ -144,7 +144,7 @@ def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
     assert page.status_code == 200
     assert '<header class="app-header">' in page.text
     assert '<nav id="app-navigation" class="app-nav"' in page.text
-    assert "/static/style.css?v=20260929-games2" in page.text
+    assert "/static/style.css?v=20260929-media2" in page.text
     assert 'id="app-nav-toggle"' in page.text
     assert 'aria-expanded="false"' in page.text
     assert 'aria-controls="app-navigation"' in page.text
@@ -157,6 +157,11 @@ def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
     assert "main nav{" in stylesheet.text
     assert "#manual-game:not([open]),#connect-games:not([open]){display:none}" in stylesheet.text
     assert "body:has(#connect-games[open]) .game-select{display:flex}" in stylesheet.text
+    assert ".media-card-select{display:none}" in stylesheet.text
+    assert (
+        ".media-bulk-form:has(.media-bulk-actions[open]) .media-card-select{display:flex}"
+        in stylesheet.text
+    )
 
 
 def test_club_navigation_prioritizes_five_work_areas_and_groups_admin_tools(browser):
@@ -1988,7 +1993,7 @@ def test_team_and_per_game_opponent_logo_workflow(browser, tmp_path, monkeypatch
     teams_page = client.get("/teams").text
     assert "verifiziert" in teams_page
     assert 'class="logo-thumb" width="88" height="88"' in teams_page
-    assert "/static/style.css?v=20260929-games2" in teams_page
+    assert "/static/style.css?v=20260929-media2" in teams_page
     management = client.get(f"/games/{game_id}/opponent-logo")
     assert management.status_code == 200
     assert "neutraler Text-Fallback" in management.text

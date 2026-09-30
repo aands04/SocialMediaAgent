@@ -1490,6 +1490,7 @@ def media(
     category: str = "all",
     status: str = "all",
     search: str = "",
+    upload: bool = False,
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -1618,6 +1619,7 @@ def media(
         storage_limit_display=format_storage_gb(storage_limit_bytes, fixed_decimals=False),
         storage_has_limit=bool(storage_limit_bytes),
         storage_percent=storage_percent,
+        show_upload=upload,
         title="Medienbibliothek",
     )
 

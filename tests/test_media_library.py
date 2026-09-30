@@ -511,11 +511,31 @@ def test_gallery_hides_technical_values_and_supports_all_visible_teams(browser):
     page = client.get("/media")
     assert page.status_code == 200
     assert "Alle Bilder" in page.text
+    assert 'class="media-category-overview media-category-tabs"' in page.text
+    assert '<details class="media-storage-details" >' in page.text
+    assert '<details class="media-upload-panel" >' in page.text
+    assert '<details class="media-filters" >' in page.text
+    assert '<details class="media-bulk-actions">' in page.text
+    assert "Mehrere Bilder bearbeiten" in page.text
+    assert "Details öffnen" in page.text
+    assert "Ansehen und verwalten" not in page.text
+    assert 'formaction="/media/' not in page.text
     assert "Testverein I" in page.text and "Testverein II" in page.text
     assert "Vorgemerkt für Testverein" in page.text
     assert "Prüfsumme" not in page.text
     assert first_asset.checksum not in page.text
     assert "Direkter Upload" not in page.text
+
+    upload = client.get(f"/media?team_id={first.id}&upload=1")
+    assert upload.status_code == 200
+    assert '<details class="media-upload-panel" open>' in upload.text
+    assert '<details class="media-filters" open>' in upload.text
+    assert "Suchen und filtern · aktiv" in upload.text
+
+    filtered = client.get("/media?status=reserved&search=first")
+    assert filtered.status_code == 200
+    assert '<details class="media-filters" open>' in filtered.text
+    assert "Filter löschen" in filtered.text
 
     detail = client.get(f"/media/{first_asset.id}")
     assert detail.status_code == 200

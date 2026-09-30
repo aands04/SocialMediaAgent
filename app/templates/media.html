@@ -6,15 +6,17 @@
     <h1>Medienbibliothek</h1>
     <p>Verwalte die Bilder deines Vereins und bestimme, welche Fotos automatisch für Beiträge verwendet werden dürfen.</p>
   </div>
-  <div class="storage-summary" aria-label="Speicherverbrauch">
-    <strong>{{ storage_used_display }} GB{% if storage_has_limit %} von {{ storage_limit_display }} GB{% endif %}</strong>
-    <span>belegter Medienspeicher{% if storage_percent %} · {{ storage_percent }} %{% endif %}</span>
-    {% if storage_has_limit %}<progress value="{{ storage_percent }}" max="100" aria-label="{{ storage_percent }} Prozent des Medienspeichers belegt"></progress>{% endif %}
-    {% if storage_percent >= 90 %}<small class="storage-warning">Der Medienspeicher ist fast ausgeschöpft. Neue Uploads können bald blockiert werden.</small>{% endif %}
-  </div>
+  <details class="media-storage-details" {% if storage_percent >= 90 %}open{% endif %}>
+    <summary><span>Speicher</span><strong>{{ storage_used_display }} GB{% if storage_has_limit %} von {{ storage_limit_display }} GB{% endif %}</strong></summary>
+    <div class="storage-summary" aria-label="Speicherverbrauch">
+      <span>Belegter Medienspeicher{% if storage_percent %} · {{ storage_percent }} %{% endif %}</span>
+      {% if storage_has_limit %}<progress value="{{ storage_percent }}" max="100" aria-label="{{ storage_percent }} Prozent des Medienspeichers belegt"></progress>{% endif %}
+      {% if storage_percent >= 90 %}<small class="storage-warning">Der Medienspeicher ist fast ausgeschöpft. Neue Uploads können bald blockiert werden.</small>{% endif %}
+    </div>
+  </details>
 </header>
 
-<section class="media-category-overview" aria-label="Medienkategorien">
+<nav class="media-category-overview media-category-tabs" aria-label="Medienkategorien">
   <a class="media-category-card{% if category == 'all' %} is-active{% endif %}" href="/media?team_id={{ filter_team_id }}&category=all">
     <span class="media-category-icon" aria-hidden="true">▦</span>
     <strong>Alle Bilder</strong>
@@ -27,10 +29,11 @@
     <span>{{ category_counts.get(key, 0) }} Bilder</span>
   </a>
   {% endfor %}
-</section>
+</nav>
 
-<section>
-  <h2>Bilder hochladen</h2>
+<details class="media-upload-panel" {% if show_upload %}open{% endif %}>
+  <summary><span><strong>Bilder hinzufügen</strong><small>Einzelne Bilder, mehrere Dateien oder ZIP-Archiv</small></span></summary>
+  <div class="media-upload-content">
   <p class="field-help">JPG, PNG oder WebP – einzeln, mehrfach oder als ZIP-Archiv. Die Dateien werden automatisch im geschützten Vereins- und Mannschaftsbereich abgelegt.</p>
   <details class="technical-details upload-requirements">
     <summary>Technische Anforderungen anzeigen</summary>
@@ -42,6 +45,7 @@
   </details>
   {% if not selected and teams %}
   <form method="get" class="guided-upload-team-choice">
+    <input type="hidden" name="upload" value="1">
     <label>Mannschaft für den Upload <span class="required-marker">Erforderlich</span>
       <select name="team_id" required>
         <option value="">Bitte Mannschaft auswählen</option>
@@ -99,27 +103,26 @@
     <button>Bilder hochladen</button>
   </form>
   {% endif %}
-</section>
+  </div>
+</details>
 
 {% if teams %}
 <section class="media-library-section">
   <div class="section-heading-row">
     <div>
       <h2>Gespeicherte Medien</h2>
-      <p class="field-help">Technische Dateiinformationen findest du nur in der jeweiligen Detailansicht.</p>
+      <p class="field-help">{{ items|length }} von {{ total_media_count }} Bildern angezeigt. Technische Angaben findest du in der Detailansicht.</p>
     </div>
   </div>
+  {% set media_filters_active = selected or status != 'all' or search %}
+  <details class="media-filters" {% if media_filters_active %}open{% endif %}>
+    <summary>Suchen und filtern{% if media_filters_active %} · aktiv{% endif %}</summary>
   <form method="get" class="media-filter-bar">
+    <input type="hidden" name="category" value="{{ category }}">
     <label>Mannschaft
       <select name="team_id">
         <option value="all" {% if filter_team_id == 'all' %}selected{% endif %}>Alle berechtigten Mannschaften</option>
         {% for team in teams %}<option value="{{ team.id }}" {% if selected and team.id == selected.id %}selected{% endif %}>{{ team.display_name }}</option>{% endfor %}
-      </select>
-    </label>
-    <label>Kategorie
-      <select name="category">
-        <option value="all">Alle Kategorien</option>
-        {% for key, label in category_labels.items() %}<option value="{{ key }}" {% if category == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
       </select>
     </label>
     <label>Status
@@ -135,11 +138,15 @@
     <label>Suche
       <input type="search" name="search" value="{{ search }}" placeholder="Motiv, Beschreibung, Fotograf/in">
     </label>
-    <button>Filtern</button>
+    <button>Anzeigen</button>
+    {% if media_filters_active %}<a class="button secondary" href="/media?category={{ category }}">Filter löschen</a>{% endif %}
   </form>
+  </details>
 
   <form method="post" action="/media/bulk" class="media-bulk-form">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <details class="media-bulk-actions">
+      <summary>Mehrere Bilder bearbeiten</summary>
     <div class="media-bulk-toolbar">
       <label>Ausgewählte Medien
         <select name="action" required>
@@ -161,6 +168,7 @@
       </label>
       <button onclick="return confirm('Ausgewählte Aktion wirklich auf alle markierten Medien anwenden?')">Anwenden</button>
     </div>
+    </details>
 
     {% if items %}
     <div class="media-gallery">
@@ -186,8 +194,7 @@
           {% endif %}
           {% if item.description and item.player_name %}<p class="media-description">{{ item.description }}</p>{% endif %}
           <div class="button-row">
-            <a class="button secondary" href="/media/{{ item.id }}">Ansehen und verwalten</a>
-            <button class="danger secondary" formmethod="post" formaction="/media/{{ item.id }}/delete" onclick="return confirm('Medium wirklich löschen? Reservierte oder künftig ausgewählte Bilder werden nicht stillschweigend entfernt.')">Löschen</button>
+            <a class="button secondary media-card-open" href="/media/{{ item.id }}">Details öffnen</a>
           </div>
         </div>
       </article>
