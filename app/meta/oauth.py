@@ -265,9 +265,7 @@ def check_connection(
     if page is None or page.club_id != connection.club_id:
         raise MetaApiError("Instagram-Seite der Verbindung ist nicht eindeutig zugeordnet")
     try:
-        token = TokenCipher(settings.meta_token_encryption_key).decrypt(
-            connection.encrypted_token
-        )
+        token = TokenCipher(settings.meta_token_encryption_key).decrypt(connection.encrypted_token)
         profile = api.profile(token)
         # Instagram Login has no supported /me/permissions edge.  Revalidate
         # the token and account through /me and retain the exact scope grant
@@ -291,11 +289,7 @@ def check_connection(
         db.add(
             AuditLog(
                 user_id=user.id if user else None,
-                action=(
-                    "meta.connection_checked"
-                    if user
-                    else "meta.connection_checked_automatic"
-                ),
+                action=("meta.connection_checked" if user else "meta.connection_checked_automatic"),
                 entity_type="instagram_connection",
                 entity_id=connection.id,
                 details={
@@ -337,27 +331,31 @@ def refresh_connection(
     db: Session,
     settings: Settings,
     connection: InstagramConnection,
-    user: User,
+    user: User | None,
     api: MetaApiClient,
+    *,
+    now: datetime | None = None,
 ) -> InstagramConnection:
     assert_meta_environment(settings, external_call=True)
+    now = _utc(now or datetime.now(timezone.utc))
     token = TokenCipher(settings.meta_token_encryption_key).decrypt(connection.encrypted_token)
     refreshed = api.refresh_token(token, connection.instagram_user_id or "")
+    if not refreshed.access_token or refreshed.expires_in <= 0:
+        raise MetaApiError("Meta hat keine gültige Tokenverlängerung bestätigt")
     connection.encrypted_token = TokenCipher(settings.meta_token_encryption_key).encrypt(
         refreshed.access_token
     )
-    connection.token_expires_at = datetime.now(timezone.utc) + timedelta(
-        seconds=refreshed.expires_in
-    )
+    connection.token_expires_at = now + timedelta(seconds=refreshed.expires_in)
     connection.token_key_version = settings.meta_token_key_version
-    connection.last_check_at = datetime.now(timezone.utc)
-    connection.last_success_at = datetime.now(timezone.utc)
+    connection.last_check_at = now
+    connection.last_success_at = now
     connection.status = "connected"
     connection.last_error = None
     db.add(
         AuditLog(
-            user_id=user.id,
-            action="meta.token_refreshed",
+            user_id=user.id if user else None,
+            action="meta.token_refreshed" if user else "meta.token_refreshed_automatic",
+            at=now,
             entity_type="instagram_connection",
             entity_id=connection.id,
             details={"expires_at": connection.token_expires_at.isoformat()},

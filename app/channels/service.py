@@ -160,6 +160,12 @@ def channel_cards(db: Session) -> dict[str, list[dict]]:
         has_token = bool(item.encrypted_token)
         reconnect_required = False
         display_status = item.status
+        if item.channel_type == "instagram" and item.token_expires_at:
+            expires_at = item.token_expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= datetime.now(timezone.utc) and item.status != "disconnected":
+                display_status = "expired"
         if item.channel_type == "whatsapp":
             registration_required = not bool((item.settings or {}).get("phone_registered"))
             reconnect_required = not has_token or item.status == "disconnected"

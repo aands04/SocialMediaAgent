@@ -267,6 +267,9 @@ kollidiert.
 - Dashboard zeigt Ablaufzeit und warnt vor bald ablaufenden Tokens.
 - **Erneuern** verwendet ausschließlich den offiziell implementierten
   Token-Refresh.
+- Im Produktionsbetrieb ergänzt der bestehende Worker die Verbindungsprüfung um
+  automatische Verlängerungen ab 14 Tagen Restlaufzeit (siehe `META_CHANNELS.md`).
+  In Meta-Test wird dieser Produktionszyklus weiterhin nicht ausgeführt.
 - **Trennen** löscht kein Instagram-Konto, sondern sperrt die lokale
   Verbindung und widerruft aktive Medienfreigaben.
 - Der globale Not-Aus wird unmittelbar vor jedem externen Schritt erneut

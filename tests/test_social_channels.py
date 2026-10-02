@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 from cryptography.fernet import Fernet
+from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader
 from sqlalchemy import select
 
 from app.channels.api import (
@@ -311,6 +312,51 @@ def test_instagram_card_distinguishes_pending_guided_setup(db):
     connected_card = channel_cards(db)["instagram"][0]
 
     assert connected_card["instagram_setup_pending"] is False
+
+
+@pytest.mark.parametrize(
+    "status,expired", [("error", False), ("connected", True), ("connected", False)]
+)
+def test_instagram_reconnect_form_and_connection_status(db, status, expired):
+    page = InstagramPage(
+        internal_name="reconnect",
+        display_name="Instagram",
+        username="club",
+        club="Testverein",
+        automatic_publishing_enabled=True,
+    )
+    db.add(page)
+    db.flush()
+    connection = InstagramConnection(
+        instagram_page_id=page.id,
+        instagram_user_id="ig-account",
+        status=status,
+        encrypted_token="encrypted-placeholder",
+        token_expires_at=datetime.now(timezone.utc) + timedelta(days=-1 if expired else 1),
+    )
+    db.add(connection)
+    db.commit()
+    cards = channel_cards(db)
+    assert cards["instagram"][0]["display_status"] == ("expired" if expired else status)
+    env = Environment(
+        loader=ChoiceLoader(
+            [
+                DictLoader({"base.html": "{% block content %}{% endblock %}"}),
+                FileSystemLoader("app/templates"),
+            ]
+        ),
+        autoescape=True,
+    )
+    env.filters["berlin"] = str
+    template = env.get_template("channels.html")
+    rendered = template.render(cards=cards, is_admin=True, csrf="csrf", environment="production")
+    assert f'action="/instagram/{page.id}/meta/connect"' in rendered
+    assert f'action="/instagram/{page.id}/meta/refresh"' not in rendered
+    assert "Instagram neu verbinden" in rendered
+    assert ("Aktiviert – Verbindung prüfen" in rendered) == (expired or status != "connected")
+    viewer = template.render(cards=cards, is_admin=False, csrf="csrf", environment="production")
+    assert f'action="/instagram/{page.id}/meta/connect"' not in viewer
+    assert page.automatic_publishing_enabled is True
 
 
 @pytest.mark.parametrize("channel_type", ["facebook", "whatsapp"])

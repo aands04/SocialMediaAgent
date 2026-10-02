@@ -4,13 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.channels.api import ChannelApiError, MetaGraphClient
 from app.config import Settings
 from app.meta.api import MetaApiClient
-from app.meta.oauth import check_connection
+from app.meta.oauth import check_connection, refresh_connection
 from app.meta.publishing import assert_automatic_scheduler_environment
 from app.meta.security import TokenCipher
 from app.models import (
@@ -20,6 +20,7 @@ from app.models import (
     InstagramConnection,
     InstagramPage,
     SocialChannelConnection,
+    SystemSetting,
 )
 from app.tenancy.state import system_scope, tenant_scope
 
@@ -32,10 +33,65 @@ class AutomaticConnectionCheckCycle:
     checked: int = 0
     succeeded: int = 0
     failed: int = 0
+    refreshed: int = 0
+    refresh_failed: int = 0
 
 
 def _utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _token_refresh_due(db: Session, connection: InstagramConnection, now: datetime) -> bool:
+    stop = db.get(SystemSetting, "emergency_stop")
+    if stop and stop.value.get("enabled"):
+        return False
+    if connection.status != "connected" or connection.token_expires_at is None:
+        return False
+    if not now < _utc(connection.token_expires_at) <= now + timedelta(days=14):
+        return False
+    # Use persisted issuance events, not last_check_at/updated_at: profile
+    # checks must not reset Meta's minimum token age of 24 hours.
+    issued_at = db.scalar(
+        select(func.max(AuditLog.at)).where(
+            AuditLog.entity_type == "instagram_connection",
+            AuditLog.entity_id == connection.id,
+            AuditLog.action.in_(
+                ["meta.oauth_completed", "meta.token_refreshed", "meta.token_refreshed_automatic"]
+            ),
+        )
+    )
+    issued_at = issued_at or connection.created_at
+    return bool(issued_at and _utc(issued_at) <= now - timedelta(hours=24))
+
+
+def _record_token_failure(
+    db: Session, connection: InstagramConnection, now: datetime, *, expired: bool
+) -> None:
+    message = (
+        "Die Instagram-Sitzung ist abgelaufen. Bitte Instagram neu verbinden."
+        if expired
+        else "Die Instagram-Sitzung konnte nicht automatisch verlängert werden. "
+        "Die Prüfung wird später wiederholt. Falls nötig, Instagram neu verbinden."
+    )
+    connection.status = "error"
+    connection.last_check_at = now
+    connection.last_error = message
+    page = db.get(InstagramPage, connection.instagram_page_id)
+    if page is not None:
+        page.connection_status = "error"
+        page.last_check_at = now
+        page.last_error = message
+    db.add(
+        AuditLog(
+            user_id=None,
+            action="meta.token_expired" if expired else "meta.token_refresh_failed_automatic",
+            at=now,
+            entity_type="instagram_connection",
+            entity_id=connection.id,
+            details={"requires_reconnect": expired},
+        )
+    )
+    db.commit()
 
 
 def _claim_due_connections(
@@ -141,8 +197,8 @@ def run_automatic_connection_check_cycle(
 ) -> AutomaticConnectionCheckCycle:
     """Revalidate active Instagram connections at most once per interval.
 
-    This performs the same read-only profile validation as the protected
-    dashboard action.  It never creates a media container or publishes media.
+    Valid tokens within 14 days of expiry are refreshed after profile validation.
+    This never creates a media container or publishes media.
     """
 
     assert_automatic_scheduler_environment(settings)
@@ -151,9 +207,7 @@ def run_automatic_connection_check_cycle(
         candidates = _claim_due_connections(db, settings, now)
         channel_candidates = _claim_due_channel_connections(db, settings, now)
 
-    result = AutomaticConnectionCheckCycle(
-        claimed=len(candidates) + len(channel_candidates)
-    )
+    result = AutomaticConnectionCheckCycle(claimed=len(candidates) + len(channel_candidates))
     if not candidates and not channel_candidates:
         return result
     api = api or MetaApiClient(settings)
@@ -164,8 +218,24 @@ def run_automatic_connection_check_cycle(
             if connection is None:
                 continue
             result.checked += 1
+            if connection.token_expires_at and _utc(connection.token_expires_at) <= now:
+                _record_token_failure(db, connection, now, expired=True)
+                result.failed += 1
+                continue
             try:
                 check_connection(db, settings, connection, None, api)
+                if _token_refresh_due(db, connection, now):
+                    try:
+                        refresh_connection(db, settings, connection, None, api, now=now)
+                        result.refreshed += 1
+                    except Exception:
+                        db.rollback()
+                        connection = db.get(InstagramConnection, connection_id)
+                        if connection is not None:
+                            _record_token_failure(db, connection, now, expired=False)
+                        result.refresh_failed += 1
+                        result.failed += 1
+                        continue
                 result.succeeded += 1
             except Exception as exc:
                 # check_connection persisted a sanitized error and an audit
@@ -222,9 +292,7 @@ def run_automatic_connection_check_cycle(
                     db.add(
                         AuditLog(
                             user_id=None,
-                            action=(
-                                f"channel.{connection.channel_type}.automatic_check_failed"
-                            ),
+                            action=(f"channel.{connection.channel_type}.automatic_check_failed"),
                             entity_type="social_channel_connection",
                             entity_id=connection.id,
                             details={"error_type": type(exc).__name__},
