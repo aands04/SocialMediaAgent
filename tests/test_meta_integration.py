@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote
 
 import httpx
 import pytest
@@ -230,6 +230,64 @@ class OAuthApi:
             "username": self.username,
             "account_type": "BUSINESS",
         }
+
+
+@pytest.mark.parametrize("action", ["connect", "check", "refresh"])
+def test_connection_action_errors_return_safe_channel_notice(db, tmp_path, monkeypatch, action):
+    settings = meta_settings(tmp_path)
+    user, page, *_ = make_context(db, settings)
+    monkeypatch.setattr(meta_routes, "settings", settings)
+
+    def fail(*args, **kwargs):
+        raise MetaApiError("Session has expired: sensitive-provider-detail")
+
+    service = {
+        "connect": "start_oauth",
+        "check": "check_connection",
+        "refresh": "refresh_connection",
+    }
+    monkeypatch.setattr(meta_routes, service[action], fail)
+    request = Request({"type": "http", "session": {"csrf": "csrf"}})
+    response = getattr(meta_routes, f"meta_{action}")(
+        page.id, request, csrf_token_value="csrf", current=user, db=db
+    )
+    assert response.status_code == 303
+    location = unquote(response.headers["location"])
+    assert location.startswith("/channels?notice=")
+    assert "sensitive-provider-detail" not in location
+    if action != "connect":
+        assert "Instagram neu verbinden" in location
+
+
+def test_reconnect_preserves_existing_connection_content_and_gates(db, tmp_path, monkeypatch):
+    settings = meta_settings(tmp_path)
+    user, page, connection, post, job = make_context(db, settings)
+    team = db.get(Team, post.team_id)
+    connection.status = "error"
+    connection.token_expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+    page.automatic_publishing_enabled = False
+    page.publishing_enabled = False
+    db.commit()
+    identifiers = (connection.id, post.id, job.id, team.instagram_page_id)
+    snapshot = (post.text, post.approved_version, post.status)
+    monkeypatch.setattr(meta_routes, "settings", settings)
+    monkeypatch.setattr(meta_routes, "MetaApiClient", lambda settings: OAuthApi())
+    request = Request({"type": "http", "session": {"csrf": "csrf"}})
+    response = meta_routes.meta_connect(
+        page.id, request, csrf_token_value="csrf", current=user, db=db
+    )
+    assert response.status_code == 303
+    state = parse_qs(response.headers["location"].split("?", 1)[1])["state"][0]
+    renewed = complete_oauth(db, settings, state=state, code="new-code", api=OAuthApi())
+    assert renewed.status == "connected"
+    assert (renewed.id, post.id, job.id, team.instagram_page_id) == identifiers
+    assert (post.text, post.approved_version, post.status) == snapshot
+    assert not page.automatic_publishing_enabled
+    assert not page.publishing_enabled
+    assert (
+        TokenCipher(settings.meta_token_encryption_key).decrypt(renewed.encrypted_token)
+        == "long-secret"
+    )
 
 
 def test_oauth_state_is_one_time_and_token_is_encrypted(db, tmp_path):

@@ -62,6 +62,7 @@
     {% if not connection or connection.status == 'disconnected' %}
     <form method="post" action="/instagram/{{ page.id }}/meta/connect"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Instagram verbinden</button></form>
     {% else %}
+    <form method="post" action="/instagram/{{ page.id }}/meta/connect"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Instagram neu verbinden</button></form>
     <form method="post" action="/instagram/{{ page.id }}/meta/check"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Verbindung prüfen</button></form>
     <form method="post" action="/instagram/{{ page.id }}/meta/refresh"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button>Token erneuern</button></form>
     <form method="post" action="/instagram/{{ page.id }}/meta/disconnect"><input type="hidden" name="csrf_token" value="{{ csrf }}"><button class="danger">Verbindung trennen</button></form>

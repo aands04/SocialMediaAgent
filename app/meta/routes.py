@@ -118,8 +118,12 @@ def meta_connect(
     page, _ = _page_connection(db, page_id)
     try:
         url = start_oauth(db, settings, page, current, MetaApiClient(settings))
-    except MetaApiError as exc:
-        raise HTTPException(409, str(exc)) from exc
+    except MetaApiError:
+        return _redirect(
+            "/channels",
+            "Die Instagram-Anmeldung konnte nicht gestartet werden. "
+            "Bitte versuche es später erneut oder wende dich an den Plattformbetrieb.",
+        )
     return RedirectResponse(url, 303)
 
 
@@ -193,9 +197,14 @@ def meta_check(
         raise HTTPException(409, "Noch keine Meta-Verbindung vorhanden")
     try:
         check_connection(db, settings, connection, current, MetaApiClient(settings))
-    except MetaApiError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return _redirect("/instagram", "Meta-Verbindung wurde geprüft")
+    except MetaApiError:
+        return _redirect(
+            "/channels",
+            "Die Instagram-Verbindung konnte nicht bestätigt werden. "
+            "Ist die Sitzung abgelaufen, wähle „Instagram neu verbinden“ "
+            "und melde dich erneut bei Meta an.",
+        )
+    return _redirect("/channels", "Meta-Verbindung wurde geprüft")
 
 
 @router.post("/instagram/{page_id}/meta/refresh")
@@ -213,9 +222,13 @@ def meta_refresh(
         raise HTTPException(409, "Noch keine Meta-Verbindung vorhanden")
     try:
         refresh_connection(db, settings, connection, current, MetaApiClient(settings))
-    except MetaApiError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return _redirect("/instagram", "Meta-Token wurde kontrolliert erneuert")
+    except MetaApiError:
+        return _redirect(
+            "/channels",
+            "Die Instagram-Sitzung konnte nicht verlängert werden. "
+            "Wähle „Instagram neu verbinden“ und melde dich erneut bei Meta an.",
+        )
+    return _redirect("/channels", "Meta-Token wurde kontrolliert erneuert")
 
 
 @router.post("/instagram/{page_id}/meta/disconnect")

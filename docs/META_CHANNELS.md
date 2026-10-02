@@ -39,13 +39,37 @@ Unterstützt werden in der Vereinszentrale:
 Die Anwendung verlangt für Publishing ein professionelles Business-Konto. Meta dokumentiert
 zusätzliche Einschränkungen und Publishing-Limits; diese dürfen nicht durch parallele
 inoffizielle Logins umgangen werden. Die Verbindung wird standardmäßig alle zwölf Stunden
-lesend geprüft. Ein unklarer Schreibaufruf wird nicht automatisch wiederholt.
+geprüft. Ein unklarer Publishing-Schreibaufruf wird nicht automatisch wiederholt.
+
+Der Produktionsworker verlängert bei dieser Prüfung gültige Instagram-Tokens automatisch,
+sobald höchstens 14 Tage Restlaufzeit bleiben. Voraussetzung sind eine erfolgreiche
+Kontoprüfung, die vorhandenen Produktions-/Scheduler-Gates und ein deaktivierter Not-Aus.
+Die letzte Tokenausgabe oder Verlängerung muss mindestens 24 Stunden zurückliegen; dafür
+werden die bestehenden OAuth-/Token-Auditeinträge verwendet. Ohne solchen Eintrag gilt der
+Erstellungszeitpunkt der Verbindung. Ein unbekanntes Ablaufdatum löst keine Verlängerung aus.
+
+Der neue Token wird verschlüsselt gespeichert; das Ablaufdatum folgt ausschließlich der
+bestätigten Meta-Antwort. Erfolge und Fehler werden ohne Tokenwerte auditiert. Bei einem
+Fehler bleibt der bisherige Token erhalten und die Verbindung wird als gestört markiert.
+Ein weiterer Versuch erfolgt erst bei der nächsten regulären Prüfung (standardmäßig nach
+zwölf Stunden). Bereits abgelaufene Tokens werden nicht mehr an Meta gesendet; die
+Oberfläche verweist auf **Instagram neu verbinden**. Pausierte Gates werden niemals
+automatisch aktiviert. Es ist keine zusätzliche Datenbankmigration erforderlich.
 
 Wird der Meta-Dialog bei der Ersteinrichtung abgebrochen oder nicht vollständig beendet,
 bleibt der sicher deaktivierte Platzhalter in der Kanalübersicht erhalten. Mit
 **Einrichtung fortsetzen** kann ein Vereinsadministrator den offiziellen OAuth-Dialog für
 genau diesen Platzhalter erneut starten. Erst ein erfolgreicher OAuth-Abschluss beendet den
 Einrichtungszustand; Publishing und automatische Veröffentlichung bleiben dabei deaktiviert.
+
+Bei einer abgelaufenen oder gestörten Instagram-Verbindung startet **Instagram neu
+verbinden** die offizielle Meta-Anmeldung für die vorhandene Zielseite. Ein vorheriges
+Trennen ist nicht erforderlich. Beiträge, Freigaben, Zuordnungen und Publishing-Einstellungen
+bleiben erhalten. Die separate technische Aktion **Token erneuern** verlängert nur die
+bestehende Sitzung; schlägt sie fehl, führt die Oberfläche mit einem verständlichen Hinweis
+zur Kanalübersicht zurück. Abgelaufene Tokens werden dort als abgelaufen angezeigt; eine
+aktivierte Automatik bei gestörter Verbindung wird mit „Aktiviert – Verbindung prüfen“
+gekennzeichnet.
 
 ## Facebook-Seiten
 

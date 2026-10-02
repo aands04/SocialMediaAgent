@@ -158,11 +158,14 @@ class MetaApiClient:
             "Tokenerneuerung",
             params={"grant_type": "ig_refresh_token", "access_token": access_token},
         )
-        return OAuthToken(
-            str(data.get("access_token") or access_token),
-            user_id,
-            int(data.get("expires_in") or 0),
-        )
+        token = data.get("access_token")
+        try:
+            expires_in = int(data.get("expires_in") or 0)
+        except (TypeError, ValueError):
+            raise MetaApiError("Meta hat keine gültige Tokenverlängerung bestätigt") from None
+        if not isinstance(token, str) or not token or expires_in <= 0:
+            raise MetaApiError("Meta hat keine gültige Tokenverlängerung bestätigt")
+        return OAuthToken(token, user_id, expires_in)
 
     def profile(self, access_token: str) -> dict:
         return self._request_json(
