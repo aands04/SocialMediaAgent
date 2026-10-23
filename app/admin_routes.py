@@ -4856,6 +4856,9 @@ def post_detail(
             and not job.locked_at
             and job.id not in active_attempt_job_ids
         )
+    late_approval_jobs = [
+        job for job in jobs if late_jobs[job.id] and job.status in EDITABLE_JOB_STATUSES
+    ]
     archived_matchday = aggregate_bundle and item.active_key != "active"
     can_edit_all = not archived_matchday and all(
         allowed(db, current, "edit_post", member.team_id) for member in bundle_posts
@@ -5309,6 +5312,10 @@ def post_detail(
         checks=checks,
         carousel_items=carousel_items,
         late_jobs=late_jobs,
+        late_approval_jobs=late_approval_jobs,
+        approval_error=getattr(request.state, "approval_error", None),
+        approval_job_ids=getattr(request.state, "approval_job_ids", None),
+        approval_channel_ids=getattr(request.state, "approval_channel_ids", None),
         logo_recompose=logo_recompose_availability(item, own_jobs),
         bundle_posts=bundle_posts,
         bundle_member_teams={member.id: db.get(Team, member.team_id) for member in bundle_posts},
@@ -6379,6 +6386,7 @@ def approve_post(
     job_ids: list[str] = Form(default=[]),
     channel_connection_ids: list[str] = Form(default=[]),
     channel_selection_submitted: bool = Form(default=False),
+    publish_late_now: bool = Form(default=False),
     current=Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -6393,8 +6401,19 @@ def approve_post(
             current,
             job_ids or None,
             channel_connection_ids if channel_selection_submitted else None,
+            publish_late_now=publish_late_now,
         )
     except ApprovalError as e:
+        db.rollback()
+        if "text/html" in request.headers.get("accept", ""):
+            request.state.approval_error = str(e)
+            request.state.approval_job_ids = job_ids or None
+            request.state.approval_channel_ids = (
+                channel_connection_ids if channel_selection_submitted else None
+            )
+            response = post_detail(post_id, request, current, db)
+            response.status_code = 422
+            return response
         raise HTTPException(422, str(e)) from e
     return redirect(f"/posts/{item.id}", "Beitrag ausdrücklich freigegeben")
 

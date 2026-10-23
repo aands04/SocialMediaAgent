@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.auth.service import allowed
@@ -10,6 +10,7 @@ from app.models import (
     AuditLog,
     InstagramPage,
     JobStatus,
+    MetaPublishingAttempt,
     Post,
     PostStatus,
     PublicationJob,
@@ -29,6 +30,15 @@ class ApprovalError(ValueError):
     pass
 
 
+def late_approval_behavior(post: Post, team: Team) -> str:
+    if (
+        post.post_type == "result"
+        and team.rules.get("result_timing_mode", "result_detected") == "result_detected"
+    ):
+        return "publish_now"
+    return team.rules.get("late_approval", "publish_now")
+
+
 def _clear_resolved_reapproval_error(job: PublicationJob) -> None:
     """Remove only warnings whose sole purpose was to require a new approval."""
     if job.error and "erneute freigabe erforderlich" in job.error.casefold():
@@ -43,6 +53,7 @@ def approve(
     selected_channel_connections: list[str] | None = None,
     *,
     commit: bool = True,
+    publish_late_now: bool = False,
 ) -> Post:
     if (post.design_snapshot or {}).get("club_matchday_carousel") and post.active_key != "active":
         raise ApprovalError("Archivierte Beiträge dürfen nicht erneut freigegeben werden")
@@ -52,6 +63,29 @@ def approve(
     team = db.get(Team, post.team_id)
     jobs = list(db.scalars(select(PublicationJob).where(PublicationJob.post_id == post.id)))
     selected = [j for j in jobs if selected_jobs is None or j.id in selected_jobs]
+    if publish_late_now:
+        processing = any(
+            job.status
+            in {JobStatus.PUBLISHED, JobStatus.PUBLISHING, JobStatus.RETRY, JobStatus.UNCERTAIN}
+            or job.published_at
+            or job.platform_id
+            or job.locked_at
+            or job.attempts
+            for job in selected
+        )
+        open_attempt = db.scalar(
+            select(MetaPublishingAttempt.id).where(
+                MetaPublishingAttempt.publication_job_id.in_([job.id for job in selected]),
+                or_(
+                    MetaPublishingAttempt.active_key.is_not(None),
+                    MetaPublishingAttempt.phase.notin_(["completed", "failed"]),
+                ),
+            )
+        )
+        if processing or open_attempt:
+            raise ApprovalError(
+                "Bereits verarbeitete oder ungeklärte Veröffentlichungen dürfen nicht erneut eingeplant werden"
+            )
     from app.posts.media_versions import freeze_publication_versions
 
     # Resolve auto-latest/manual selections before validating and freezing the
@@ -149,11 +183,8 @@ def approve(
         )
         < now
     ]
-    behavior = team.rules.get("late_approval", "publish_now")
-    if (
-        post.post_type == "result"
-        and team.rules.get("result_timing_mode", "result_detected") == "result_detected"
-    ):
+    behavior = late_approval_behavior(post, team)
+    if publish_late_now:
         behavior = "publish_now"
     if late and behavior == "manual":
         problems.append(
@@ -224,6 +255,7 @@ def approve(
                 "version": post.version,
                 "jobs": [j.id for j in selected],
                 "late_behavior": behavior,
+                "publish_late_now": publish_late_now,
                 "channel_jobs": [job.id for job in channel_jobs],
                 "selected_channel_connections": selected_channel_connections,
             },
@@ -248,6 +280,8 @@ def approve_matchday_bundle(
     user: User,
     selected_jobs: list[str] | None = None,
     selected_channel_connections: list[str] | None = None,
+    *,
+    publish_late_now: bool = False,
 ) -> Post:
     """Approve the aggregate carousel and all selected per-game stories atomically."""
     if (post.design_snapshot or {}).get("club_matchday_carousel") and post.active_key != "active":
@@ -261,6 +295,7 @@ def approve_matchday_bundle(
                 user,
                 selected_jobs,
                 selected_channel_connections,
+                publish_late_now=publish_late_now,
             )
         reconcile_matchday_bundle_feed_jobs(db, primary)
         primary, members, visible_jobs, _job_posts = matchday_bundle_jobs(db, primary)
@@ -282,6 +317,7 @@ def approve_matchday_bundle(
                     member_job_ids,
                     selected_channel_connections,
                     commit=False,
+                    publish_late_now=publish_late_now,
                 )
         db.commit()
     except Exception:
