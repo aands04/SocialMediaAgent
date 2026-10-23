@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from PIL import Image
 from sqlalchemy import select
 
 from app.models import (
@@ -104,9 +105,7 @@ def test_manual_schedule_change_is_absolute_audited_and_revokes_approval(db):
     assert post.approved_version is None
     assert all(job.status == JobStatus.UNAPPROVED for job in jobs)
     assert all(job.approval_status == "reapproval_required" for job in jobs)
-    audit = db.scalar(
-        select(AuditLog).where(AuditLog.action == "publication.schedule_changed")
-    )
+    audit = db.scalar(select(AuditLog).where(AuditLog.action == "publication.schedule_changed"))
     assert audit and audit.entity_id == target.id
     assert audit.details["old_scheduled_at"] == old_time.isoformat()
     assert audit.details["new_scheduled_at"] == new_time.isoformat()
@@ -171,3 +170,51 @@ def test_schedule_change_rejects_active_sibling_job(db):
             scheduled_at=datetime.now(timezone.utc) + timedelta(days=1),
             expected_job_version=jobs[0].version,
         )
+
+
+@pytest.mark.parametrize("behavior", ["manual", "skip", "next_story", "publish_now"])
+def test_explicit_late_approval_keeps_future_times_and_schedules_overdue_now(
+    db, tmp_path, behavior
+):
+    from app.approvals.service import approve
+
+    team, user, post, jobs = _graph(db)
+    team.rules = {"late_approval": behavior}
+    db.get(InstagramPage, post.instagram_page_id).connection_status = "connected"
+    media = tmp_path / "approved.png"
+    Image.new("RGB", (1080, 1350), "navy").save(media)
+    post.feed_path = str(media)
+    post.design_snapshot = {
+        "logos": {"team": {"id": "verified", "verified": True, "checksum": "a" * 64}}
+    }
+    for job in jobs:
+        job.media_path = str(media)
+    jobs[0].scheduled_at = datetime.now(timezone.utc) - timedelta(days=1)
+    future = jobs[1].scheduled_at
+    db.commit()
+
+    before = datetime.now(timezone.utc)
+    approve(db, post, user, publish_late_now=True)
+
+    assert before <= jobs[0].scheduled_at <= datetime.now(timezone.utc)
+    assert jobs[1].scheduled_at == future
+    assert all(job.status == JobStatus.SCHEDULED for job in jobs)
+    audit = db.scalar(select(AuditLog).where(AuditLog.action == "post.approved"))
+    assert audit.details["late_behavior"] == "publish_now"
+    assert audit.details["publish_late_now"] is True
+
+
+@pytest.mark.parametrize(
+    "status", [JobStatus.PUBLISHED, JobStatus.PUBLISHING, JobStatus.UNCERTAIN, JobStatus.RETRY]
+)
+def test_explicit_late_approval_does_not_restart_processed_jobs(db, status):
+    from app.approvals.service import ApprovalError, approve
+
+    _team, user, post, jobs = _graph(db)
+    jobs[0].status = status
+    original_time = jobs[0].scheduled_at
+    db.commit()
+    with pytest.raises(ApprovalError, match="nicht erneut eingeplant"):
+        approve(db, post, user, publish_late_now=True)
+    assert jobs[0].status == status
+    assert jobs[0].scheduled_at == original_time

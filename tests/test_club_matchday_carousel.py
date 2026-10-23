@@ -404,7 +404,10 @@ def test_matchday_carousel_cancels_every_individual_feed_slot(db, tmp_path):
     assert all(job.approval_status == "bundled" for job in feed_jobs if job.id != active[0].id)
 
 
-def test_matchday_dashboard_collects_and_approves_all_member_stories(db, tmp_path):
+@pytest.mark.parametrize("publish_late_now", [False, True])
+def test_matchday_dashboard_collects_and_approves_all_member_stories(
+    db, tmp_path, publish_late_now
+):
     page = _page(db)
     first = _team(db, page, number=1, mode="announcements")
     second = _team(db, page, number=2, mode="announcements")
@@ -462,12 +465,23 @@ def test_matchday_dashboard_collects_and_approves_all_member_stories(db, tmp_pat
     )
     db.add(approver)
     db.commit()
-    approve_matchday_bundle(db, primary, approver, [job.id for job in jobs])
+    if publish_late_now:
+        first.rules = {**first.rules, "late_approval": "manual"}
+        second.rules = {**second.rules, "late_approval": "skip"}
+        for job in jobs:
+            job.scheduled_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        db.commit()
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
+    approve_matchday_bundle(
+        db, primary, approver, [job.id for job in jobs], publish_late_now=publish_late_now
+    )
 
     db.expire_all()
     approved_jobs = [db.get(PublicationJob, job.id) for job in jobs]
     assert all(job.approval_status == "approved" for job in approved_jobs)
     assert all(job.status == JobStatus.SCHEDULED for job in approved_jobs)
+    if publish_late_now:
+        assert all(job.scheduled_at.replace(tzinfo=None) >= before for job in approved_jobs)
 
     stale_member_feed = PublicationJob(
         post_id=second_post.id,
@@ -491,7 +505,9 @@ def test_matchday_dashboard_collects_and_approves_all_member_stories(db, tmp_pat
     )
     assert views == []
 
-    approve_matchday_bundle(db, primary, approver, [job.id for job in jobs])
+    approve_matchday_bundle(
+        db, primary, approver, [job.id for job in jobs], publish_late_now=publish_late_now
+    )
     db.refresh(stale_member_feed)
     assert stale_member_feed.status == JobStatus.CANCELLED
     assert stale_member_feed.approval_status == "bundled"

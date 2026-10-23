@@ -137,6 +137,151 @@ def session_csrf(client):
     return re.search(r'name="csrf_token" value="([^"]+)', response.text).group(1)
 
 
+def _late_approval_post(factory, tmp_path, *, behavior="manual", post_type="announcement"):
+    with factory() as db:
+        page = InstagramPage(
+            internal_name="late-page",
+            display_name="Testseite",
+            username="late_page",
+            club="Testverein",
+            active=True,
+            connection_status="connected",
+        )
+        db.add(page)
+        db.flush()
+        team = Team(
+            internal_name="late-team",
+            display_name="Testmannschaft",
+            short_name="Test",
+            slug="late-team",
+            club="Testverein",
+            fussball_url="fixture://late-team",
+            instagram_page_id=page.id,
+            media_subdir="late-team",
+            rules={"late_approval": behavior},
+        )
+        db.add(team)
+        db.flush()
+        media = tmp_path / "late.png"
+        Image.new("RGB", (1080, 1350)).save(media)
+        post = Post(
+            team_id=team.id,
+            instagram_page_id=page.id,
+            post_type=post_type,
+            status=PostStatus.PENDING,
+            text="Spiel gegen die TSG Hofgeismar",
+            feed_path=str(media),
+            design_snapshot={
+                "logos": {
+                    "team": {"id": "verified-test-logo", "verified": True, "checksum": "a" * 64}
+                }
+            },
+        )
+        db.add(post)
+        db.flush()
+        job = PublicationJob(
+            post_id=post.id,
+            team_id=team.id,
+            instagram_page_id=page.id,
+            kind="feed",
+            media_path=str(media),
+            status=JobStatus.UNAPPROVED,
+            scheduled_at=datetime.now(timezone.utc) - timedelta(hours=1),
+            idempotency_key="late-approval-feed",
+        )
+        db.add(job)
+        db.commit()
+        return post.id, job.id
+
+
+@pytest.mark.parametrize(
+    ("behavior", "post_type", "published", "needs_decision"),
+    [
+        ("manual", "announcement", False, True),
+        ("manual", "result", False, True),
+        ("publish_now", "announcement", False, True),
+        ("skip", "announcement", False, True),
+        ("manual", "announcement", True, False),
+    ],
+)
+def test_late_approval_guidance_explains_immediate_publication(
+    browser, tmp_path, behavior, post_type, published, needs_decision
+):
+    client, factory = browser
+    post_id, job_id = _late_approval_post(factory, tmp_path, behavior=behavior, post_type=post_type)
+    if published:
+        with factory() as db:
+            db.get(PublicationJob, job_id).status = JobStatus.PUBLISHED
+            db.commit()
+    response = client.get(f"/posts/{post_id}")
+    assert response.status_code == 200
+    assert ("Freigeben und Überfälliges jetzt veröffentlichen" in response.text) == needs_decision
+    assert 'name="publish_late_now" value="true"' in response.text
+
+
+def test_late_approval_html_error_can_be_explicitly_approved_now(browser, tmp_path):
+    client, factory = browser
+    post_id, job_id = _late_approval_post(factory, tmp_path)
+    with factory() as db:
+        job = db.get(PublicationJob, job_id)
+        sibling = PublicationJob(
+            post_id=post_id,
+            team_id=job.team_id,
+            instagram_page_id=job.instagram_page_id,
+            kind="story",
+            media_path=job.media_path,
+            status=JobStatus.UNAPPROVED,
+            scheduled_at=datetime.now(timezone.utc) + timedelta(days=1),
+            idempotency_key="late-approval-unselected-story",
+        )
+        db.add(sibling)
+        db.commit()
+        sibling_id = sibling.id
+    token = session_csrf(client)
+    payload = {"csrf_token": token, "job_ids": job_id}
+    # API responses retain the existing status and shape.
+    api_error = client.post(f"/posts/{post_id}/approve", data=payload)
+    assert api_error.status_code == 422
+    assert api_error.json()["detail"] == (
+        "Veröffentlichungszeitpunkt verstrichen; manuelle Entscheidung erforderlich"
+    )
+    error = client.post(f"/posts/{post_id}/approve", data=payload, headers={"accept": "text/html"})
+    assert error.status_code == 422
+    assert error.headers["content-type"].startswith("text/html")
+    assert "Freigabe nicht möglich" in error.text
+    assert "Veröffentlichungszeitpunkt verstrichen" in error.text
+    assert "Zeitpunkt ändern" in error.text
+    assert "VerÃ" not in error.text
+    selected = re.search(rf'<input[^>]*name="job_ids"[^>]*value="{job_id}"[^>]*>', error.text)
+    unselected = re.search(rf'<input[^>]*name="job_ids"[^>]*value="{sibling_id}"[^>]*>', error.text)
+    assert selected and "checked" in selected.group(0)
+    assert unselected and "checked" not in unselected.group(0)
+    with factory() as db:
+        post = db.get(Post, post_id)
+        job = db.get(PublicationJob, job_id)
+        assert post.status == PostStatus.PENDING
+        assert post.approved_version is None
+        assert job.status == JobStatus.UNAPPROVED
+        assert not db.scalar(select(AuditLog).where(AuditLog.action == "post.approved"))
+        original_sibling_time = db.get(PublicationJob, sibling_id).scheduled_at
+    before = datetime.now(timezone.utc).replace(tzinfo=None)
+    approved = client.post(
+        f"/posts/{post_id}/approve",
+        data={**payload, "publish_late_now": "true"},
+        follow_redirects=False,
+    )
+    assert approved.status_code == 303, approved.text
+    with factory() as db:
+        assert db.get(Post, post_id).status == PostStatus.APPROVED
+        assert db.get(PublicationJob, job_id).status == JobStatus.SCHEDULED
+        assert before <= db.get(PublicationJob, job_id).scheduled_at.replace(tzinfo=None)
+        assert db.get(PublicationJob, sibling_id).status == JobStatus.UNAPPROVED
+        assert db.get(PublicationJob, sibling_id).scheduled_at == original_sibling_time
+        audit = db.scalar(select(AuditLog).where(AuditLog.action == "post.approved"))
+        assert audit.details["publish_late_now"] is True
+        assert audit.details["late_behavior"] == "publish_now"
+
+
 def test_app_shell_is_scoped_and_stylesheet_is_revalidated(browser):
     client, _factory = browser
     page = client.get("/games")

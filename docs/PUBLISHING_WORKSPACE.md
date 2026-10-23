@@ -50,6 +50,27 @@ werden intern als UTC behandelt und in der Vereinsoberfläche in der Berliner
 Zeitzone dargestellt. Auch aus SQLite geladene Zeitwerte ohne Zeitzoneninformation
 werden sicher als UTC interpretiert.
 
+## Verspätete Freigaben
+
+Bei der manuellen Freigabe im Dashboard werden ausgewählte Ausgaben mit
+verstrichenem Termin sofort zur Veröffentlichung eingeplant. Ein Hinweis und
+der Button **Freigeben und Überfälliges jetzt veröffentlichen** machen diese
+Entscheidung sichtbar. Zukünftige Termine und abgewählte Ausgaben bleiben
+unverändert. Das gilt auch für gemeinsame Spieltagsbeiträge mit mehreren
+Mannschaften. Über die erweiterte Zeitplanung kann weiterhin ein späterer Termin
+festgelegt werden.
+
+Die ausdrückliche Entscheidung wird als `publish_late_now` auditiert und gilt
+nur für diese Freigabe. Automatische Freigaben sowie API-Aufrufe ohne diese
+Option verwenden weiterhin die Mannschaftsregel `late_approval`. Alle Medien-,
+Versions-, Berechtigungs-, Kanal- und Publishing-Prüfungen bleiben bestehen;
+ein pausierter Publisher wird durch die Freigabe nicht aktiviert.
+
+Fehlgeschlagene Freigaben aus dem Browser bleiben mit einer verständlichen
+Fehlermeldung in der Beitragsprüfung (HTTP 422). Die übermittelte Auswahl bleibt
+erhalten. API-Aufrufe erhalten weiterhin die JSON-Fehlermeldung. Die Anzeige
+ändert keine Freigaben, Termine oder Publishing-Gates allein durch das Öffnen.
+
 ## Performance
 
 Die Präsentationslogik lädt Beiträge, Spiele, Mannschaften und Karussellmedien

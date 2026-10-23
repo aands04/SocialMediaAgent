@@ -1,5 +1,12 @@
 {% extends 'base.html' %}
 {% block content %}
+{% if approval_error %}
+<div class="alert" role="alert">
+  <strong>Freigabe nicht möglich</strong>
+  <p>{{approval_error}}</p>
+  <a href="#publication-schedule">Freigabe und Zeitplanung prüfen</a>
+</div>
+{% endif %}
 {% if aggregate_bundle and item.active_key != 'active' %}
 <div class="notice">Dieser gemeinsame Beitrag wurde nach der Spieltrennung archiviert. Offene Aufträge wurden abgebrochen; veröffentlichte Inhalte bleiben unverändert erhalten. Neue Einzelbeiträge können unter <a href="/games">Spiele</a> erstellt werden.</div>
 {% endif %}
@@ -455,6 +462,15 @@
   {% endif %}
 </section>
 <h2>Freigabe und Zeitplanung</h2>
+{% if late_approval_jobs and can_approve %}
+<div class="alert" role="alert">
+  <strong>Veröffentlichungszeitpunkt verstrichen</strong>
+  <p>Ausgewählte Ausgaben mit verstrichenem Termin werden mit deiner Freigabe sofort zur Veröffentlichung eingeplant.
+    Zukünftige Termine bleiben bestehen. Die Veröffentlichung erfolgt, sobald die üblichen Veröffentlichungsprüfungen erfüllt sind.</p>
+  <p>Du kannst unten Ausgaben abwählen oder über „Zeitpunkt ändern“ einen späteren Termin festlegen.</p>
+  <a href="#publication-schedule">Betroffene Ausgaben und Zeitplanung prüfen</a>
+</div>
+{% endif %}
 {% if can_approve %}<form id="approve-publication-jobs" method="post" action="/posts/{{item.id}}/approve">
   <input type="hidden" name="csrf_token" value="{{csrf}}">
   <input type="hidden" name="channel_selection_submitted" value="true">
@@ -463,7 +479,7 @@
     <p>Instagram wird über die unten ausgewählten Feed-, Karussell- und Story-Aufträge gesteuert. Weitere Kanäle kannst du für diese Freigabe einzeln abwählen.</p>
     {% if planned_channel_connections %}
       {% for connection in planned_channel_connections %}
-      <label><input type="checkbox" name="channel_connection_ids" value="{{connection.id}}" checked>
+      <label><input type="checkbox" name="channel_connection_ids" value="{{connection.id}}" {% if approval_channel_ids is none or connection.id in approval_channel_ids %}checked{% endif %}>
         {{'Facebook' if connection.channel_type=='facebook' else 'WhatsApp'}} · {{connection.display_name}}
         <small>{{'Veröffentlichung' if connection.channel_type=='facebook' else 'Versand an Empfänger mit gültiger Zustimmung'}}</small>
       </label>
@@ -471,12 +487,12 @@
     {% else %}<p class="notice">Für diese Mannschaft und diesen Beitragstyp sind keine zusätzlichen Kanäle aktiviert.</p>{% endif %}
   </fieldset>
 </form>{% endif %}
-{% if can_approve %}<div id="approval" class="approval-sticky"><div><strong>Bereit zur Veröffentlichung</strong><span>{{open_publication_count}} offen · {{published_publication_count}} bereits veröffentlicht</span></div><button form="approve-publication-jobs" class="approve">Ausgewählte Aufträge freigeben</button></div>{% endif %}
-<details class="technical-review publication-job-details">
+{% if can_approve %}<div id="approval" class="approval-sticky"><div><strong>{{'Überfällige Ausgaben werden sofort eingeplant' if late_approval_jobs else 'Bereit zur Veröffentlichung'}}</strong><span>{{open_publication_count}} offen · {{published_publication_count}} bereits veröffentlicht</span></div><button form="approve-publication-jobs" class="approve" name="publish_late_now" value="true">{{'Freigeben und Überfälliges jetzt veröffentlichen' if late_approval_jobs else 'Ausgewählte Aufträge freigeben'}}</button></div>{% endif %}
+<details id="publication-schedule" class="technical-review publication-job-details" {% if approval_error %}open{% endif %}>
 <summary>Technische Aufträge und erweiterte Zeitplanung anzeigen</summary>
 <table><tr><th>Freigeben</th><th>Ziel</th><th>Typ</th>{% if aggregate_bundle %}<th>Mannschaft</th>{% endif %}<th>Zeitpunkt</th><th>Status</th><th>Eingefrorene Versionen</th><th>Medienprüfung</th></tr>
   {% for x in jobs %}<tr class="{% if late_jobs.get(x.id) %}late{% endif %}">
-    <td>{% if can_approve and x.status.value!='published' %}<input form="approve-publication-jobs" type="checkbox" name="job_ids" value="{{x.id}}" checked>{% else %}—{% endif %}</td>
+    <td>{% if can_approve and x.status.value!='published' %}<input form="approve-publication-jobs" type="checkbox" name="job_ids" value="{{x.id}}" {% if approval_job_ids is none or x.id in approval_job_ids %}checked{% endif %}>{% else %}—{% endif %}</td>
     <td>{% set presented=publication_by_job.get(x.id) %}{% if presented %}<strong>{{presented.channel.label}}</strong><small>{{presented.target}}</small>{% else %}<span class="badge">Technisches Altziel</span>{% endif %}</td>
     <td>{% if x.kind=='feed' %}Feed{% elif x.kind=='story' %}Story{% elif x.kind=='carousel' %}Karussell{% else %}{{x.kind}}{% endif %}</td>
     {% if aggregate_bundle %}<td>{{job_teams[x.id].display_name}}</td>{% endif %}
