@@ -205,9 +205,19 @@ def test_explicit_late_approval_keeps_future_times_and_schedules_overdue_now(
 
 
 @pytest.mark.parametrize(
-    "status", [JobStatus.PUBLISHED, JobStatus.PUBLISHING, JobStatus.UNCERTAIN, JobStatus.RETRY]
+    "status",
+    [
+        JobStatus.PUBLISHED,
+        JobStatus.PUBLISHING,
+        JobStatus.UNCERTAIN,
+        JobStatus.RETRY,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+        JobStatus.SKIPPED,
+    ],
 )
-def test_explicit_late_approval_does_not_restart_processed_jobs(db, status):
+@pytest.mark.parametrize("publish_late_now", [False, True])
+def test_explicit_late_approval_does_not_restart_processed_jobs(db, status, publish_late_now):
     from app.approvals.service import ApprovalError, approve
 
     _team, user, post, jobs = _graph(db)
@@ -215,6 +225,65 @@ def test_explicit_late_approval_does_not_restart_processed_jobs(db, status):
     original_time = jobs[0].scheduled_at
     db.commit()
     with pytest.raises(ApprovalError, match="nicht erneut eingeplant"):
-        approve(db, post, user, publish_late_now=True)
+        approve(db, post, user, publish_late_now=publish_late_now)
     assert jobs[0].status == status
     assert jobs[0].scheduled_at == original_time
+
+
+@pytest.mark.parametrize("field", ["attempts", "locked_at", "platform_id", "published_at"])
+def test_approval_checks_processing_evidence_even_with_unapproved_status(db, field):
+    from app.approvals.service import ApprovalError, approval_job_blockers, approve
+
+    _team, user, post, jobs = _graph(db)
+    job = jobs[0]
+    job.status = JobStatus.UNAPPROVED
+    value = {"attempts": 1, "platform_id": "existing-media"}.get(field, datetime.now(timezone.utc))
+    setattr(job, field, value)
+    db.commit()
+    assert job.id in approval_job_blockers(db, jobs)
+    with pytest.raises(ApprovalError, match="nicht erneut eingeplant"):
+        approve(db, post, user, [job.id])
+    assert job.status == JobStatus.UNAPPROVED
+    assert getattr(job, field) == value
+
+
+def test_approval_rejects_unknown_selection_before_freezing_versions(db):
+    from app.approvals.service import ApprovalError, approve
+
+    _team, user, post, jobs = _graph(db)
+    with pytest.raises(ApprovalError, match="Ungültige Veröffentlichungsauswahl"):
+        approve(db, post, user, [jobs[0].id, "foreign-job"])
+    assert jobs[0].text_version_id is None
+
+
+@pytest.mark.parametrize(
+    ("phase", "active_key"), [("uncertain", None), ("completed", "active-job")]
+)
+def test_approval_blocks_open_meta_attempt_even_without_job_processing_flags(db, phase, active_key):
+    from app.approvals.service import ApprovalError, approval_job_blockers, approve
+    from app.models import InstagramConnection, MetaPublishingAttempt
+
+    _team, user, post, jobs = _graph(db)
+    job = jobs[0]
+    connection = InstagramConnection(instagram_page_id=post.instagram_page_id)
+    db.add(connection)
+    db.flush()
+    attempt = MetaPublishingAttempt(
+        publication_job_id=job.id,
+        connection_id=connection.id,
+        target_account_id="test-account",
+        media_kind="feed",
+        local_media_version=1,
+        media_path=job.media_path,
+        file_checksum="a" * 64,
+        started_by=user.id,
+        phase=phase,
+        active_key=active_key,
+    )
+    db.add(attempt)
+    db.commit()
+    assert job.id in approval_job_blockers(db, jobs)
+    with pytest.raises(ApprovalError, match="nicht erneut eingeplant"):
+        approve(db, post, user, [job.id])
+    assert attempt.phase == phase
+    assert attempt.active_key == active_key

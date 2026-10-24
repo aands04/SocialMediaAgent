@@ -216,7 +216,96 @@ def test_late_approval_guidance_explains_immediate_publication(
     response = client.get(f"/posts/{post_id}")
     assert response.status_code == 200
     assert ("Freigeben und Überfälliges jetzt veröffentlichen" in response.text) == needs_decision
-    assert 'name="publish_late_now" value="true"' in response.text
+    assert ('name="publish_late_now" value="true"' in response.text) == (not published)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [JobStatus.UNCERTAIN, JobStatus.RETRY, JobStatus.FAILED, JobStatus.PUBLISHED],
+)
+def test_approval_form_excludes_processed_jobs_and_approves_only_open_output(
+    browser, tmp_path, status
+):
+    client, factory = browser
+    post_id, blocked_id = _late_approval_post(factory, tmp_path)
+    with factory() as db:
+        blocked = db.get(PublicationJob, blocked_id)
+        blocked.status = status
+        blocked.attempts = 1
+        blocked_time = blocked.scheduled_at
+        story = PublicationJob(
+            post_id=post_id,
+            team_id=blocked.team_id,
+            instagram_page_id=blocked.instagram_page_id,
+            kind="story",
+            media_path=blocked.media_path,
+            status=JobStatus.UNAPPROVED,
+            scheduled_at=datetime.now(timezone.utc) + timedelta(days=1),
+            idempotency_key="approval-open-story",
+        )
+        db.add(story)
+        db.commit()
+        story_id = story.id
+    response = client.get(f"/posts/{post_id}")
+    checked = re.findall(r'<input[^>]*name="job_ids"[^>]*>', response.text)
+    assert len(checked) == 1
+    assert story_id in checked[0] and "checked" in checked[0]
+    assert "Überfällige Ausgaben werden sofort eingeplant" not in response.text
+    assert "Zustellverlauf prüfen" in response.text
+    approved = client.post(
+        f"/posts/{post_id}/approve",
+        data={
+            "csrf_token": session_csrf(client),
+            "job_selection_submitted": "true",
+            "job_ids": story_id,
+            "publish_late_now": "true",
+        },
+        follow_redirects=False,
+    )
+    assert approved.status_code == 303, approved.text
+    with factory() as db:
+        assert db.get(PublicationJob, story_id).status == JobStatus.SCHEDULED
+        blocked = db.get(PublicationJob, blocked_id)
+        assert blocked.status == status
+        assert blocked.scheduled_at == blocked_time
+        assert blocked.attempts == 1
+        audit = db.scalar(select(AuditLog).where(AuditLog.action == "post.approved"))
+        assert audit.details["jobs"] == [story_id]
+
+
+def test_empty_approval_selection_does_not_select_every_job(browser, tmp_path):
+    client, factory = browser
+    post_id, job_id = _late_approval_post(factory, tmp_path)
+    response = client.post(
+        f"/posts/{post_id}/approve",
+        data={
+            "csrf_token": session_csrf(client),
+            "job_selection_submitted": "true",
+            "publish_late_now": "true",
+        },
+        headers={"accept": "text/html"},
+    )
+    assert response.status_code == 422
+    assert "Bitte mindestens eine freigabefähige Ausgabe auswählen" in response.text
+    checkbox = re.search(rf'<input[^>]*name="job_ids"[^>]*value="{job_id}"[^>]*>', response.text)
+    assert checkbox and "checked" not in checkbox.group(0)
+    with factory() as db:
+        assert db.get(PublicationJob, job_id).status == JobStatus.UNAPPROVED
+        assert not db.scalar(select(AuditLog).where(AuditLog.action == "post.approved"))
+
+
+def test_only_uncertain_jobs_show_history_guidance_instead_of_approval_button(browser, tmp_path):
+    client, factory = browser
+    post_id, job_id = _late_approval_post(factory, tmp_path)
+    with factory() as db:
+        db.get(PublicationJob, job_id).status = JobStatus.UNCERTAIN
+        db.commit()
+    response = client.get(f"/posts/{post_id}")
+    assert response.status_code == 200
+    assert "Aktuell gibt es keine freigabefähigen Ausgaben." in response.text
+    assert "Zustellverlauf prüfen" in response.text
+    assert 'name="job_ids"' not in response.text
+    assert 'name="publish_late_now"' not in response.text
 
 
 def test_late_approval_html_error_can_be_explicitly_approved_now(browser, tmp_path):

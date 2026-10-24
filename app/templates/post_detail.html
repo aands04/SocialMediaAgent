@@ -31,7 +31,7 @@
     <div><dt>Freigabe</dt><dd>{{status_labels.get(item.status.value,item.status.value)}}</dd></div>
   </dl>
   <div class="review-actions" aria-label="Beitragsaktionen">
-    {% if can_approve %}<a class="button approve" href="#approval">Beitrag freigeben</a>{% endif %}
+    {% if can_approve and approvable_job_ids %}<a class="button approve" href="#approval">Beitrag freigeben</a>{% endif %}
     {% if not is_manual and can_generate %}<a class="button" href="#ai-review">Mit KI überarbeiten</a>{% endif %}
     <a class="button secondary" href="#caption">Text bearbeiten</a>
     <a class="button secondary" href="#publications">Veröffentlichungszeiten</a>
@@ -471,8 +471,19 @@
   <a href="#publication-schedule">Betroffene Ausgaben und Zeitplanung prüfen</a>
 </div>
 {% endif %}
-{% if can_approve %}<form id="approve-publication-jobs" method="post" action="/posts/{{item.id}}/approve">
+{% if approval_blockers and can_approve %}
+<div class="notice">
+  Bereits verarbeitete, ungeklärte oder beendete Aufträge können nicht erneut freigegeben werden.
+  Noch freigabefähige Ausgaben kannst du getrennt auswählen.
+  <a href="/publications">Zustellverlauf prüfen</a>
+</div>
+{% endif %}
+{% if can_approve and not approvable_job_ids %}
+<p class="notice">Aktuell gibt es keine freigabefähigen Ausgaben.</p>
+{% endif %}
+{% if can_approve and approvable_job_ids %}<form id="approve-publication-jobs" method="post" action="/posts/{{item.id}}/approve">
   <input type="hidden" name="csrf_token" value="{{csrf}}">
+  <input type="hidden" name="job_selection_submitted" value="true">
   <input type="hidden" name="channel_selection_submitted" value="true">
   <fieldset class="channel-approval-selection">
     <legend>Geplante zusätzliche Kanäle</legend>
@@ -487,12 +498,12 @@
     {% else %}<p class="notice">Für diese Mannschaft und diesen Beitragstyp sind keine zusätzlichen Kanäle aktiviert.</p>{% endif %}
   </fieldset>
 </form>{% endif %}
-{% if can_approve %}<div id="approval" class="approval-sticky"><div><strong>{{'Überfällige Ausgaben werden sofort eingeplant' if late_approval_jobs else 'Bereit zur Veröffentlichung'}}</strong><span>{{open_publication_count}} offen · {{published_publication_count}} bereits veröffentlicht</span></div><button form="approve-publication-jobs" class="approve" name="publish_late_now" value="true">{{'Freigeben und Überfälliges jetzt veröffentlichen' if late_approval_jobs else 'Ausgewählte Aufträge freigeben'}}</button></div>{% endif %}
+{% if can_approve and approvable_job_ids %}<div id="approval" class="approval-sticky"><div><strong>{{'Überfällige Ausgaben werden sofort eingeplant' if late_approval_jobs else 'Bereit zur Veröffentlichung'}}</strong><span>{{approvable_job_ids|length}} freigabefähig · {{published_publication_count}} bereits veröffentlicht</span></div><button form="approve-publication-jobs" class="approve" name="publish_late_now" value="true">{{'Freigeben und Überfälliges jetzt veröffentlichen' if late_approval_jobs else 'Ausgewählte Aufträge freigeben'}}</button></div>{% endif %}
 <details id="publication-schedule" class="technical-review publication-job-details" {% if approval_error %}open{% endif %}>
 <summary>Technische Aufträge und erweiterte Zeitplanung anzeigen</summary>
 <table><tr><th>Freigeben</th><th>Ziel</th><th>Typ</th>{% if aggregate_bundle %}<th>Mannschaft</th>{% endif %}<th>Zeitpunkt</th><th>Status</th><th>Eingefrorene Versionen</th><th>Medienprüfung</th></tr>
   {% for x in jobs %}<tr class="{% if late_jobs.get(x.id) %}late{% endif %}">
-    <td>{% if can_approve and x.status.value!='published' %}<input form="approve-publication-jobs" type="checkbox" name="job_ids" value="{{x.id}}" {% if approval_job_ids is none or x.id in approval_job_ids %}checked{% endif %}>{% else %}—{% endif %}</td>
+    <td>{% if can_approve and x.id in approvable_job_ids %}<input form="approve-publication-jobs" type="checkbox" name="job_ids" value="{{x.id}}" {% if approval_job_ids is none or x.id in approval_job_ids %}checked{% endif %}>{% elif approval_blockers.get(x.id) %}<small>{{approval_blockers[x.id]}}</small>{% else %}—{% endif %}</td>
     <td>{% set presented=publication_by_job.get(x.id) %}{% if presented %}<strong>{{presented.channel.label}}</strong><small>{{presented.target}}</small>{% else %}<span class="badge">Technisches Altziel</span>{% endif %}</td>
     <td>{% if x.kind=='feed' %}Feed{% elif x.kind=='story' %}Story{% elif x.kind=='carousel' %}Karussell{% else %}{{x.kind}}{% endif %}</td>
     {% if aggregate_bundle %}<td>{{job_teams[x.id].display_name}}</td>{% endif %}
