@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterator
 from uuid import uuid4
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.teams.service import team_media_prefix
 
@@ -84,17 +84,31 @@ def validate_player_image(
                 frame_count = getattr(probe, "n_frames", 1)
                 width, height = probe.size
                 probe.verify()
-    except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombWarning) as exc:
+    except (
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+        Image.DecompressionBombWarning,
+        Image.DecompressionBombError,
+    ) as exc:
         raise PlayerImageUploadError(f"{name}: keine technisch lesbare Bilddatei") from exc
 
-    if image_format not in _FORMATS:
-        raise PlayerImageUploadError(f"{name}: nur JPG, PNG und WebP sind erlaubt")
-    extensions, mime_types, canonical_extension, canonical_mime = _FORMATS[image_format]
+    # JPEG files can contain MPF auxiliary pictures and be detected as MPO.
+    # Only their primary photograph is used; never store the multi-picture file.
+    is_mpo = image_format == "MPO"
+    upload_format = "JPEG" if is_mpo else image_format
+    if upload_format not in _FORMATS:
+        raise PlayerImageUploadError(
+            f"{name}: nur JPG/JPEG, PNG und WebP sind erlaubt "
+            f"(erkannter Bildinhalt: {image_format})"
+        )
+    extensions, mime_types, canonical_extension, canonical_mime = _FORMATS[upload_format]
     if extension not in extensions:
         raise PlayerImageUploadError(f"{name}: Dateiendung passt nicht zum Bildinhalt")
     if (content_type or "").lower() not in mime_types:
         raise PlayerImageUploadError(f"{name}: MIME-Type passt nicht zum Bildinhalt")
-    if frame_count != 1:
+    if frame_count != 1 and not is_mpo:
         raise PlayerImageUploadError(f"{name}: animierte Bilder sind nicht erlaubt")
     if min(width, height) < MIN_PLAYER_IMAGE_EDGE:
         raise PlayerImageUploadError(
@@ -104,6 +118,32 @@ def validate_player_image(
         raise PlayerImageUploadError(
             f"{name}: maximale Bildkante ist {MAX_PLAYER_IMAGE_EDGE} Pixel"
         )
+
+    if is_mpo:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(BytesIO(content)) as source:
+                    source.seek(0)
+                    primary = ImageOps.exif_transpose(source).convert("RGB")
+                    output = BytesIO()
+                    primary.save(
+                        output,
+                        format="JPEG",
+                        quality=95,
+                        icc_profile=source.info.get("icc_profile"),
+                    )
+        except (
+            OSError,
+            SyntaxError,
+            ValueError,
+            Image.DecompressionBombWarning,
+            Image.DecompressionBombError,
+        ) as exc:
+            raise PlayerImageUploadError(f"{name}: keine technisch lesbare Bilddatei") from exc
+        # Recheck size and dimensions after conversion; checksum and storage
+        # accounting must refer to the actual bytes that will be persisted.
+        return validate_player_image(name, canonical_mime, output.getvalue())
 
     player_name = re.sub(r"[_-]+", " ", Path(name).stem).strip()[:160]
     return ValidatedPlayerImage(

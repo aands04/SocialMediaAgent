@@ -108,6 +108,16 @@ Upgrade/Downgrade, Compose-Konfiguration und `git diff --check`.
 
 ## Speicher und Quoten
 
+JPG und JPEG werden unabhängig von der Großschreibung der Dateiendung gleich
+behandelt. JPEG-Dateien, die die Bildbibliothek wegen eingebetteter Zusatzbilder
+als MPO erkennt, werden nach Prüfung von Endung, MIME-Typ und Bildmaßen auf ihr
+Hauptbild reduziert und als gewöhnliches JPEG gespeichert. Dabei wird die
+EXIF-Ausrichtung angewendet; Zusatzbilder und EXIF-Metadaten werden verworfen.
+Das Hauptbild wird mit JPEG-Qualität 95 neu kodiert, ein vorhandenes ICC-Farbprofil
+bleibt erhalten. Normale JPEG-Dateien bleiben unverändert. Größenlimit,
+Prüfsumme, Duplikaterkennung und Speicherabrechnung beziehen sich anschließend
+auf die gespeicherte Datei. Animierte PNG-/WebP-Dateien bleiben ausgeschlossen.
+
 Neue Dashboard-Uploads reservieren vor dem Schreiben Speicher im bestehenden
 `StorageLedgerEntry`. Nach erfolgreicher Bildprüfung werden tatsächliche Größe,
 Prüfsumme, MIME-Typ und der tenantgebundene Objektschlüssel als
