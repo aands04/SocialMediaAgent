@@ -12,6 +12,21 @@ Die operative Arbeit mit Beiträgen ist von der technischen Zustellung getrennt:
 
 Damit ist `/posts` die zentrale operative Ansicht. `/publications` ist bewusst keine zweite Arbeitsliste.
 
+## Freigabeauswahl
+
+Die Beitragsprüfung bietet nur noch nicht verarbeitete Aufträge zur Freigabe an.
+Bereits veröffentlichte, laufende, ungeklärte oder beendete Aufträge bleiben mit
+einer Begründung sichtbar; der Zustellverlauf ist unter `/publications` erreichbar.
+Noch freigabefähige Ausgaben können getrennt freigegeben werden. Ohne solche
+Ausgaben wird keine Freigabeschaltfläche angezeigt.
+
+Formular und Freigabeservice verwenden dieselbe Prüfung von Auftragsstatus,
+Verarbeitungsversuchen, Sperre, Plattform-ID und offenen Meta-Vorgängen. Die
+Prüfung gilt auch ohne die Option zum sofortigen Einplanen überfälliger Ausgaben.
+Eine ausdrücklich leere Formularauswahl wird abgelehnt und niemals als Auswahl
+aller Aufträge behandelt. Ungeklärte Vorgänge werden dabei weder zurückgesetzt
+noch erneut gesendet.
+
 ## Zentrale Darstellungslogik
 
 `app/publishing/presentation.py` übersetzt die technischen Zustände der

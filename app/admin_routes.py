@@ -15,7 +15,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.approvals.service import ApprovalError, approve_matchday_bundle, edit_text
+from app.approvals.service import (
+    ApprovalError,
+    approval_job_blockers,
+    approve_matchday_bundle,
+    edit_text,
+)
 from app.auth.service import allowed, hash_password, normalize_email, validate_new_password
 from app.branding.service import (
     STANDARD_FONTS,
@@ -4856,9 +4861,9 @@ def post_detail(
             and not job.locked_at
             and job.id not in active_attempt_job_ids
         )
-    late_approval_jobs = [
-        job for job in jobs if late_jobs[job.id] and job.status in EDITABLE_JOB_STATUSES
-    ]
+    approval_blockers = approval_job_blockers(db, jobs)
+    approvable_job_ids = {job.id for job in jobs if job.id not in approval_blockers}
+    late_approval_jobs = [job for job in jobs if late_jobs[job.id] and job.id in approvable_job_ids]
     archived_matchday = aggregate_bundle and item.active_key != "active"
     can_edit_all = not archived_matchday and all(
         allowed(db, current, "edit_post", member.team_id) for member in bundle_posts
@@ -5313,6 +5318,8 @@ def post_detail(
         carousel_items=carousel_items,
         late_jobs=late_jobs,
         late_approval_jobs=late_approval_jobs,
+        approval_blockers=approval_blockers,
+        approvable_job_ids=approvable_job_ids,
         approval_error=getattr(request.state, "approval_error", None),
         approval_job_ids=getattr(request.state, "approval_job_ids", None),
         approval_channel_ids=getattr(request.state, "approval_channel_ids", None),
@@ -6384,6 +6391,7 @@ def approve_post(
     request: Request,
     csrf_token_value: str = Form(alias="csrf_token"),
     job_ids: list[str] = Form(default=[]),
+    job_selection_submitted: bool = Form(default=False),
     channel_connection_ids: list[str] = Form(default=[]),
     channel_selection_submitted: bool = Form(default=False),
     publish_late_now: bool = Form(default=False),
@@ -6399,7 +6407,7 @@ def approve_post(
             db,
             item,
             current,
-            job_ids or None,
+            job_ids if job_selection_submitted else job_ids or None,
             channel_connection_ids if channel_selection_submitted else None,
             publish_late_now=publish_late_now,
         )
@@ -6407,7 +6415,7 @@ def approve_post(
         db.rollback()
         if "text/html" in request.headers.get("accept", ""):
             request.state.approval_error = str(e)
-            request.state.approval_job_ids = job_ids or None
+            request.state.approval_job_ids = job_ids if job_selection_submitted else job_ids or None
             request.state.approval_channel_ids = (
                 channel_connection_ids if channel_selection_submitted else None
             )

@@ -30,6 +30,38 @@ class ApprovalError(ValueError):
     pass
 
 
+def approval_job_blockers(db: Session, jobs: list[PublicationJob]) -> dict[str, str]:
+    """Share the processing guard between the approval form and every approval path."""
+    open_attempt_ids = set(
+        db.scalars(
+            select(MetaPublishingAttempt.publication_job_id).where(
+                MetaPublishingAttempt.publication_job_id.in_([job.id for job in jobs]),
+                or_(
+                    MetaPublishingAttempt.active_key.is_not(None),
+                    MetaPublishingAttempt.phase.notin_(["completed", "failed"]),
+                ),
+            )
+        )
+    )
+    blockers = {}
+    for job in jobs:
+        if job.status == JobStatus.PUBLISHED or job.published_at or job.platform_id:
+            blockers[job.id] = "Bereits veröffentlicht; keine erneute Freigabe möglich."
+        elif (
+            job.status in {JobStatus.PUBLISHING, JobStatus.RETRY, JobStatus.UNCERTAIN}
+            or job.locked_at
+            or job.attempts
+            or job.id in open_attempt_ids
+        ):
+            blockers[job.id] = (
+                "Plattformverarbeitung bereits begonnen oder ungeklärt. "
+                "Zustellverlauf unter Veröffentlichungen prüfen."
+            )
+        elif job.status in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.SKIPPED}:
+            blockers[job.id] = "Auftrag beendet; keine erneute Freigabe möglich."
+    return blockers
+
+
 def late_approval_behavior(post: Post, team: Team) -> str:
     if (
         post.post_type == "result"
@@ -62,30 +94,15 @@ def approve(
     page = db.get(InstagramPage, post.instagram_page_id) if post.instagram_page_id else None
     team = db.get(Team, post.team_id)
     jobs = list(db.scalars(select(PublicationJob).where(PublicationJob.post_id == post.id)))
+    if selected_jobs is not None and not set(selected_jobs).issubset({j.id for j in jobs}):
+        raise ApprovalError("Ungültige Veröffentlichungsauswahl")
     selected = [j for j in jobs if selected_jobs is None or j.id in selected_jobs]
-    if publish_late_now:
-        processing = any(
-            job.status
-            in {JobStatus.PUBLISHED, JobStatus.PUBLISHING, JobStatus.RETRY, JobStatus.UNCERTAIN}
-            or job.published_at
-            or job.platform_id
-            or job.locked_at
-            or job.attempts
-            for job in selected
+    if not selected:
+        raise ApprovalError("Bitte mindestens eine freigabefähige Ausgabe auswählen")
+    if approval_job_blockers(db, selected):
+        raise ApprovalError(
+            "Bereits verarbeitete oder ungeklärte Veröffentlichungen dürfen nicht erneut eingeplant werden"
         )
-        open_attempt = db.scalar(
-            select(MetaPublishingAttempt.id).where(
-                MetaPublishingAttempt.publication_job_id.in_([job.id for job in selected]),
-                or_(
-                    MetaPublishingAttempt.active_key.is_not(None),
-                    MetaPublishingAttempt.phase.notin_(["completed", "failed"]),
-                ),
-            )
-        )
-        if processing or open_attempt:
-            raise ApprovalError(
-                "Bereits verarbeitete oder ungeklärte Veröffentlichungen dürfen nicht erneut eingeplant werden"
-            )
     from app.posts.media_versions import freeze_publication_versions
 
     # Resolve auto-latest/manual selections before validating and freezing the
@@ -301,7 +318,9 @@ def approve_matchday_bundle(
         primary, members, visible_jobs, _job_posts = matchday_bundle_jobs(db, primary)
         visible_ids = {job.id for job in visible_jobs}
         selected_ids = set(selected_jobs) if selected_jobs is not None else visible_ids
-        if not selected_ids or not selected_ids.issubset(visible_ids):
+        if not selected_ids:
+            raise ApprovalError("Bitte mindestens eine freigabefähige Ausgabe auswählen")
+        if not selected_ids.issubset(visible_ids):
             raise ApprovalError("Ungültige Auswahl für den gemeinsamen Spieltagsbeitrag")
         for member in members:
             member_job_ids = [
