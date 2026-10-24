@@ -1,3 +1,4 @@
+import hashlib
 import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -615,7 +616,13 @@ def test_dashboard_upload_respects_club_storage_limit(browser, tmp_path, monkeyp
     assert not list(upload_root.rglob("*.png"))
 
 
-def test_dashboard_upload_and_delete_are_recorded_in_storage_ledger(browser, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "image_format,filename,mime_type",
+    [("PNG", "mannschaft.png", "image/png"), ("MPO", "IMG_7748.jpeg", "image/jpeg")],
+)
+def test_dashboard_upload_and_delete_are_recorded_in_storage_ledger(
+    browser, tmp_path, monkeypatch, image_format, filename, mime_type
+):
     client, factory = browser
     upload_root = tmp_path / "ledger-uploads"
     import app.admin_routes as admin_routes
@@ -627,12 +634,15 @@ def test_dashboard_upload_and_delete_are_recorded_in_storage_ledger(browser, tmp
         team_id = team.id
 
     payload = BytesIO()
-    Image.new("RGB", (640, 640), color=(18, 99, 42)).save(payload, format="PNG")
+    options = {}
+    if image_format == "MPO":
+        options.update(save_all=True, append_images=[Image.new("RGB", (320, 320), "gray")])
+    Image.new("RGB", (640, 640), color=(18, 99, 42)).save(payload, format=image_format, **options)
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', client.get("/teams").text).group(1)
     response = client.post(
         f"/media/{team_id}/upload",
         data={"csrf_token": csrf, "media_category": "team_photo"},
-        files={"files": ("mannschaft.png", payload.getvalue(), "image/png")},
+        files={"files": (filename, payload.getvalue(), mime_type)},
         follow_redirects=False,
     )
     assert response.status_code == 303
@@ -651,6 +661,28 @@ def test_dashboard_upload_and_delete_are_recorded_in_storage_ledger(browser, tmp
         club_id = asset.club_id
         source = upload_root / asset.relative_path
         assert source.is_file()
+        assert asset.filename == filename
+        assert asset.mime_type == mime_type
+        assert asset.size == len(source.read_bytes())
+        assert asset.checksum == hashlib.sha256(source.read_bytes()).hexdigest()
+        with Image.open(source) as image:
+            assert image.format == ("JPEG" if image_format == "MPO" else image_format)
+            assert getattr(image, "n_frames", 1) == 1
+
+    preview = client.get(f"/media/{asset_id}/preview")
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] == mime_type
+
+    duplicate = client.post(
+        f"/media/{team_id}/upload",
+        data={"csrf_token": csrf, "media_category": "team_photo"},
+        files={"files": (filename, payload.getvalue(), mime_type)},
+        follow_redirects=False,
+    )
+    assert duplicate.status_code == 303
+    with factory() as db:
+        assert db.query(MediaAsset).filter_by(team_id=team_id).count() == 1
+        assert db.query(StorageLedgerEntry).filter_by(club_id=club_id).count() == 1
 
     response = client.post(
         f"/media/{asset_id}/delete",
