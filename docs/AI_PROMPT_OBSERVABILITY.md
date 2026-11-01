@@ -55,6 +55,15 @@ keine Garantie für pixelgenaue Erhaltung und bleibt visuell zu prüfen; für lo
 
 ## Exakt versandte Prompts
 
+Bei KI-Ergebnismeldungen wird zuerst die vorhandene Ankündigungsgrafik desselben
+Spiels und derselben Mannschaft im aktuellen Verein aufgelöst. Sie dient als
+einzige Bildreferenz; ein weiteres unverbrauchtes Spielerfoto wird dafür weder
+verlangt noch reserviert. Ergebnis-Storys verwenden die erste verfügbare
+Ankündigungs-Story, ersatzweise die Ankündigungs-Feedgrafik. Die Originalgrafiken
+bleiben unverändert; die Ergebnisbilder werden als eigene Ausgaben gespeichert.
+Ohne verwendbare Ankündigungs- oder Erinnerungsgrafik gelten weiterhin die
+normalen Regeln für die Fotoauswahl und die KI-Bilderzeugung.
+
 Ergebnisbilder erhalten in Feed und Story eine große Hauptüberschrift:
 **HEIMSIEG!**, **AUSWÄRTSSIEG!**, **HEIMNIEDERLAGE**,
 **AUSWÄRTSNIEDERLAGE** oder **UNENTSCHIEDEN** aus Sicht der eigenen
