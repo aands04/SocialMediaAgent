@@ -710,25 +710,37 @@ def create_post(
     logos = logo_snapshot or frozen_logo_set(db, game, team)
     if not logos.get("team"):
         warnings.append("Eigenes Mannschaftslogo fehlt; der Beitrag darf nicht freigegeben werden")
+    # Result edits use the finished pre-match artwork as their sole reference.
+    # Resolve it before selecting a photo: the announcement's original photo is
+    # normally already consumed, and an unrelated fresh photo would be wasted.
+    facts = _facts(db, game, team, None, post_type, logos)
+    uses_result_reference = bool(
+        getattr(renderer, "is_ai", False)
+        and post_type == "result"
+        and facts.get("result_layout_reference")
+    )
     asset = (
         db.get(MediaAsset, existing.media_asset_id)
         if resuming and existing.media_asset_id
-        else reserve_image(
+        else None
+    )
+    if not asset and not uses_result_reference:
+        asset = reserve_image(
             db,
             team.id,
             game.id,
             post_type,
             allow_manual_retry_reuse=allow_manual_retry_reuse,
         )
-    )
     if asset and (asset.club_id != team.club_id or asset.team_id != team.id):
         raise ValueError("Das reservierte Spielerbild gehört nicht zu diesem Beitrag")
-    if not asset:
+    if not asset and not uses_result_reference:
         warnings.append("Kein unverbrauchtes Spielerbild; neutrale Vorlage verwendet")
-    if getattr(renderer, "is_ai", False) and not asset:
-        raise ValueError("Für eine KI-Grafik ist ein unverbrauchtes Spielerbild erforderlich")
+        if getattr(renderer, "is_ai", False):
+            raise ValueError("Für eine KI-Grafik ist ein unverbrauchtes Spielerbild erforderlich")
     feed_design = _design(db, team.feed_template, post_type, "feed")
-    facts = _facts(db, game, team, asset, post_type, logos)
+    facts["player_image"] = _media_path(asset)
+    facts["player_media_asset_id"] = asset.id if asset else None
     feed_facts = _facts_for_media(facts, "feed")
     text_generation_mode = text_generation_mode_override or configured_text_generation_mode(
         team.rules, post_type

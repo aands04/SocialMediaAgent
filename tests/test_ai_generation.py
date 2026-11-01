@@ -1,9 +1,11 @@
 import hashlib
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
+from sqlalchemy import select
 
 from app.config import Settings
 from app.imagegen.service import (
@@ -18,6 +20,7 @@ from app.models import (
     Game,
     InstagramPage,
     MediaAsset,
+    MediaUsageHistory,
     Post,
     PostStatus,
     PromptTemplate,
@@ -881,7 +884,8 @@ def test_ai_renderer_refuses_missing_verified_team_logo(tmp_path):
         )
 
 
-def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
+@pytest.fixture
+def ai_post_setup(db, tmp_path, monkeypatch):
     media = tmp_path / "media"
     uploads = tmp_path / "uploads"
     media.mkdir()
@@ -971,12 +975,17 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
         ]
     )
     db.commit()
+    return game, team, AIImageRenderer(tmp_path / "out", media, uploads, FakeImageProvider())
+
+
+def test_post_creation_freezes_image_prompt_versions(db, ai_post_setup):
+    game, team, renderer = ai_post_setup
     post = create_post(
         db,
         game,
         team,
         FixtureTextGenerator(),
-        AIImageRenderer(tmp_path / "out", media, uploads, FakeImageProvider()),
+        renderer,
     )
     assert post.design_snapshot["mode"]["image"] == "openai"
     assert post.design_snapshot["prompts"]["feed"]["name"] == "default-image-feed"
@@ -993,6 +1002,96 @@ def test_post_creation_freezes_image_prompt_versions(db, tmp_path, monkeypatch):
     assert post.design_snapshot["stories"][0]["prompt"]["name"] == "default-image-story"
     assert post.design_snapshot["media"]["feed"]["logo_integration"]["mode"] == "ai-reference"
     assert Image.open(post.feed_path).size == (1080, 1350)
+
+
+@pytest.mark.parametrize("spare_photo", [False, True])
+@pytest.mark.parametrize("announcement_story", [False, True])
+def test_result_creation_reuses_announcement_without_consuming_photo(
+    db, ai_post_setup, spare_photo, announcement_story
+):
+    game, team, renderer = ai_post_setup
+    announcement = create_post(db, game, team, FixtureTextGenerator(), renderer)
+    asset = db.get(MediaAsset, announcement.media_asset_id)
+    assert asset.uses == 1 and not asset.automatic_usage_enabled
+    # Finished artwork is sufficient even if its original photo is unavailable.
+    asset.available = False
+    (renderer.media_root / asset.relative_path).unlink()
+    spare = None
+    if spare_photo:
+        spare_path = renderer.media_root / "spare.jpg"
+        Image.new("RGB", (600, 900), "red").save(spare_path)
+        spare = MediaAsset(
+            team_id=team.id,
+            relative_path="spare.jpg",
+            filename="spare.jpg",
+            mime_type="image/jpeg",
+            size=spare_path.stat().st_size,
+            checksum="y" * 64,
+            mtime=datetime.now(timezone.utc),
+        )
+        db.add(spare)
+    feed_source = Path(announcement.feed_path).resolve()
+    story_source = Path(announcement.design_snapshot["story_variants"][0]["path"]).resolve()
+    if not announcement_story:
+        announcement.design_snapshot = {**announcement.design_snapshot, "story_variants": []}
+        story_source = feed_source
+    source_bytes = {path: path.read_bytes() for path in (feed_source, story_source)}
+    game.result_confirmed = True
+    game.home_score, game.away_score = 2, 1
+    db.commit()
+    renderer.provider.calls.clear()
+
+    result = create_post(db, game, team, FixtureTextGenerator(), renderer, "result")
+
+    assert result.status == PostStatus.PENDING
+    assert result.critical_warnings == []
+    assert result.media_asset_id is None
+    assert [call["references"] for call in renderer.provider.calls] == [
+        [feed_source],
+        [story_source],
+    ]
+    assert Path(result.feed_path) != feed_source
+    assert all(path.read_bytes() == content for path, content in source_bytes.items())
+    assert asset.uses == 1 and not asset.automatic_usage_enabled
+    if spare:
+        assert spare.uses == 0 and spare.reserved_game_id is None
+        assert spare.automatic_usage_enabled
+    assert not db.scalar(
+        select(MediaUsageHistory.id).where(MediaUsageHistory.contribution_type == "result")
+    )
+
+
+@pytest.mark.parametrize("invalid_reference", ["missing_file", "other_game", "incomplete"])
+def test_result_without_usable_announcement_still_requires_photo(
+    db, ai_post_setup, invalid_reference
+):
+    game, team, renderer = ai_post_setup
+    announcement = create_post(db, game, team, FixtureTextGenerator(), renderer)
+    if invalid_reference == "missing_file":
+        Path(announcement.feed_path).unlink()
+    elif invalid_reference == "other_game":
+        other = Game(
+            team_id=team.id,
+            external_id="other-game",
+            home_team=game.home_team,
+            away_team=game.away_team,
+            kickoff=game.kickoff,
+            source_url=game.source_url,
+        )
+        db.add(other)
+        db.flush()
+        announcement.game_id = other.id
+    else:
+        announcement.status = PostStatus.INCOMPLETE
+    game.result_confirmed = True
+    game.home_score, game.away_score = 2, 1
+    db.commit()
+    renderer.provider.calls.clear()
+
+    with pytest.raises(ValueError, match="unverbrauchtes Spielerbild"):
+        create_post(db, game, team, FixtureTextGenerator(), renderer, "result")
+
+    assert renderer.provider.calls == []
 
 
 def test_openai_text_generator_uses_resolved_prompt_without_live_request():
